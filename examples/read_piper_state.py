@@ -1,44 +1,46 @@
+import sys
 import time
-from pyAgxArm import create_agx_arm_config, AgxArmFactory, ArmModel, PiperFW
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.piper_api import PiperAPI  # noqa: E402
 
 
 def main():
-    cfg = create_agx_arm_config(
-        robot=ArmModel.PIPER,
-        firmeware_version=PiperFW.DEFAULT,  # Change if your firmware requires V183 or V188
-        interface="socketcan",
-        channel="can0",
-    )
-
-    robot = AgxArmFactory.create_arm(cfg)
-    robot.connect()
+    api = PiperAPI()
+    api.connect()
 
     try:
-        time.sleep(0.5)
-
-        print("Connected OK:", robot.is_ok())
-        print("Receive FPS:", robot.get_fps())
+        print("Connected OK:", api.is_ok())
+        print("Receive FPS:", api.get_fps())
 
         while True:
-            joints = robot.get_joint_angles()    
-            flange = robot.get_flange_pose()
+            joints = api.get_joint_state()
+            flange = api.get_eef_state()
 
             if joints is not None:
-                print("joint angles [rad]:", joints.msg)
+                print("joint angles [rad]:", joints.joints)
                 print("joint timestamp:", joints.timestamp, "hz:", joints.hz)
 
             if flange is not None:
-                x, y, z, roll, pitch, yaw = flange.msg
-                print("flange pose [m, rad]:", flange.msg)
-                print(f"x={x:.4f}, y={y:.4f}, z={z:.4f}, rpy=({roll:.4f}, {pitch:.4f}, {yaw:.4f})")
+                x, y, z, roll, pitch, yaw = flange.pose
+                print("flange pose [m, rad]:", flange.pose)
+                print(
+                    f"x={x:.4f}, y={y:.4f}, z={z:.4f}, "
+                    f"rpy=({roll:.4f}, {pitch:.4f}, {yaw:.4f})"
+                )
                 print("flange timestamp:", flange.timestamp, "hz:", flange.hz)
 
             print()
             time.sleep(0.05)
 
     finally:
-        robot.disconnect()
+        api.disconnect()
 
 
 if __name__ == "__main__":
-    main()                        
+    main()

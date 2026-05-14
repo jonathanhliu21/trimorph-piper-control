@@ -1,16 +1,16 @@
 import argparse
 import csv
+import sys
 import time
 from pathlib import Path
 
-from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-FIRMWARE = {
-    "default": PiperFW.DEFAULT,
-    "v183": PiperFW.V183,
-    "v188": PiperFW.V188,
-}
+from scripts.piper_api import PiperAPI  # noqa: E402
+
 
 FIELDNAMES = [
     "elapsed_s",
@@ -42,8 +42,8 @@ def parse_args():
     parser.add_argument(
         "--rate-hz",
         type=float,
-        default=60.0,
-        help="Sampling rate in Hz. Default: 60",
+        default=100.0,
+        help="Sampling rate in Hz. Default: 100",
     )
     parser.add_argument(
         "--duration",
@@ -69,7 +69,7 @@ def parse_args():
     )
     parser.add_argument(
         "--firmware",
-        choices=sorted(FIRMWARE),
+        choices=("default", "v183", "v188"),
         default="default",
         help="Piper firmware driver selection. Default: default",
     )
@@ -81,29 +81,11 @@ def parse_args():
     return parser.parse_args()
 
 
-def create_robot(args):
-    cfg = create_agx_arm_config(
-        robot=ArmModel.PIPER,
-        firmeware_version=FIRMWARE[args.firmware],
-        interface=args.interface,
-        channel=args.channel,
-    )
-    return AgxArmFactory.create_arm(cfg)
-
-
 def wait_until_ready(seconds):
     if seconds <= 0:
         return
     print(f"Get ready. Recording starts in {seconds:.1f} seconds.")
     time.sleep(seconds)
-
-
-def disable_robot(robot, attempts=5):
-    for _ in range(attempts):
-        if robot.disable():
-            return True
-        time.sleep(0.1)
-    return False
 
 
 def main():
@@ -117,17 +99,20 @@ def main():
     output_path.parent.mkdir(parents=True, exist_ok=True)
     period_s = 1.0 / args.rate_hz
 
-    robot = create_robot(args)
-    robot.connect()
+    api = PiperAPI(
+        firmware=args.firmware,
+        interface=args.interface,
+        channel=args.channel,
+    )
+    api.connect()
 
     try:
-        time.sleep(0.5)
-        print("Connected OK:", robot.is_ok())
-        print("Receive FPS:", robot.get_fps())
+        print("Connected OK:", api.is_ok())
+        print("Receive FPS:", api.get_fps())
 
         if not args.keep_torque_on:
             print("Disabling all joint motors for recording...")
-            if disable_robot(robot):
+            if api.disable():
                 print("Joint motors disabled.")
             else:
                 raise RuntimeError("Failed to disable joint motors before recording")
@@ -152,8 +137,8 @@ def main():
                 if sleep_s > 0:
                     time.sleep(sleep_s)
 
-                joints = robot.get_joint_angles()
-                flange = robot.get_flange_pose()
+                joints = api.get_joint_state()
+                flange = api.get_eef_state()
                 sample_t = time.monotonic()
                 next_sample_t += period_s
 
@@ -165,7 +150,10 @@ def main():
                     "robot_timestamp": f"{joints.timestamp:.6f}",
                 }
                 row.update(
-                    {f"joint_{i + 1}": f"{value:.9f}" for i, value in enumerate(joints.msg)}
+                    {
+                        f"joint_{i + 1}": f"{value:.9f}"
+                        for i, value in enumerate(joints.joints)
+                    }
                 )
 
                 if flange is not None:
@@ -173,7 +161,8 @@ def main():
                         {
                             name: f"{value:.9f}"
                             for name, value in zip(
-                                ["x", "y", "z", "roll", "pitch", "yaw"], flange.msg
+                                ["x", "y", "z", "roll", "pitch", "yaw"],
+                                flange.pose,
                             )
                         }
                     )
@@ -190,7 +179,7 @@ def main():
     except KeyboardInterrupt:
         print("\nRecording stopped.")
     finally:
-        robot.disconnect()
+        api.disconnect()
 
 
 if __name__ == "__main__":

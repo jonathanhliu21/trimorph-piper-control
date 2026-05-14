@@ -41,6 +41,30 @@ The scripts default to:
 
 If your Piper firmware is newer, pass `--firmware v183` or `--firmware v188`.
 
+## Piper API Wrapper
+
+Main scripts can use the repo wrapper instead of calling the full `pyAgxArm`
+API directly:
+
+```python
+from scripts.piper_api import PiperAPI
+
+api = PiperAPI()
+api.connect()
+api.enable()
+
+api.move_joint([0.0, 0.4, -0.4, 0.0, -0.4, 0.0])
+api.move_joint([0.0, 0.4, -0.4, 0.0, -0.4, 0.0], mode="smooth")
+api.move_eef([0.1, 0.0, 0.3, 0.0, 1.5708, 0.0])
+
+api.disconnect()
+```
+
+By default, `PiperAPI()` sends the side-right installation profile when it
+connects. `move_joint(...)` defaults to `mode="exact"`, which uses `move_js()`.
+`mode="smooth"` uses `move_j()`. `move_eef(...)` commands the flange pose with
+`move_p()`.
+
 ## 3. Read Current State
 
 From this repo:
@@ -99,11 +123,12 @@ Replay a specific file:
 python3 examples/replay.py motions/wave.csv
 ```
 
-Replay first moves slowly to the first recorded joint pose, allows 5 seconds for
-that initial move, waits 3 seconds, then plays the recorded timing. It uses the
-recorded joint angles and sends them with `move_j()`. The CSV also contains flange
-pose columns, but those are saved for reference and are not directly commanded
-during replay.
+Replay first moves slowly to the first recorded joint pose with `move_j()`, waits
+briefly for the arm to settle, then plays the recorded timing with `move_js()`
+by default. Use `--control-mode ik` to command the recorded flange pose with
+`move_p()`, or use `--control-mode cpv` / `--control-mode move-j` to compare
+against the other replay APIs. IK replay requires complete `x`, `y`, `z`,
+`roll`, `pitch`, and `yaw` columns in the CSV.
 
 Useful options:
 
@@ -112,8 +137,41 @@ python3 examples/replay.py --speed-percent 50
 python3 examples/replay.py --preposition-speed-percent 15
 python3 examples/replay.py --preposition-seconds 8
 python3 examples/replay.py --settle-seconds 5
+python3 examples/replay.py --control-mode ik
+python3 examples/replay.py --control-mode cpv
 python3 examples/replay.py --firmware v188 --channel can0
 python3 examples/replay.py --no-enable
+```
+
+## Replay With Keyboard Takeover
+
+For DAgger-style collection, run:
+
+```bash
+python3 examples/replay_with_takeover.py recorded_motion.csv
+```
+
+The script replays by time, not by pause/resume index. If takeover starts at
+replay time 6s and lasts 1s, replay resumes at 7s in the original trajectory.
+
+Default behavior:
+
+- moves slowly to the first recorded pose before starting replay
+- records one timestamped dataset under `scripts/recordings/`
+- records replay rows and takeover rows in the same CSV
+- enters takeover when you press `Space` in the terminal
+- disables all joint motors for takeover, waits 1 second, then records takeover rows
+- exits takeover when you press `Space` again and resumes replay if the
+  trajectory has not already ended
+
+Useful options:
+
+```bash
+python3 examples/replay_with_takeover.py --takeover-only
+python3 examples/replay_with_takeover.py --output scripts/recordings/test.csv
+python3 examples/replay_with_takeover.py --takeover-delay 0
+python3 examples/replay_with_takeover.py --speed-percent 20
+python3 examples/replay_with_takeover.py --keyboard-toggle-debounce-seconds 0.5
 ```
 
 ## Safety Notes
