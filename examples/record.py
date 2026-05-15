@@ -29,6 +29,38 @@ FIELDNAMES = [
     "yaw",
 ]
 
+TEACHER_MODE_ACTIVE_VALUES = {
+    "1",
+    "true",
+    "teach",
+    "teacher",
+    "teaching",
+    "start_recording",
+    "start recording",
+    "start_recording(0x1)",
+    "0x1",
+    "enabled",
+    "on",
+}
+TEACHER_MODE_INACTIVE_VALUES = {
+    "",
+    "0",
+    "false",
+    "none",
+    "normal",
+    "disabled",
+    "off",
+    "stop_recording",
+    "stop recording",
+    "stop_recording(0x2)",
+    "0x2",
+    "not teach",
+    "not_teacher",
+    "not teacher",
+    "no_teach",
+    "no teach",
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -73,12 +105,45 @@ def parse_args():
         default="default",
         help="Piper firmware driver selection. Default: default",
     )
-    parser.add_argument(
-        "--keep-torque-on",
-        action="store_true",
-        help="Do not disable joint motors before recording.",
-    )
     return parser.parse_args()
+
+
+def is_teacher_mode_status(value):
+    normalized = str(value).strip().lower()
+    if normalized in TEACHER_MODE_ACTIVE_VALUES:
+        return True
+    if normalized in TEACHER_MODE_INACTIVE_VALUES:
+        return False
+    if "start_recording" in normalized or "start recording" in normalized:
+        return True
+    if "stop_recording" in normalized or "stop recording" in normalized:
+        return False
+    return "teach" in normalized
+
+
+def get_teacher_mode(api):
+    status = api.get_state().get("teach_status")
+    return is_teacher_mode_status(status), status
+
+
+def wait_for_teacher_mode(api, *, poll_s=0.25):
+    print("Checking teacher mode before recording...")
+    next_notice_t = 0.0
+    while True:
+        is_teacher_mode, status = get_teacher_mode(api)
+        if is_teacher_mode:
+            print("Teacher mode is active.")
+            return
+
+        now = time.monotonic()
+        if now >= next_notice_t:
+            print(
+                "Teacher mode is not active. "
+                f"Current teach_status={status!r}. "
+                "Put the robot in teacher mode to start recording."
+            )
+            next_notice_t = now + 2.0
+        time.sleep(poll_s)
 
 
 def wait_until_ready(seconds):
@@ -110,13 +175,7 @@ def main():
         print("Connected OK:", api.is_ok())
         print("Receive FPS:", api.get_fps())
 
-        if not args.keep_torque_on:
-            print("Disabling all joint motors for recording...")
-            if api.disable():
-                print("Joint motors disabled.")
-            else:
-                raise RuntimeError("Failed to disable joint motors before recording")
-
+        wait_for_teacher_mode(api)
         wait_until_ready(args.ready_seconds)
 
         rows_written = 0

@@ -14,6 +14,37 @@ from scripts.piper_api import PiperAPI  # noqa: E402
 
 JOINT_FIELDS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 FLANGE_FIELDS = ["x", "y", "z", "roll", "pitch", "yaw"]
+TEACHER_MODE_ACTIVE_VALUES = {
+    "1",
+    "true",
+    "teach",
+    "teacher",
+    "teaching",
+    "start_recording",
+    "start recording",
+    "start_recording(0x1)",
+    "0x1",
+    "enabled",
+    "on",
+}
+TEACHER_MODE_INACTIVE_VALUES = {
+    "",
+    "0",
+    "false",
+    "none",
+    "normal",
+    "disabled",
+    "off",
+    "stop_recording",
+    "stop recording",
+    "stop_recording(0x2)",
+    "0x2",
+    "not teach",
+    "not_teacher",
+    "not teacher",
+    "no_teach",
+    "no teach",
+}
 
 
 def parse_args():
@@ -67,6 +98,12 @@ def parse_args():
         help="Seconds to allow for the slow move to the first recorded pose. Default: 3",
     )
     parser.add_argument(
+        "--preposition-command-hz",
+        type=float,
+        default=10.0,
+        help="Rate used to resend the first recorded pose during prepositioning. Default: 10",
+    )
+    parser.add_argument(
         "--settle-seconds",
         type=float,
         default=2.0,
@@ -109,6 +146,57 @@ def read_motion(csv_path):
     return rows
 
 
+def is_teacher_mode_status(value):
+    normalized = str(value).strip().lower()
+    if normalized in TEACHER_MODE_ACTIVE_VALUES:
+        return True
+    if normalized in TEACHER_MODE_INACTIVE_VALUES:
+        return False
+    if "start_recording" in normalized or "start recording" in normalized:
+        return True
+    if "stop_recording" in normalized or "stop recording" in normalized:
+        return False
+    return "teach" in normalized
+
+
+def get_teacher_mode(api):
+    status = api.get_state().get("teach_status")
+    return is_teacher_mode_status(status), status
+
+
+def wait_for_not_teacher_mode(api, *, poll_s=0.25, stable_s=0.5):
+    print("Checking teacher mode before replay...")
+    next_notice_t = 0.0
+    inactive_since_t = None
+    while True:
+        is_teacher_mode, status = get_teacher_mode(api)
+        now = time.monotonic()
+        if not is_teacher_mode:
+            if inactive_since_t is None:
+                inactive_since_t = now
+            if now - inactive_since_t >= stable_s:
+                print("Teacher mode is inactive.")
+                return
+        else:
+            inactive_since_t = None
+
+        if now >= next_notice_t:
+            if is_teacher_mode:
+                print(
+                    "Teacher mode is active. "
+                    f"Current teach_status={status!r}. "
+                    "Leave teacher mode to start replay."
+                )
+            else:
+                print(
+                    "Teacher mode is inactive. "
+                    f"Current teach_status={status!r}. "
+                    f"Waiting {stable_s:.1f} seconds for it to stay inactive."
+                )
+            next_notice_t = now + 2.0
+        time.sleep(poll_s)
+
+
 def wait_until_ready(seconds):
     if seconds <= 0:
         return
@@ -141,8 +229,18 @@ def move_to_initial_pose(api, target_joints, args):
     api.move_joint(target_joints, mode="smooth")
 
     if args.preposition_seconds > 0:
-        print(f"Allowing {args.preposition_seconds:.1f} seconds for initial positioning.")
-        time.sleep(args.preposition_seconds)
+        print(
+            f"Prepositioning for {args.preposition_seconds:.1f} seconds "
+            f"at {args.preposition_speed_percent}% speed."
+        )
+        end_t = time.monotonic() + args.preposition_seconds
+        command_period_s = 1.0 / args.preposition_command_hz
+        while True:
+            sleep_s = min(command_period_s, end_t - time.monotonic())
+            if sleep_s <= 0:
+                break
+            time.sleep(sleep_s)
+            api.move_joint(target_joints, mode="smooth")
 
     if args.settle_seconds > 0:
         print(f"Settling for {args.settle_seconds:.1f} seconds.")
@@ -204,6 +302,8 @@ def main():
         raise ValueError("--preposition-speed-percent must be between 0 and 100")
     if args.preposition_seconds < 0:
         raise ValueError("--preposition-seconds must be 0 or greater")
+    if args.preposition_command_hz <= 0:
+        raise ValueError("--preposition-command-hz must be greater than 0")
     if args.settle_seconds < 0:
         raise ValueError("--settle-seconds must be 0 or greater")
     csv_path = Path(args.csv_path).expanduser()
@@ -223,13 +323,15 @@ def main():
         print("Connected OK:", api.is_ok())
         print("Receive FPS:", api.get_fps())
 
-        api.set_speed_percent(args.speed_percent)
+        wait_for_not_teacher_mode(api)
+        wait_until_ready(args.ready_seconds)
+
+        api.set_speed_percent(args.preposition_speed_percent)
         if not args.no_enable:
             print("Enabling robot...")
             if not api.enable():
                 raise RuntimeError("Timed out while enabling robot")
 
-        wait_until_ready(args.ready_seconds)
         move_to_initial_pose(api, rows[0][1], args)
 
         api.set_speed_percent(args.speed_percent)
