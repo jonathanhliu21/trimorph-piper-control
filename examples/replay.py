@@ -14,6 +14,15 @@ from scripts.piper_api import PiperAPI  # noqa: E402
 
 JOINT_FIELDS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 FLANGE_FIELDS = ["x", "y", "z", "roll", "pitch", "yaw"]
+FIRMWARE_STATUS_FIELDS = [
+    "ctrl_mode",
+    "arm_status",
+    "mode_feedback",
+    "teach_status",
+    "motion_status",
+    "trajectory_num",
+    "err_code",
+]
 TEACHER_MODE_ACTIVE_VALUES = {
     "1",
     "true",
@@ -120,6 +129,15 @@ def parse_args():
         default="move-js",
         help="Control API used during replay. Default: move-js",
     )
+    parser.add_argument(
+        "--status-log-interval",
+        type=float,
+        default=0.5,
+        help=(
+            "Seconds between firmware status checks during replay. "
+            "Use 0 to disable. Default: 0.5"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -204,6 +222,52 @@ def wait_until_ready(seconds):
     time.sleep(seconds)
 
 
+def collect_firmware_status(api):
+    state = api.get_state()
+    return {
+        field: "" if state.get(field) is None else str(state.get(field))
+        for field in FIRMWARE_STATUS_FIELDS
+    }
+
+
+def format_firmware_status(status, previous_status=None):
+    parts = []
+    for field in FIRMWARE_STATUS_FIELDS:
+        value = status[field]
+        if previous_status is not None and value == previous_status.get(field):
+            continue
+        parts.append(f"{field}={value!r}")
+    return ", ".join(parts)
+
+
+def maybe_log_firmware_status(
+    api,
+    previous_status,
+    next_check_t,
+    *,
+    interval_s,
+    label,
+    force=False,
+):
+    if interval_s <= 0 and not force:
+        return previous_status, next_check_t
+
+    now = time.monotonic()
+    if not force and now < next_check_t:
+        return previous_status, next_check_t
+
+    status = collect_firmware_status(api)
+    if force or status != previous_status:
+        formatted_status = format_firmware_status(
+            status,
+            None if force else previous_status,
+        )
+        if formatted_status:
+            print(f"{label} firmware status: {formatted_status}")
+
+    return status, now + interval_s
+
+
 def validate_motion_for_control_mode(rows, control_mode):
     if control_mode != "ik":
         return
@@ -223,10 +287,18 @@ def validate_motion_for_control_mode(rows, control_mode):
         )
 
 
-def move_to_initial_pose(api, target_joints, args):
+def move_to_initial_pose(api, target_joints, args, status_log):
     print("Moving slowly to the first recorded pose...")
     api.set_speed_percent(args.preposition_speed_percent)
     api.move_joint(target_joints, mode="smooth")
+    status_log["status"], status_log["next_check_t"] = maybe_log_firmware_status(
+        api,
+        status_log["status"],
+        status_log["next_check_t"],
+        interval_s=args.status_log_interval,
+        label="Preposition",
+        force=True,
+    )
 
     if args.preposition_seconds > 0:
         print(
@@ -241,6 +313,15 @@ def move_to_initial_pose(api, target_joints, args):
                 break
             time.sleep(sleep_s)
             api.move_joint(target_joints, mode="smooth")
+            status_log["status"], status_log["next_check_t"] = (
+                maybe_log_firmware_status(
+                    api,
+                    status_log["status"],
+                    status_log["next_check_t"],
+                    interval_s=args.status_log_interval,
+                    label="Preposition",
+                )
+            )
 
     if args.settle_seconds > 0:
         print(f"Settling for {args.settle_seconds:.1f} seconds.")
@@ -262,16 +343,31 @@ def command_replay_target(api, target_joints, target_flange_pose, control_mode):
         raise ValueError(f"Unsupported control mode: {control_mode}")
 
 
-def run_replay(api, rows, csv_path, args):
+def run_replay(api, rows, csv_path, args, status_log):
     first_elapsed_s = rows[0][0]
     replay_start_t = time.monotonic()
     sample_index = 0
 
     print(f"Replaying {len(rows)} samples from {csv_path} with {args.control_mode}")
+    status_log["status"], status_log["next_check_t"] = maybe_log_firmware_status(
+        api,
+        status_log["status"],
+        status_log["next_check_t"],
+        interval_s=args.status_log_interval,
+        label="Replay",
+        force=True,
+    )
 
     while sample_index < len(rows):
         now = time.monotonic()
         replay_elapsed_s = first_elapsed_s + (now - replay_start_t)
+        status_log["status"], status_log["next_check_t"] = maybe_log_firmware_status(
+            api,
+            status_log["status"],
+            status_log["next_check_t"],
+            interval_s=args.status_log_interval,
+            label=f"Replay t={replay_elapsed_s:.3f}s",
+        )
 
         while sample_index < len(rows) and rows[sample_index][0] <= replay_elapsed_s:
             target_joints = rows[sample_index][1]
@@ -306,6 +402,8 @@ def main():
         raise ValueError("--preposition-command-hz must be greater than 0")
     if args.settle_seconds < 0:
         raise ValueError("--settle-seconds must be 0 or greater")
+    if args.status_log_interval < 0:
+        raise ValueError("--status-log-interval must be 0 or greater")
     csv_path = Path(args.csv_path).expanduser()
     rows = read_motion(csv_path)
     if not rows:
@@ -332,10 +430,11 @@ def main():
             if not api.enable():
                 raise RuntimeError("Timed out while enabling robot")
 
-        move_to_initial_pose(api, rows[0][1], args)
+        status_log = {"status": None, "next_check_t": 0.0}
+        move_to_initial_pose(api, rows[0][1], args, status_log)
 
         api.set_speed_percent(args.speed_percent)
-        run_replay(api, rows, csv_path, args)
+        run_replay(api, rows, csv_path, args, status_log)
 
         print("Replay complete.")
 
