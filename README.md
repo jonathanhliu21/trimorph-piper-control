@@ -1,7 +1,7 @@
 # Midas Piper Control
 
-Small helper scripts for reading, recording, and replaying AgileX Piper arm motion with
-`pyAgxArm`.
+Small helper scripts for reading, recording, and replaying AgileX Piper arm
+motion with `pyAgxArm`, plus Midas hand recording and replay examples.
 
 ## 1. Install Python Dependencies
 
@@ -31,6 +31,19 @@ If `can0` is not already up, start it at the Piper default bitrate:
 
 ```bash
 sudo ip link set can0 up type can bitrate 1000000
+```
+
+For Piper recording, `examples/piper/setup_record.sh` brings up CAN and grants
+the current user access to the PCsensor foot pedal input device:
+
+```bash
+examples/piper/setup_record.sh
+```
+
+To set up and immediately start the recorder:
+
+```bash
+examples/piper/setup_record.sh --start-record
 ```
 
 The scripts default to:
@@ -70,7 +83,7 @@ connects. `move_joint(...)` defaults to `mode="exact"`, which uses `move_js()`.
 From this repo:
 
 ```bash
-python3 examples/read_piper_state.py
+python3 examples/piper/read_piper_state.py
 ```
 
 This prints joint angles in radians and flange pose as:
@@ -86,7 +99,7 @@ Position is in meters. Orientation is in radians.
 Record to the default file, `recorded_motion.csv`:
 
 ```bash
-python3 examples/record.py
+python3 examples/piper/record.py
 ```
 
 The recorder disables all joint motors by default, then waits 3 seconds before
@@ -100,27 +113,52 @@ starting so you can get ready. It records:
 Useful options:
 
 ```bash
-python3 examples/record.py --duration 10
-python3 examples/record.py --rate-hz 50
-python3 examples/record.py --output motions/wave.csv
-python3 examples/record.py --firmware v188 --channel can0
-python3 examples/record.py --keep-torque-on
+python3 examples/piper/record.py --duration 10
+python3 examples/piper/record.py --rate-hz 50
+python3 examples/piper/record.py --output motions/wave.csv
+python3 examples/piper/record.py --firmware v188 --channel can0
+python3 examples/piper/record.py --keep-torque-on
 ```
 
 Use `Ctrl+C` to stop an open-ended recording.
+
+To use a USB foot pedal to start and stop recording, first find its Linux input
+device:
+
+```bash
+python3 examples/piper/record.py --list-input-devices
+```
+
+Then pass the matching event device:
+
+```bash
+python3 examples/piper/record.py --foot-pedal-device /dev/input/event7
+```
+
+For the PCsensor pedal, prefer the stable symlink:
+
+```bash
+python3 examples/piper/record.py --foot-pedal-device /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
+```
+
+With the pedal enabled, the script still waits for teacher mode first. Press the
+pedal once to start recording, then press it again to stop. If the pedal device
+name contains `foot` or `pedal`, `--foot-pedal` can auto-detect it. If opening
+the device fails with a permission error, run from a user that can read
+`/dev/input/event*` devices.
 
 ## 5. Replay Motion
 
 Replay the default file, `recorded_motion.csv`:
 
 ```bash
-python3 examples/replay.py
+python3 examples/piper/replay.py
 ```
 
 Replay a specific file:
 
 ```bash
-python3 examples/replay.py motions/wave.csv
+python3 examples/piper/replay.py motions/wave.csv
 ```
 
 Replay first moves slowly to the first recorded joint pose with `move_j()`, waits
@@ -133,22 +171,22 @@ against the other replay APIs. IK replay requires complete `x`, `y`, `z`,
 Useful options:
 
 ```bash
-python3 examples/replay.py --speed-percent 50
-python3 examples/replay.py --preposition-speed-percent 15
-python3 examples/replay.py --preposition-seconds 8
-python3 examples/replay.py --settle-seconds 5
-python3 examples/replay.py --control-mode ik
-python3 examples/replay.py --control-mode cpv
-python3 examples/replay.py --firmware v188 --channel can0
-python3 examples/replay.py --no-enable
+python3 examples/piper/replay.py --speed-percent 50
+python3 examples/piper/replay.py --preposition-speed-percent 15
+python3 examples/piper/replay.py --preposition-seconds 8
+python3 examples/piper/replay.py --settle-seconds 5
+python3 examples/piper/replay.py --control-mode ik
+python3 examples/piper/replay.py --control-mode cpv
+python3 examples/piper/replay.py --firmware v188 --channel can0
+python3 examples/piper/replay.py --no-enable
 ```
 
-## Replay With Keyboard Takeover
+## Replay With Teacher-Mode Takeover
 
 For DAgger-style collection, run:
 
 ```bash
-python3 examples/replay_with_takeover.py recorded_motion.csv
+python3 examples/piper/replay_with_takeover.py recorded_motion.csv
 ```
 
 The script replays by time, not by pause/resume index. If takeover starts at
@@ -159,19 +197,56 @@ Default behavior:
 - moves slowly to the first recorded pose before starting replay
 - records one timestamped dataset under `scripts/recordings/`
 - records replay rows and takeover rows in the same CSV
-- enters takeover when you press `Space` in the terminal
-- disables all joint motors for takeover, waits 1 second, then records takeover rows
-- exits takeover when you press `Space` again and resumes replay if the
+- enters takeover when the robot's teacher-mode button sets `teach_status` active
+- waits 1 second after teacher mode starts, then records takeover rows
+- exits takeover when teacher mode becomes inactive and resumes replay if the
   trajectory has not already ended
+- can use an optional foot pedal as a stop button for replay or future inference
 
 Useful options:
 
 ```bash
-python3 examples/replay_with_takeover.py --takeover-only
-python3 examples/replay_with_takeover.py --output scripts/recordings/test.csv
-python3 examples/replay_with_takeover.py --takeover-delay 0
-python3 examples/replay_with_takeover.py --speed-percent 20
-python3 examples/replay_with_takeover.py --keyboard-toggle-debounce-seconds 0.5
+python3 examples/piper/replay_with_takeover.py --takeover-only
+python3 examples/piper/replay_with_takeover.py --output scripts/recordings/test.csv
+python3 examples/piper/replay_with_takeover.py --takeover-delay 0
+python3 examples/piper/replay_with_takeover.py --speed-percent 20
+python3 examples/piper/replay_with_takeover.py --foot-pedal-device /dev/input/event7
+```
+
+## Midas Hand Examples
+
+The hand examples live under `examples/midas_hand/` and use the installed
+`midas_hand_api` package. They load calibration from `~/.midas_hand/config.yaml`
+by default, unless `--config` is passed.
+
+Record motor positions, velocities, and currents:
+
+```bash
+python3 examples/midas_hand/record.py --output hand_recording.csv
+```
+
+Replay a recording:
+
+```bash
+python3 examples/midas_hand/replay.py hand_recording.csv --preposition
+```
+
+Move a single finger or thumb by editing the constants at the top of
+`examples/midas_hand/move_finger.py`:
+
+```python
+FINGER = "index"
+SEQUENCE = [
+    [0.0, 0.0, 0.0],
+    [0.1, 0.2, 0.3],
+]
+WAIT_BETWEEN_MOVEMENTS_S = 0.5
+```
+
+Fingers use 3 values per row. The thumb uses 4 values per row. Then run:
+
+```bash
+python3 examples/midas_hand/move_finger.py
 ```
 
 ## Safety Notes
@@ -179,4 +254,5 @@ python3 examples/replay_with_takeover.py --keyboard-toggle-debounce-seconds 0.5
 - Start with low `--speed-percent` values when testing replay.
 - Keep the arm clear of people, cables, and hard stops.
 - Make sure the selected `--firmware` matches the arm before sending motion commands.
-- `record.py` sends a motor-disable command by default. `replay.py` sends motion commands.
+- `examples/piper/record.py` sends a motor-disable command by default.
+- Piper replay and Midas hand replay scripts send motion commands.

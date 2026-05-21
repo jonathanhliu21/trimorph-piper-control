@@ -5,11 +5,15 @@ import time
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.piper_api import PiperAPI  # noqa: E402
+from scripts.piper_api.foot_pedal import (  # noqa: E402
+    FootPedalTrigger,
+    format_input_devices,
+    list_input_devices,
+)
 
 
 FIELDNAMES = [
@@ -105,6 +109,36 @@ def parse_args():
         default="default",
         help="Piper firmware driver selection. Default: default",
     )
+    parser.add_argument(
+        "--foot-pedal",
+        action="store_true",
+        help=(
+            "Use a Linux input foot pedal to start and stop recording. "
+            "Auto-detects devices with foot/pedal in the name."
+        ),
+    )
+    parser.add_argument(
+        "--foot-pedal-device",
+        default=None,
+        help="Foot pedal event device, for example /dev/input/event7.",
+    )
+    parser.add_argument(
+        "--foot-pedal-key-code",
+        type=int,
+        default=None,
+        help="Only accept this Linux input key code from the pedal. Default: any key.",
+    )
+    parser.add_argument(
+        "--foot-pedal-debounce-seconds",
+        type=float,
+        default=0.5,
+        help="Ignore repeated pedal presses for this long. Default: 0.5",
+    )
+    parser.add_argument(
+        "--list-input-devices",
+        action="store_true",
+        help="List /dev/input event devices and exit.",
+    )
     return parser.parse_args()
 
 
@@ -153,12 +187,34 @@ def wait_until_ready(seconds):
     time.sleep(seconds)
 
 
+def should_use_foot_pedal(args):
+    return args.foot_pedal or args.foot_pedal_device is not None
+
+
+def wait_for_foot_pedal(pedal, message, *, poll_s=0.01):
+    print(message)
+    while True:
+        events = pedal.poll()
+        if events:
+            print(events[-1].message)
+            return
+        time.sleep(poll_s)
+
+
 def main():
     args = parse_args()
+    if args.list_input_devices:
+        print(format_input_devices(list_input_devices()))
+        return
+
     if args.rate_hz <= 0:
         raise ValueError("--rate-hz must be greater than 0")
     if args.duration < 0:
         raise ValueError("--duration must be 0 or greater")
+    if args.foot_pedal_debounce_seconds < 0:
+        raise ValueError("--foot-pedal-debounce-seconds must be 0 or greater")
+
+    from scripts.piper_api.piper_api import PiperAPI
 
     output_path = Path(args.output).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,11 +227,21 @@ def main():
     )
     api.connect()
 
+    pedal = None
     try:
         print("Connected OK:", api.is_ok())
         print("Receive FPS:", api.get_fps())
 
         wait_for_teacher_mode(api)
+        if should_use_foot_pedal(args):
+            pedal = FootPedalTrigger(
+                args.foot_pedal_device,
+                key_code=args.foot_pedal_key_code,
+                debounce_s=args.foot_pedal_debounce_seconds,
+            )
+            pedal.start()
+            print(f"Foot pedal input: {pedal.active_device}")
+            wait_for_foot_pedal(pedal, "Press the foot pedal to start recording.")
         wait_until_ready(args.ready_seconds)
 
         rows_written = 0
@@ -187,9 +253,14 @@ def main():
             writer.writeheader()
 
             print(f"Recording to {output_path}. Press Ctrl+C to stop.")
+            if pedal is not None:
+                print("Press the foot pedal again to stop recording.")
             while True:
                 now = time.monotonic()
                 if args.duration and now - start_t >= args.duration:
+                    break
+                if pedal is not None and pedal.poll():
+                    print("Foot pedal pressed; stopping recording.")
                     break
 
                 sleep_s = next_sample_t - now
@@ -238,6 +309,8 @@ def main():
     except KeyboardInterrupt:
         print("\nRecording stopped.")
     finally:
+        if pedal is not None:
+            pedal.stop()
         api.disconnect()
 
 

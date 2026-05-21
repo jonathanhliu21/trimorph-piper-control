@@ -4,22 +4,20 @@ import time
 from pathlib import Path
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.piper_api import (  # noqa: E402
-    DaggerCsvRecorder,
-    KeyboardTakeoverController,
-    PiperAPI,
-    read_motion_csv,
-    timestamped_recording_path,
+from scripts.piper_api.foot_pedal import (  # noqa: E402
+    FootPedalTrigger,
+    format_input_devices,
+    list_input_devices,
 )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Replay a Piper motion CSV with keyboard takeover recording."
+        description="Replay a Piper motion CSV with teacher-mode takeover recording."
     )
     parser.add_argument(
         "csv_path",
@@ -96,13 +94,34 @@ def parse_args():
         help="Seconds to wait before moving to the first pose. Default: 0",
     )
     parser.add_argument(
-        "--keyboard-toggle-debounce-seconds",
-        type=float,
-        default=1.0,
+        "--foot-pedal",
+        action="store_true",
         help=(
-            "Ignore repeated spacebar events for this long after a toggle. "
-            "Default: 1"
+            "Use a Linux input foot pedal as an optional stop button for replay. "
+            "Auto-detects devices with foot/pedal in the name."
         ),
+    )
+    parser.add_argument(
+        "--foot-pedal-device",
+        default=None,
+        help="Foot pedal event device used to stop replay, for example /dev/input/event7.",
+    )
+    parser.add_argument(
+        "--foot-pedal-key-code",
+        type=int,
+        default=None,
+        help="Only accept this Linux input key code from the pedal. Default: any key.",
+    )
+    parser.add_argument(
+        "--foot-pedal-debounce-seconds",
+        type=float,
+        default=0.5,
+        help="Ignore repeated pedal presses for this long. Default: 0.5",
+    )
+    parser.add_argument(
+        "--list-input-devices",
+        action="store_true",
+        help="List /dev/input event devices and exit.",
     )
     parser.add_argument(
         "--no-enable",
@@ -127,8 +146,8 @@ def validate_args(args):
         raise ValueError("--settle-seconds must be 0 or greater")
     if args.ready_seconds < 0:
         raise ValueError("--ready-seconds must be 0 or greater")
-    if args.keyboard_toggle_debounce_seconds < 0:
-        raise ValueError("--keyboard-toggle-debounce-seconds must be 0 or greater")
+    if args.foot_pedal_debounce_seconds < 0:
+        raise ValueError("--foot-pedal-debounce-seconds must be 0 or greater")
 
 
 def wait_with_message(message, seconds):
@@ -136,6 +155,10 @@ def wait_with_message(message, seconds):
         return
     print(message.format(seconds=seconds))
     time.sleep(seconds)
+
+
+def uses_foot_pedal(args):
+    return args.foot_pedal or args.foot_pedal_device is not None
 
 
 def move_to_initial_pose(api, first_joints, args):
@@ -167,7 +190,19 @@ def newest_due_sample(samples, start_index, replay_elapsed_s):
 
 def main():
     args = parse_args()
+    if args.list_input_devices:
+        print(format_input_devices(list_input_devices()))
+        return
+
     validate_args(args)
+
+    from scripts.piper_api.motion_io import read_motion_csv
+    from scripts.piper_api.motion_recorder import DaggerCsvRecorder
+    from scripts.piper_api.piper_api import PiperAPI
+    from scripts.piper_api.robot_helpers import timestamped_recording_path
+    from scripts.piper_api.teacher_mode_takeover_controller import (
+        TeacherModeTakeoverController,
+    )
 
     samples = read_motion_csv(args.csv_path)
     if not samples:
@@ -186,11 +221,17 @@ def main():
     )
     api.connect()
 
-    takeover = KeyboardTakeoverController(
+    takeover = TeacherModeTakeoverController(
         api,
         takeover_delay_s=args.takeover_delay,
-        toggle_debounce_s=args.keyboard_toggle_debounce_seconds,
     )
+    stop_pedal = None
+    if uses_foot_pedal(args):
+        stop_pedal = FootPedalTrigger(
+            args.foot_pedal_device,
+            key_code=args.foot_pedal_key_code,
+            debounce_s=args.foot_pedal_debounce_seconds,
+        )
 
     try:
         print("Connected OK:", api.is_ok())
@@ -208,8 +249,13 @@ def main():
 
         print(f"Writing dataset to {output_path}")
         print(
-            "Press SPACE to enter takeover; press SPACE again to resume replay."
+            "Use the robot teacher-mode button to enter takeover; "
+            "leave teacher mode to resume replay."
         )
+        if stop_pedal is not None:
+            print(
+                "Press the foot pedal to stop replay/inference without toggling takeover."
+            )
 
         replay_start_t = time.monotonic()
         first_elapsed_s = samples[0].elapsed_s
@@ -224,14 +270,27 @@ def main():
 
         with DaggerCsvRecorder(output_path) as recorder:
             takeover.start()
+            if stop_pedal is not None:
+                stop_pedal.start()
+                print(f"Foot pedal stop input: {stop_pedal.active_device}")
             while True:
                 now = time.monotonic()
                 replay_elapsed_s = first_elapsed_s + (now - replay_start_t)
 
+                if stop_pedal is not None and stop_pedal.poll():
+                    print("Foot pedal pressed; stopping replay.")
+                    recorder.write(
+                        robot=api,
+                        source="event",
+                        replay_elapsed_s=replay_elapsed_s,
+                        event="replay_stop",
+                    )
+                    return
+
                 for event in takeover.poll():
                     if event.kind == "takeover_start":
                         print(
-                            f"Keyboard takeover at replay t={replay_elapsed_s:.3f}s"
+                            f"Takeover started at replay t={replay_elapsed_s:.3f}s"
                         )
                         print(event.message)
                         mode = "takeover"
@@ -243,7 +302,7 @@ def main():
                         )
                     elif event.kind == "takeover_stop":
                         print(
-                            f"Keyboard exit takeover at replay t={replay_elapsed_s:.3f}s"
+                            f"Takeover stopped at replay t={replay_elapsed_s:.3f}s"
                         )
                         print(event.message)
                         recorder.write(
@@ -311,6 +370,8 @@ def main():
         print("\nInterrupted. Stopping script without disabling motors.")
     finally:
         takeover.stop()
+        if stop_pedal is not None:
+            stop_pedal.stop()
         api.disconnect()
 
 
