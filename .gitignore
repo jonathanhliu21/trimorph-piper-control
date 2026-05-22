@@ -2,3 +2,4 @@
 recorded_motion.csv
 scripts/recordings/*.csv
 __pycache__
+data_midas*/
