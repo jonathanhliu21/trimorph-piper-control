@@ -1,13 +1,6 @@
 import argparse
-import glob
 import sys
 import time
-from pathlib import Path
-
-
-FORMAT_NAMES = ("auto", "bgr8", "rgb8", "yuyv", "mjpeg")
-FORMAT_PREFERENCE = ("bgr8", "rgb8", "yuyv", "mjpeg")
-V4L2_FORMATS = ("auto", "mjpg", "yuyv")
 
 
 def parse_args():
@@ -15,57 +8,28 @@ def parse_args():
         description="Show a flipped Intel RealSense color camera view."
     )
     parser.add_argument(
-        "--backend",
-        choices=("auto", "v4l2", "realsense"),
-        default="auto",
-        help="Camera backend. auto tries the Cheese-style V4L2 path first. Default: auto",
-    )
-    parser.add_argument(
-        "--camera-device",
-        default=None,
-        help="V4L2 camera device, for example /dev/video2. Default: auto-scan.",
-    )
-    parser.add_argument(
-        "--camera-index",
-        type=int,
-        default=None,
-        help="OpenCV camera index to try before auto-scan, for example 0.",
-    )
-    parser.add_argument(
-        "--v4l2-format",
-        choices=V4L2_FORMATS,
-        default="mjpg",
-        help="Requested V4L2 pixel format. Default: mjpg",
-    )
-    parser.add_argument(
         "--width",
         type=int,
         default=640,
-        help="Color stream width. Use 0 for auto. Default: 640",
+        help="RGB stream width. Default: 640",
     )
     parser.add_argument(
         "--height",
         type=int,
         default=480,
-        help="Color stream height. Use 0 for auto. Default: 480",
+        help="RGB stream height. Default: 480",
     )
     parser.add_argument(
         "--fps",
         type=int,
         default=30,
-        help="Color stream FPS. Use 0 for auto. Default: 30",
-    )
-    parser.add_argument(
-        "--format",
-        choices=FORMAT_NAMES,
-        default="auto",
-        help="Color stream format. Default: auto",
+        help="RGB stream FPS. Default: 30",
     )
     parser.add_argument(
         "--flip",
         choices=("horizontal", "vertical", "both", "none"),
         default="both",
-        help="Display flip direction. Default: horizontal",
+        help="Display flip direction. Default: both",
     )
     parser.add_argument(
         "--serial",
@@ -92,12 +56,12 @@ def parse_args():
     parser.add_argument(
         "--list-devices",
         action="store_true",
-        help="List camera devices and exit.",
+        help="List RealSense devices and exit.",
     )
     parser.add_argument(
         "--list-profiles",
         action="store_true",
-        help="List color stream profiles for the selected RealSense camera and exit.",
+        help="List RGB color stream profiles for the selected RealSense camera and exit.",
     )
     return parser.parse_args()
 
@@ -126,7 +90,7 @@ def import_realsense_dependency():
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "Missing Intel RealSense Python bindings. Install librealsense/pyrealsense2 "
-            "for your Python environment, or use --backend v4l2."
+            "for your Python environment."
         ) from exc
     return rs
 
@@ -141,20 +105,6 @@ def flip_frame(cv2, frame, flip_mode):
     return frame
 
 
-def rs_format(rs, format_name):
-    return getattr(rs.format, format_name)
-
-
-def format_name(rs, stream_profile):
-    video_profile = stream_profile.as_video_stream_profile()
-    for name in FORMAT_NAMES:
-        if name == "auto":
-            continue
-        if video_profile.format() == rs_format(rs, name):
-            return name
-    return str(video_profile.format())
-
-
 def color_profiles(rs, device):
     profiles = []
     for sensor in device.query_sensors():
@@ -162,19 +112,19 @@ def color_profiles(rs, device):
             if profile.stream_type() != rs.stream.color:
                 continue
             video_profile = profile.as_video_stream_profile()
+            if video_profile.format() != rs.format.rgb8:
+                continue
             profiles.append(
                 {
                     "width": video_profile.width(),
                     "height": video_profile.height(),
                     "fps": video_profile.fps(),
-                    "format": format_name(rs, profile),
                 }
             )
     profiles.sort(
         key=lambda item: (
             item["width"] * item["height"],
             item["fps"],
-            item["format"],
         )
     )
     return profiles
@@ -188,7 +138,7 @@ def print_color_profiles(rs, device):
     for profile in profiles:
         print(
             f"{profile['width']}x{profile['height']} "
-            f"{profile['format']} @{profile['fps']}fps"
+            f"rgb8 @{profile['fps']}fps"
         )
 
 
@@ -199,28 +149,10 @@ def profile_matches(profile, args):
         return False
     if args.fps and profile["fps"] != args.fps:
         return False
-    if args.format != "auto" and profile["format"] != args.format:
-        return False
-    return profile["format"] in FORMAT_PREFERENCE
+    return True
 
 
-def frame_to_bgr(cv2, np, color_frame, format_name):
-    if format_name == "mjpeg":
-        encoded = np.frombuffer(color_frame.get_data(), dtype=np.uint8)
-        image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
-        if image is None:
-            raise RuntimeError("Failed to decode MJPEG color frame")
-        return image
-
-    image = np.asanyarray(color_frame.get_data())
-    if format_name == "rgb8":
-        return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-    if format_name == "yuyv":
-        return cv2.cvtColor(image, cv2.COLOR_YUV2BGR_YUY2)
-    return image
-
-
-def choose_color_profile(rs, device, args, usb_type):
+def choose_color_profile(rs, device, args):
     matching_profiles = [
         profile for profile in color_profiles(rs, device) if profile_matches(profile, args)
     ]
@@ -230,25 +162,14 @@ def choose_color_profile(rs, device, args, usb_type):
             "Run with --list-profiles to see supported modes."
         )
 
-    preferred_formats = {name: index for index, name in enumerate(FORMAT_PREFERENCE)}
-    target_pixels = None
-    target_fps = None
-    if args.width and args.height:
-        target_pixels = args.width * args.height
-    if args.fps:
-        target_fps = args.fps
-
-    if target_pixels is None:
-        target_pixels = 640 * 360 if usb_type.startswith("2") else 640 * 480
-    if target_fps is None:
-        target_fps = 15 if usb_type.startswith("2") else 30
+    target_pixels = args.width * args.height
+    target_fps = args.fps
 
     return min(
         matching_profiles,
         key=lambda profile: (
             abs(profile["width"] * profile["height"] - target_pixels),
             abs(profile["fps"] - target_fps),
-            preferred_formats.get(profile["format"], len(FORMAT_PREFERENCE)),
         ),
     )
 
@@ -283,97 +204,6 @@ def list_devices(rs):
             print(f"  sensor: {sensor.get_info(rs.camera_info.name)}")
 
 
-def video_device_name(device_path):
-    name_path = Path("/sys/class/video4linux") / Path(device_path).name / "name"
-    try:
-        return name_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
-def list_video_devices():
-    devices = sorted(glob.glob("/dev/video*"))
-    if not devices:
-        print("No /dev/video* devices found.")
-        return
-
-    for device_path in devices:
-        name = video_device_name(device_path) or "(unknown name)"
-        print(f"{device_path}: {name}")
-
-
-def v4l2_sources(args):
-    sources = []
-    if args.camera_device is not None:
-        sources.append(args.camera_device)
-    if args.camera_index is not None:
-        sources.append(args.camera_index)
-    sources.extend(sorted(glob.glob("/dev/video*"), key=video_device_sort_key))
-
-    deduped = []
-    seen = set()
-    for source in sources:
-        key = str(source)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(source)
-    return deduped
-
-
-def video_device_sort_key(path):
-    name = Path(path).name
-    try:
-        return int(name.replace("video", ""))
-    except ValueError:
-        return name
-
-
-def set_capture_format(cv2, capture, args):
-    if args.v4l2_format == "mjpg":
-        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-    elif args.v4l2_format == "yuyv":
-        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"YUYV"))
-
-    if args.width:
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    if args.height:
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-    if args.fps:
-        capture.set(cv2.CAP_PROP_FPS, args.fps)
-
-
-def describe_capture(cv2, capture):
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = capture.get(cv2.CAP_PROP_FPS)
-    fourcc = int(capture.get(cv2.CAP_PROP_FOURCC))
-    fourcc_text = "".join(chr((fourcc >> 8 * i) & 0xFF) for i in range(4)).strip()
-    return f"{width}x{height} {fourcc_text or 'unknown-format'} @{fps:.1f}fps"
-
-
-def open_v4l2_capture(cv2, args):
-    backend = cv2.CAP_V4L2 if hasattr(cv2, "CAP_V4L2") else 0
-    errors = []
-    for source in v4l2_sources(args):
-        capture = cv2.VideoCapture(source, backend)
-        if not capture.isOpened():
-            capture.release()
-            errors.append(f"{source}: failed to open")
-            continue
-
-        set_capture_format(cv2, capture, args)
-        ok, frame = capture.read()
-        if ok and frame is not None:
-            return source, capture, frame
-
-        capture.release()
-        errors.append(f"{source}: opened but no frame")
-
-    detail = "; ".join(errors) if errors else "no candidate /dev/video* devices"
-    raise RuntimeError(f"Could not open a V4L2 camera frame ({detail})")
-
-
 def find_device(rs, serial=None):
     context = rs.context()
     devices = context.query_devices()
@@ -386,76 +216,25 @@ def find_device(rs, serial=None):
     raise RuntimeError("No RealSense devices found")
 
 
-def run_v4l2_viewer(cv2, args):
-    print("Starting V4L2 camera stream. Press q or Esc to quit.")
-    source, capture, first_frame = open_v4l2_capture(cv2, args)
-    name = video_device_name(source) if isinstance(source, str) else ""
-    label = f"{source}"
-    if name:
-        label = f"{label} ({name})"
-    print(f"Using {label}")
-    print(f"Active capture: {describe_capture(cv2, capture)}")
-
-    frame = first_frame
-    try:
-        while True:
-            image = flip_frame(cv2, frame, args.flip)
-            cv2.imshow(args.window_name, image)
-            key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):
-                break
-
-            ok, frame = capture.read()
-            if not ok or frame is None:
-                print("Camera read failed; waiting for the next frame...")
-                time.sleep(0.05)
-                ok, frame = capture.read()
-                if not ok or frame is None:
-                    raise RuntimeError("V4L2 camera stopped delivering frames")
-    finally:
-        capture.release()
-        cv2.destroyAllWindows()
-
-
 def main():
     args = parse_args()
-    if args.width < 0:
-        raise ValueError("--width must be 0 or greater")
-    if args.height < 0:
-        raise ValueError("--height must be 0 or greater")
-    if bool(args.width) != bool(args.height):
-        raise ValueError("--width and --height must both be set, or both be 0 for auto")
-    if args.fps < 0:
-        raise ValueError("--fps must be 0 or greater")
+    if args.width <= 0:
+        raise ValueError("--width must be greater than 0")
+    if args.height <= 0:
+        raise ValueError("--height must be greater than 0")
+    if args.fps <= 0:
+        raise ValueError("--fps must be greater than 0")
     if args.timeout_ms <= 0:
         raise ValueError("--timeout-ms must be greater than 0")
     if args.max_timeouts < 0:
         raise ValueError("--max-timeouts must be 0 or greater")
 
     cv2, np = import_camera_dependencies()
+    rs = import_realsense_dependency()
     if args.list_devices:
-        print("V4L2 devices:")
-        list_video_devices()
-        if args.backend in ("auto", "realsense"):
-            print()
-            print("RealSense SDK devices:")
-            try:
-                list_devices(import_realsense_dependency())
-            except RuntimeError as exc:
-                print(exc)
+        list_devices(rs)
         return
 
-    if args.backend in ("auto", "v4l2") and not args.list_profiles:
-        try:
-            run_v4l2_viewer(cv2, args)
-            return
-        except RuntimeError as exc:
-            if args.backend == "v4l2":
-                raise
-            print(f"V4L2 backend failed: {exc}")
-            print("Falling back to RealSense SDK backend.")
-
-    rs = import_realsense_dependency()
     run_realsense_viewer(cv2, np, rs, args)
 
 
@@ -472,10 +251,10 @@ def run_realsense_viewer(cv2, np, rs, args):
             "Warning: camera reports USB 2.x. "
             "RealSense D435 is much more reliable on a USB 3 port/cable."
         )
-    selected = choose_color_profile(rs, device, args, usb_type)
+    selected = choose_color_profile(rs, device, args)
     print(
         "Selected color profile: "
-        f"{selected['width']}x{selected['height']} {selected['format']} @{selected['fps']}fps"
+        f"{selected['width']}x{selected['height']} rgb8 @{selected['fps']}fps"
     )
 
     pipeline = rs.pipeline()
@@ -485,7 +264,7 @@ def run_realsense_viewer(cv2, np, rs, args):
         rs.stream.color,
         selected["width"],
         selected["height"],
-        rs_format(rs, selected["format"]),
+        rs.format.rgb8,
         selected["fps"],
     )
 
@@ -530,9 +309,12 @@ def run_realsense_viewer(cv2, np, rs, args):
                 continue
             timeout_count = 0
 
-            image = frame_to_bgr(cv2, np, color_frame, selected["format"])
-            image = flip_frame(cv2, image, args.flip)
-            cv2.imshow(args.window_name, image)
+            rgb_image = np.asanyarray(color_frame.get_data())
+            flipped_rgb_image = flip_frame(cv2, rgb_image, args.flip)
+            cv2.imshow(
+                args.window_name,
+                cv2.cvtColor(flipped_rgb_image, cv2.COLOR_RGB2BGR),
+            )
 
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):

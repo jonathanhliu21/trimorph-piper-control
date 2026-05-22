@@ -235,15 +235,18 @@ Move a single finger or thumb by editing the constants at the top of
 `examples/midas_hand/move_finger.py`:
 
 ```python
-FINGER = "index"
 SEQUENCE = [
-    [0.0, 0.0, 0.0],
-    [0.1, 0.2, 0.3],
+    ["ring", 1.0, 0.0, 0.0],
+    [
+        ["index", 0.0, 0.0, 1.0],
+        ["thumb", 0.5, 1.0, 2.0, 1.5],
+    ],
 ]
 WAIT_BETWEEN_MOVEMENTS_S = 0.5
 ```
 
-Fingers use 3 values per row. The thumb uses 4 values per row. Then run:
+Each command is `["finger", values...]`. Fingers use 3 values; the thumb uses
+4 values. A nested list runs those commands in parallel before waiting. Then run:
 
 ```bash
 python3 examples/midas_hand/move_finger.py

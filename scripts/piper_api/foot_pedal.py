@@ -12,6 +12,8 @@ EV_KEY = 0x01
 KEY_PRESS = 1
 INPUT_EVENT_STRUCT = struct.Struct("llHHI")
 PEDAL_HINTS = ("pedal", "foot")
+KEYBOARD_HINTS = ("event-kbd", "keyboard")
+MOUSE_HINTS = ("event-mouse", "mouse")
 
 
 @dataclass(frozen=True)
@@ -73,21 +75,56 @@ def format_input_devices(devices: List[InputDeviceInfo]) -> str:
     return "\n".join(lines)
 
 
+def _device_haystack(device: InputDeviceInfo) -> str:
+    return " ".join([device.path, device.name, *device.links]).lower()
+
+
+def _preferred_device_path(device: InputDeviceInfo) -> str:
+    for link in device.links:
+        if "/by-id/" in link:
+            return link
+    return device.path
+
+
+def _foot_pedal_candidate_score(device: InputDeviceInfo) -> int:
+    haystack = _device_haystack(device)
+    score = 0
+    if any(hint in haystack for hint in KEYBOARD_HINTS):
+        score += 20
+    if any(hint in haystack for hint in MOUSE_HINTS):
+        score -= 10
+    if any("/by-id/" in link for link in device.links):
+        score += 1
+    return score
+
+
 def find_foot_pedal_device() -> str:
     candidates = []
     for device in list_input_devices():
-        haystack = " ".join([device.path, device.name, *device.links]).lower()
+        haystack = _device_haystack(device)
         if any(hint in haystack for hint in PEDAL_HINTS):
             candidates.append(device)
 
     if len(candidates) == 1:
-        return candidates[0].path
+        return _preferred_device_path(candidates[0])
 
     if not candidates:
         raise RuntimeError(
             "Could not auto-detect a foot pedal input device. "
             "Run with --list-input-devices, then pass --foot-pedal-device."
         )
+
+    scored_candidates = sorted(
+        ((_foot_pedal_candidate_score(device), device) for device in candidates),
+        key=lambda item: item[0],
+        reverse=True,
+    )
+    best_score = scored_candidates[0][0]
+    best_candidates = [
+        device for score, device in scored_candidates if score == best_score
+    ]
+    if len(best_candidates) == 1 and best_score > 0:
+        return _preferred_device_path(best_candidates[0])
 
     formatted = format_input_devices(candidates)
     raise RuntimeError(
