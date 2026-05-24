@@ -17,7 +17,7 @@ from collection.config import (
     build_config,
 )
 from collection.episode import raw_root
-from collection.midas_worker import load_midas_config
+from collection.midas_worker import apply_midas_runtime_limits, load_midas_config
 
 
 # Defaults. CLI flags can override the episode path and replay rate.
@@ -233,7 +233,9 @@ def main() -> int:
             from midas_hand_api import MidasHand
 
             hand = MidasHand(config=load_midas_config(config), autoconnect=True)
-            hand.configure(enable_torque=True)
+            hand.configure(enable_torque=False)
+            apply_midas_runtime_limits(hand, config)
+            hand.enable_torque()
             if [int(motor_id) for motor_id in hand.motor_ids] != list(
                 CANONICAL_MIDAS_MOTOR_IDS
             ):

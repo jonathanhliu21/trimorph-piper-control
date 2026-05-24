@@ -237,9 +237,13 @@ class EpisodeBuffer:
                 "mirror_axis": self.config.teleop_mirror_axis,
             },
             "midas": {
-                "measured_source": "MidasHand.read_pos_vel_cur()",
+                "measured_source": "MidasHand.read_pos()",
                 "target_measure_rate_hz": self.config.midas_measure_rate_hz,
                 "command_rate_hz": self.config.midas_command_rate_hz,
+                "profile_velocity_rad_s": self.config.midas_profile_velocity_rad_s,
+                "profile_acceleration_rad_s2": (
+                    self.config.midas_profile_acceleration_rad_s2
+                ),
                 "motor_ids": list(CANONICAL_MIDAS_MOTOR_IDS),
                 "training_uses": "measured positions from midas.csv",
             },

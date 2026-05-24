@@ -5,11 +5,12 @@ import struct
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 
 EV_KEY = 0x01
 KEY_PRESS = 1
+KEY_RELEASE = 0
 INPUT_EVENT_STRUCT = struct.Struct("llHHI")
 PEDAL_HINTS = ("pedal", "foot")
 KEYBOARD_HINTS = ("event-kbd", "keyboard")
@@ -69,7 +70,8 @@ def format_input_devices(devices: List[InputDeviceInfo]) -> str:
     lines = []
     for device in devices:
         label = device.name or "(unknown name)"
-        lines.append(f"{device.path}: {label}")
+        readable = "readable" if os.access(_preferred_device_path(device), os.R_OK) else "not readable"
+        lines.append(f"{device.path}: {label} [{readable}]")
         for link in device.links:
             lines.append(f"  {link}")
     return "\n".join(lines)
@@ -89,21 +91,35 @@ def _preferred_device_path(device: InputDeviceInfo) -> str:
 def _foot_pedal_candidate_score(device: InputDeviceInfo) -> int:
     haystack = _device_haystack(device)
     score = 0
+    if "pcsensor" in haystack and "footswitch" in haystack:
+        score += 50
     if any(hint in haystack for hint in KEYBOARD_HINTS):
         score += 20
     if any(hint in haystack for hint in MOUSE_HINTS):
         score -= 10
+    if os.access(_preferred_device_path(device), os.R_OK):
+        score += 5
     if any("/by-id/" in link for link in device.links):
         score += 1
     return score
 
 
-def find_foot_pedal_device() -> str:
+def find_foot_pedal_candidates() -> List[InputDeviceInfo]:
     candidates = []
     for device in list_input_devices():
         haystack = _device_haystack(device)
         if any(hint in haystack for hint in PEDAL_HINTS):
             candidates.append(device)
+
+    return sorted(
+        candidates,
+        key=lambda device: (_foot_pedal_candidate_score(device), _preferred_device_path(device)),
+        reverse=True,
+    )
+
+
+def find_foot_pedal_device() -> str:
+    candidates = find_foot_pedal_candidates()
 
     if len(candidates) == 1:
         return _preferred_device_path(candidates[0])
@@ -114,11 +130,9 @@ def find_foot_pedal_device() -> str:
             "Run with --list-input-devices, then pass --foot-pedal-device."
         )
 
-    scored_candidates = sorted(
-        ((_foot_pedal_candidate_score(device), device) for device in candidates),
-        key=lambda item: item[0],
-        reverse=True,
-    )
+    scored_candidates = [
+        (_foot_pedal_candidate_score(device), device) for device in candidates
+    ]
     best_score = scored_candidates[0][0]
     best_candidates = [
         device for score, device in scored_candidates if score == best_score
@@ -132,6 +146,10 @@ def find_foot_pedal_device() -> str:
         "Pass --foot-pedal-device with one of these paths:\n"
         f"{formatted}"
     )
+
+
+def _format_open_failures(failures: Sequence[tuple[str, OSError]]) -> str:
+    return "\n".join(f"  {path}: {exc}" for path, exc in failures)
 
 
 class FootPedalTrigger:
@@ -152,6 +170,7 @@ class FootPedalTrigger:
         self._buffer = b""
         self._start_t = 0.0
         self._last_trigger_t = 0.0
+        self._pedal_down_t: Optional[float] = None
 
     @property
     def active_device(self) -> Optional[str]:
@@ -160,13 +179,56 @@ class FootPedalTrigger:
     def start(self) -> None:
         if self._fd is not None:
             return
-        if self.device is None:
-            self.device = find_foot_pedal_device()
 
-        self._fd = os.open(self.device, os.O_RDONLY | os.O_NONBLOCK)
+        if self.device is not None:
+            paths = [self.device]
+            if not Path(self.device).exists():
+                paths.extend(
+                    _preferred_device_path(device)
+                    for device in find_foot_pedal_candidates()
+                    if _preferred_device_path(device) != self.device
+                )
+        else:
+            paths = [
+                _preferred_device_path(device)
+                for device in find_foot_pedal_candidates()
+            ]
+            if not paths:
+                raise RuntimeError(
+                    "Could not auto-detect a foot pedal input device. "
+                    "Run with --list-input-devices, then pass --foot-pedal-device."
+                )
+
+        failures = []
+        for path in paths:
+            try:
+                self._fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError as exc:
+                failures.append((path, exc))
+                continue
+            self.device = path
+            break
+
+        if self._fd is None:
+            permission_failures = [
+                exc for _, exc in failures if isinstance(exc, PermissionError)
+            ]
+            hint = ""
+            if permission_failures:
+                hint = (
+                    "\nThe foot pedal was detected but is not readable by this user. "
+                    "Add your user to the input group, install a udev rule for the "
+                    "PCsensor FootSwitch, or pass a readable --foot-pedal-device."
+                )
+            raise RuntimeError(
+                "Could not open any foot pedal input device:\n"
+                f"{_format_open_failures(failures)}{hint}"
+            )
+
         self._start_t = time.monotonic()
         self._drain_raw_events()
         self._buffer = b""
+        self._pedal_down_t = None
 
     def stop(self) -> None:
         if self._fd is None:
@@ -174,6 +236,7 @@ class FootPedalTrigger:
         os.close(self._fd)
         self._fd = None
         self._buffer = b""
+        self._pedal_down_t = None
 
     def poll(self) -> List[FootPedalEvent]:
         if self._fd is None:
@@ -201,6 +264,12 @@ class FootPedalTrigger:
             )
         return events
 
+    def current_hold_s(self) -> Optional[float]:
+        """Returns how long the pedal has been held in seconds, or None if not pressed."""
+        if self._pedal_down_t is None:
+            return None
+        return time.monotonic() - self._pedal_down_t
+
     def _read_events(self):
         self._drain_raw_events()
         events = []
@@ -210,6 +279,12 @@ class FootPedalTrigger:
             self._buffer = self._buffer[event_size:]
             _, _, event_type, code, value = INPUT_EVENT_STRUCT.unpack(chunk)
             events.append((event_type, code, value))
+            if event_type == EV_KEY and (self.key_code is None or code == self.key_code):
+                now = time.monotonic()
+                if value == KEY_PRESS and self._pedal_down_t is None:
+                    self._pedal_down_t = now
+                elif value == KEY_RELEASE and self._pedal_down_t is not None:
+                    self._pedal_down_t = None
         return events
 
     def _drain_raw_events(self) -> None:

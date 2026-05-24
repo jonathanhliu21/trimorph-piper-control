@@ -115,6 +115,8 @@ def run_realsense_worker(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
+    *,
+    init_done,
 ) -> None:
     cv2 = import_cv2()
     rs = import_realsense()
@@ -146,9 +148,22 @@ def run_realsense_worker(
         f"{selected['width']}x{selected['height']} rgb8 @{selected['fps']}fps "
         f"serial={info['serial']}"
     )
-    for _ in range(config.camera_warmup_frames):
-        pipeline.wait_for_frames(config.camera_timeout_ms)
+    warmup_timeout_ms = max(config.camera_timeout_ms, 3000)
+    warmup_received = 0
+    warmup_attempts = 0
+    warmup_max_attempts = config.camera_warmup_frames * 6
+    while warmup_received < config.camera_warmup_frames and warmup_attempts < warmup_max_attempts:
+        warmup_attempts += 1
+        try:
+            pipeline.wait_for_frames(warmup_timeout_ms)
+            warmup_received += 1
+        except RuntimeError as exc:
+            if "Frame didn't arrive" not in str(exc):
+                raise
+    if warmup_received == 0:
+        raise RuntimeError("RealSense produced no frames during warmup")
 
+    init_done.set()
     fourcc = cv2.VideoWriter_fourcc(*config.video_codec)
     try:
         while not shared.shutdown.is_set():

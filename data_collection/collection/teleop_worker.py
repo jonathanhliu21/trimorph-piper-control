@@ -12,6 +12,8 @@ def run_teleop_worker(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
+    *,
+    init_done,
 ) -> None:
     cv2 = import_cv2()
     from midas_hand_retargeter import MidasHandRetargeter
@@ -37,11 +39,14 @@ def run_teleop_worker(
         lock_input_hand=config.teleop_lock_input_hand,
         model_path=config.teleop_hand_landmarker_model,
     )
+    print("MediaPipe hand detector initialized.")
     retargeter = MidasHandRetargeter.create(
         scaling_factor=config.teleop_scaling_factor,
         coupling_mode=PIP_DIP_LOOKUP_MODE,
     )
+    print("Midas retargeter initialized.")
     pipeline = MidasTeleopPipeline(detector=detector, retargeter=retargeter)
+    init_done.set()
 
     writer = None
     writer_session: EpisodeBuffer | None = None

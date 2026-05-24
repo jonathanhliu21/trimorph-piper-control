@@ -13,6 +13,8 @@ def run_piper_worker(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
+    *,
+    init_done,
 ) -> None:
     from scripts.piper_api.piper_api import PiperAPI
 
@@ -24,6 +26,7 @@ def run_piper_worker(
     )
     api.connect()
     print("Piper connected:", api.is_ok(), "receive FPS:", api.get_fps())
+    init_done.set()
 
     sample_period_ns = int(round(1_000_000_000 / config.piper_rate_hz))
     teacher_period_ns = int(round(1_000_000_000 / config.teacher_mode_poll_hz))

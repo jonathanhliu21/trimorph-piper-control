@@ -52,12 +52,14 @@ def worker_wrapper(
     name: str,
     errors: queue.Queue[WorkerError],
     shared: SharedState,
+    init_done,
     target,
     *args,
 ) -> None:
     try:
-        target(*args)
+        target(*args, init_done=init_done)
     except Exception as exc:
+        init_done.set()
         errors.put(
             WorkerError(
                 name=name,

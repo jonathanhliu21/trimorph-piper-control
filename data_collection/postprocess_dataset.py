@@ -22,7 +22,7 @@ RAW_DIR = DATASET_ROOT / "raw"
 OVERWRITE_PROCESSED_FILES = True
 PROCESS_ONLY_RAW_STATUSES = {"complete"}
 MAX_SYNC_ERROR_S = 0.010
-DROP_FRAMES_OUTSIDE_MAX_SYNC_ERROR = False
+TRIM_CAMERA_FRAMES = 1  # drop this many frames from each end before syncing
 
 
 CANONICAL_MIDAS_MOTOR_IDS = tuple(range(13))
@@ -36,7 +36,7 @@ class PostprocessConfig:
     overwrite_processed_files: bool
     process_only_raw_statuses: set[str]
     max_sync_error_s: float
-    drop_frames_outside_max_sync_error: bool
+    trim_camera_frames: int
 
 
 @dataclass(frozen=True)
@@ -68,13 +68,15 @@ def build_config() -> PostprocessConfig:
         overwrite_processed_files=OVERWRITE_PROCESSED_FILES,
         process_only_raw_statuses=set(PROCESS_ONLY_RAW_STATUSES),
         max_sync_error_s=MAX_SYNC_ERROR_S,
-        drop_frames_outside_max_sync_error=DROP_FRAMES_OUTSIDE_MAX_SYNC_ERROR,
+        trim_camera_frames=TRIM_CAMERA_FRAMES,
     )
 
 
 def validate_config(config: PostprocessConfig) -> None:
     if config.max_sync_error_s <= 0:
         raise ValueError("MAX_SYNC_ERROR_S must be greater than 0")
+    if config.trim_camera_frames < 0:
+        raise ValueError("TRIM_CAMERA_FRAMES must be 0 or greater")
     if not config.raw_dir.exists():
         raise FileNotFoundError(f"Raw dataset directory does not exist: {config.raw_dir}")
 
@@ -292,17 +294,12 @@ def make_sync(
         bad = int(np.count_nonzero(~valid))
         worst_hand_s = float(encoder_delta_ns.max() / 1e9)
         worst_eef_s = float(pose_delta_ns.max() / 1e9)
-        message = (
-            f"{episode.name} has {bad} camera frames outside MAX_SYNC_ERROR_S="
-            f"{config.max_sync_error_s:.3f}; worst hand={worst_hand_s:.6f}s, "
-            f"worst eef={worst_eef_s:.6f}s"
+        bad_positions = np.where(~valid)[0].tolist()
+        print(
+            f"Warning: {episode.name} has {bad} camera frames outside MAX_SYNC_ERROR_S="
+            f"{config.max_sync_error_s:.3f}; positions={bad_positions}; "
+            f"worst hand={worst_hand_s:.6f}s, worst eef={worst_eef_s:.6f}s; keeping best-effort sync."
         )
-        if not config.drop_frames_outside_max_sync_error:
-            raise ValueError(message)
-        print(f"Warning: {message}; dropping those sync rows.")
-        frame_idx = frame_idx[valid]
-        encoder_idx = encoder_idx[valid]
-        pose_idx = pose_idx[valid]
 
     if frame_idx.size == 0:
         raise ValueError(f"No synchronized frames remain for {episode.name}")
@@ -348,6 +345,10 @@ def process_episode(config: PostprocessConfig, episode: RawEpisode) -> dict[str,
     frame_idx, camera_ns = load_camera_timestamps(episode)
     hand, hand_ns = load_midas(episode)
     eef, eef_ns = load_piper(episode)
+    if config.trim_camera_frames > 0:
+        t = config.trim_camera_frames
+        frame_idx = frame_idx[t:-t] if len(frame_idx) > 2 * t else frame_idx
+        camera_ns = camera_ns[t:-t] if len(camera_ns) > 2 * t else camera_ns
     sync = make_sync(config, frame_idx, camera_ns, hand_ns, eef_ns, episode)
 
     shutil.copy2(episode.camera_path, out.video_path)

@@ -22,7 +22,7 @@ CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30
 CAMERA_SERIAL: str | None = None
-CAMERA_FLIP = "none"  # one of: "none", "horizontal", "vertical", "both"
+CAMERA_FLIP = "both"  # one of: "none", "horizontal", "vertical", "both"
 CAMERA_TIMEOUT_MS = 500
 CAMERA_MAX_TIMEOUTS = 30
 CAMERA_WARMUP_FRAMES = 30
@@ -42,10 +42,12 @@ TELEOP_SCALING_FACTOR = 1.15
 
 MIDAS_MEASURE_RATE_HZ = 200.0
 MIDAS_COMMAND_RATE_HZ = 50.0
-MIDAS_HAND_PORT: str | None = "/dev/ttyUSB0"
-MIDAS_HAND_BAUDRATE = 1_000_000
+MIDAS_HAND_PORT: str | None = None
+MIDAS_HAND_BAUDRATE = 4_000_000
 MIDAS_HAND_CONFIG = str(DEFAULT_CONFIG_PATH)
-MIDAS_CURRENT_LIMIT_MA: int | None = 350
+MIDAS_CURRENT_LIMIT_MA: int | None = 250
+MIDAS_PROFILE_VELOCITY_RAD_S: float | None = 2.0
+MIDAS_PROFILE_ACCELERATION_RAD_S2: float | None = 15.0
 MIDAS_COMMAND_SCALE = 1.0
 MIDAS_MAX_STEP_RAD = 0.15
 MIDAS_INTERPOLATION_ALPHA = 0.4
@@ -109,6 +111,8 @@ class CollectionConfig:
     midas_hand_baudrate: int
     midas_hand_config: str
     midas_current_limit_ma: int | None
+    midas_profile_velocity_rad_s: float | None
+    midas_profile_acceleration_rad_s2: float | None
     midas_command_scale: float
     midas_max_step_rad: float
     midas_interpolation_alpha: float
@@ -165,6 +169,8 @@ def build_config() -> CollectionConfig:
         midas_hand_baudrate=MIDAS_HAND_BAUDRATE,
         midas_hand_config=str(Path(MIDAS_HAND_CONFIG).expanduser()),
         midas_current_limit_ma=MIDAS_CURRENT_LIMIT_MA,
+        midas_profile_velocity_rad_s=MIDAS_PROFILE_VELOCITY_RAD_S,
+        midas_profile_acceleration_rad_s2=MIDAS_PROFILE_ACCELERATION_RAD_S2,
         midas_command_scale=MIDAS_COMMAND_SCALE,
         midas_max_step_rad=MIDAS_MAX_STEP_RAD,
         midas_interpolation_alpha=MIDAS_INTERPOLATION_ALPHA,
@@ -229,3 +235,15 @@ def validate_config(config: CollectionConfig) -> None:
         raise ValueError("TELEOP_HAND_TYPE must be Right or Left")
     if config.teleop_input_hand not in {"auto", "Right", "Left"}:
         raise ValueError("TELEOP_INPUT_HAND must be auto, Right, or Left")
+    if (
+        config.midas_profile_velocity_rad_s is not None
+        and config.midas_profile_velocity_rad_s < 0
+    ):
+        raise ValueError("MIDAS_PROFILE_VELOCITY_RAD_S must be 0 or greater, or None")
+    if (
+        config.midas_profile_acceleration_rad_s2 is not None
+        and config.midas_profile_acceleration_rad_s2 < 0
+    ):
+        raise ValueError(
+            "MIDAS_PROFILE_ACCELERATION_RAD_S2 must be 0 or greater, or None"
+        )

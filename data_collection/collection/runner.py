@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import shutil
 import threading
 import time
 
@@ -23,6 +24,9 @@ from .teleop_worker import run_teleop_worker
 from .utils import WorkerError, import_cv2, worker_wrapper
 
 
+_WORKER_INIT_TIMEOUT_S = 60.0
+
+
 def start_workers(
     config: CollectionConfig,
     shared: SharedState,
@@ -40,15 +44,97 @@ def start_workers(
 
     threads = []
     for name, target in specs:
+        init_done = threading.Event()
         thread = threading.Thread(
             target=worker_wrapper,
             name=f"{name}-worker",
-            args=(name, errors, shared, target, config, shared, recorder),
+            args=(name, errors, shared, init_done, target, config, shared, recorder),
             daemon=True,
         )
+        print(f"Starting {name} worker...")
         thread.start()
         threads.append(thread)
+        init_done.wait(timeout=_WORKER_INIT_TIMEOUT_S)
+        if shared.shutdown.is_set():
+            break
     return threads
+
+
+def _rate_hz_from_timestamps_ns(timestamps_ns: list[int]) -> float:
+    if len(timestamps_ns) < 2:
+        return 0.0
+    elapsed_s = (timestamps_ns[-1] - timestamps_ns[0]) / 1e9
+    if elapsed_s <= 0:
+        return 0.0
+    return (len(timestamps_ns) - 1) / elapsed_s
+
+
+def _duration_s_from_timestamps_ns(timestamps_ns: list[int]) -> float:
+    if len(timestamps_ns) < 2:
+        return 0.0
+    return max(0.0, (timestamps_ns[-1] - timestamps_ns[0]) / 1e9)
+
+
+def _row_timestamps_ns(rows: list[dict[str, object]]) -> list[int]:
+    return [int(row["monotonic_ns"]) for row in rows]
+
+
+def _print_episode_summary(session: EpisodeBuffer) -> None:
+    duration_s = (
+        ((session.stop_ns or time.monotonic_ns()) - session.start_ns) / 1e9
+    )
+    summaries = [
+        (
+            "camera",
+            len(session.camera_rows),
+            "frames",
+            _row_timestamps_ns(session.camera_rows),
+        ),
+        (
+            "Midas",
+            len(session.midas_rows),
+            "samples",
+            _row_timestamps_ns(session.midas_rows),
+        ),
+        (
+            "Piper",
+            len(session.piper_rows),
+            "samples",
+            _row_timestamps_ns(session.piper_rows),
+        ),
+        (
+            "tactile",
+            len(session.tactile_timestamps),
+            "samples",
+            [sample_ns for sample_ns, _, _ in session.tactile_timestamps],
+        ),
+    ]
+    if session.config.record_teleop_camera:
+        summaries.append(
+            (
+                "teleop camera",
+                len(session.teleop_camera_rows),
+                "frames",
+                _row_timestamps_ns(session.teleop_camera_rows),
+            )
+        )
+
+    print(f"Saved episode {session.paths.episode_index:06d}: duration {duration_s:.3f}s")
+    for name, count, unit, timestamps_ns in summaries:
+        episode_rate_hz = count / duration_s if duration_s > 0 else 0.0
+        active_duration_s = _duration_s_from_timestamps_ns(timestamps_ns)
+        active_rate_hz = _rate_hz_from_timestamps_ns(timestamps_ns)
+        print(
+            f"  {name}: {count} {unit} @ {episode_rate_hz:.2f} Hz over episode "
+            f"(active {active_rate_hz:.2f} Hz for {active_duration_s:.3f}s)"
+        )
+
+
+_GREEN = "\033[32m"
+_ORANGE = "\033[38;5;214m"
+_RESET = "\033[0m"
+
+HOLD_DELETE_S = 2.0
 
 
 def stop_and_flush_episode(
@@ -56,6 +142,7 @@ def stop_and_flush_episode(
     reason: str,
     *,
     timeout_s: float = 5.0,
+    color: str = "",
 ) -> None:
     session = recorder.stop(reason)
     if session is None:
@@ -64,13 +151,25 @@ def stop_and_flush_episode(
     session.video_done.wait(timeout=timeout_s)
     session.teleop_video_done.wait(timeout=timeout_s)
     session.flush()
-    print(
-        f"Saved episode {session.paths.episode_index:06d}: "
-        f"{len(session.camera_rows)} frames, "
-        f"{len(session.midas_rows)} Midas samples, "
-        f"{len(session.piper_rows)} Piper samples, "
-        f"{len(session.tactile_timestamps)} tactile samples."
-    )
+    _print_episode_summary(session)
+    if color:
+        print(f"{color}Episode {session.paths.episode_index:06d} saved.{_RESET}")
+
+
+def delete_and_discard_episode(
+    recorder: RecordingManager,
+    *,
+    timeout_s: float = 5.0,
+) -> None:
+    session = recorder.stop("foot_pedal_delete")
+    if session is None:
+        return
+    episode_index = session.paths.episode_index
+    print(f"Discarding episode {episode_index:06d}...")
+    session.video_done.wait(timeout=timeout_s)
+    session.teleop_video_done.wait(timeout=timeout_s)
+    shutil.rmtree(session.paths.episode_dir, ignore_errors=True)
+    print(f"{_ORANGE}Episode {episode_index:06d} deleted.{_RESET}")
 
 
 def start_episode(config: CollectionConfig, recorder: RecordingManager) -> None:
@@ -79,7 +178,24 @@ def start_episode(config: CollectionConfig, recorder: RecordingManager) -> None:
     paths.episode_dir.mkdir(parents=True, exist_ok=False)
     session = EpisodeBuffer(paths, config)
     recorder.start(session)
-    print(f"Recording episode {episode_index:06d}. Press the foot pedal again to stop.")
+    print(f"Recording episode {episode_index:06d}. Press pedal to save, hold {HOLD_DELETE_S:.0f}s to delete.")
+
+
+def raise_next_worker_error(
+    errors: queue.Queue[WorkerError],
+    recorder: RecordingManager,
+) -> None:
+    try:
+        error = errors.get_nowait()
+    except queue.Empty:
+        return
+
+    print(error.traceback_text, end="")
+    session = recorder.current()
+    if session is not None:
+        session.add_error(error)
+        stop_and_flush_episode(recorder, f"{error.name}_worker_error")
+    raise RuntimeError(f"{error.name} worker failed: {error.message}")
 
 
 def main_loop(
@@ -92,18 +208,12 @@ def main_loop(
     cv2 = import_cv2()
     pending_start_deadline: float | None = None
     next_idle_notice = 0.0
+    recording_pedal_down = False
 
-    while not shared.shutdown.is_set():
-        try:
-            error = errors.get_nowait()
-        except queue.Empty:
-            error = None
-        if error is not None:
-            session = recorder.current()
-            if session is not None:
-                session.add_error(error)
-                stop_and_flush_episode(recorder, f"{error.name}_worker_error")
-            raise RuntimeError(f"{error.name} worker failed: {error.message}")
+    while True:
+        raise_next_worker_error(errors, recorder)
+        if shared.shutdown.is_set():
+            break
 
         realsense_bgr, teleop_bgr = shared.display_frames()
         if config.show_realsense_view and realsense_bgr is not None:
@@ -125,18 +235,29 @@ def main_loop(
         ):
             stop_and_flush_episode(recorder, "teacher_mode_lost")
             pending_start_deadline = None
+            recording_pedal_down = False
             continue
 
         requested_stop = shared.pop_stop_episode_reason()
         if recorder.is_recording() and requested_stop == "teacher_mode_lost":
             stop_and_flush_episode(recorder, requested_stop)
             pending_start_deadline = None
+            recording_pedal_down = False
             continue
 
         pedal_pressed = bool(pedal.poll())
         if recorder.is_recording():
-            if pedal_pressed:
-                stop_and_flush_episode(recorder, "foot_pedal")
+            hold_s = pedal.current_hold_s()
+            if pedal_pressed and not recording_pedal_down:
+                recording_pedal_down = True
+                print(f"Pedal held. Release to save, hold {HOLD_DELETE_S:.0f}s to delete.")
+            if recording_pedal_down:
+                if hold_s is not None and hold_s >= HOLD_DELETE_S:
+                    recording_pedal_down = False
+                    delete_and_discard_episode(recorder)
+                elif hold_s is None:
+                    recording_pedal_down = False
+                    stop_and_flush_episode(recorder, "foot_pedal", color=_GREEN)
             continue
 
         if pending_start_deadline is None:
@@ -189,13 +310,22 @@ def run_collection(config: CollectionConfig) -> int:
     print("Press c in a display window to calibrate teleop neutral. Press q to quit.")
 
     threads = start_workers(config, shared, recorder, errors)
+    deferred_error: WorkerError | None = None
     try:
         main_loop(config, shared, recorder, pedal, errors)
     except KeyboardInterrupt:
         print("\nCollection stopped.")
+    except RuntimeError:
+        raise
     finally:
+        try:
+            deferred_error = errors.get_nowait()
+        except queue.Empty:
+            deferred_error = None
         session = recorder.current()
         if session is not None:
+            if deferred_error is not None:
+                session.add_error(deferred_error)
             stop_and_flush_episode(recorder, "shutdown")
         shared.shutdown.set()
         pedal.stop()
@@ -205,4 +335,9 @@ def run_collection(config: CollectionConfig) -> int:
             import_cv2().destroyAllWindows()
         except Exception:
             pass
+    if deferred_error is not None:
+        print(deferred_error.traceback_text, end="")
+        raise RuntimeError(
+            f"{deferred_error.name} worker failed: {deferred_error.message}"
+        )
     return 0

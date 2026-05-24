@@ -11,6 +11,17 @@ from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
 
 
+DEFAULT_CURRENT_LIMIT_MA = 350
+
+
+def midas_current_limit_ma(config: CollectionConfig) -> int:
+    return (
+        DEFAULT_CURRENT_LIMIT_MA
+        if config.midas_current_limit_ma is None
+        else int(config.midas_current_limit_ma)
+    )
+
+
 def load_midas_config(config: CollectionConfig):
     from midas_hand_api import HandConfig
 
@@ -23,23 +34,38 @@ def load_midas_config(config: CollectionConfig):
     updates: dict[str, object] = {
         "baudrate": config.midas_hand_baudrate,
     }
-    if config.midas_hand_port is not None:
+    if config.midas_hand_port is not None and Path(config.midas_hand_port).exists():
         updates["port"] = config.midas_hand_port
-    if config.midas_current_limit_ma is not None:
-        updates["goal_current_limit"] = int(config.midas_current_limit_ma)
+    elif config.midas_hand_port is not None:
+        print(
+            f"Configured Midas port {config.midas_hand_port} was not found; "
+            "auto-detecting Dynamixel bus."
+        )
+    updates["goal_current_limit"] = midas_current_limit_ma(config)
     return replace(hand_config, **updates)
+
+
+def apply_midas_runtime_limits(hand, config: CollectionConfig) -> None:
+    hand.set_current_limit(midas_current_limit_ma(config))
+    hand.set_motion_profile(
+        profile_velocity_rad_s=config.midas_profile_velocity_rad_s,
+        profile_acceleration_rad_s2=config.midas_profile_acceleration_rad_s2,
+    )
 
 
 def run_midas_worker(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
+    *,
+    init_done,
 ) -> None:
     from midas_hand_api import MidasHand
 
     hand = MidasHand(config=load_midas_config(config), autoconnect=True)
     if config.midas_configure_hardware:
         hand.configure(enable_torque=False)
+    apply_midas_runtime_limits(hand, config)
     last_command = hand.clip_positions(hand.read_pos())
     hand.set_positions(last_command, clip=True)
     if config.midas_configure_hardware:
@@ -51,6 +77,7 @@ def run_midas_worker(
             f"Expected Midas motor IDs {CANONICAL_MIDAS_MOTOR_IDS}, got {hand.motor_ids}"
         )
 
+    init_done.set()
     read_period_ns = int(round(1_000_000_000 / config.midas_measure_rate_hz))
     command_period_ns = int(round(1_000_000_000 / config.midas_command_rate_hz))
     next_read_ns = time.monotonic_ns()
@@ -81,7 +108,7 @@ def run_midas_worker(
                     next_command_ns += command_period_ns
 
             if now_ns >= next_read_ns:
-                pos, vel, cur = hand.read_pos_vel_cur()
+                pos = hand.read_pos()
                 sample_ns = time.monotonic_ns()
                 session = recorder.current()
                 if session is not None:
@@ -96,10 +123,6 @@ def run_midas_worker(
                     }
                     for motor_id, value in zip(hand.motor_ids, pos):
                         row[f"pos_{int(motor_id)}"] = f"{float(value):.9f}"
-                    for motor_id, value in zip(hand.motor_ids, vel):
-                        row[f"vel_{int(motor_id)}"] = f"{float(value):.9f}"
-                    for motor_id, value in zip(hand.motor_ids, cur):
-                        row[f"cur_{int(motor_id)}"] = f"{float(value):.9f}"
                     session.append_midas(row)
                     sample_idx += 1
                 next_read_ns += read_period_ns
