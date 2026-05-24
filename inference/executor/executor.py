@@ -1,17 +1,18 @@
-"""MIDAS action executor.
+"""MIDAS action executor (real hardware).
 
 Runs on the robot box. Each cycle (synchronous "stall" design):
 
     1. read robot state  -> [eef_6, hand_13]  (19,)
     2. capture camera frame (RGB, flipped to match training)
     3. send (image, state) to the predictor and block for the reply
-    4. execute the returned absolute action chunk at a fixed rate
+    4. execute the returned absolute action chunk at a fixed rate (--hz)
 
 Observation is captured at the *top* of the loop, i.e. right after the previous
 chunk finished executing, so the lag fed to the policy is only the network +
 inference time (not a whole chunk).
 
-Use --fake-robot to exercise the full network path with no hardware.
+The action application rate (--hz) must match the rate the policy was trained
+at (15Hz by default). For a no-hardware link/latency test, use fake_executor.py.
 """
 
 from __future__ import annotations
@@ -27,9 +28,9 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INFERENCE_DIR = Path(__file__).resolve().parents[1]
-for p in (str(REPO_ROOT), str(INFERENCE_DIR)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+for _p in (str(REPO_ROOT), str(INFERENCE_DIR)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import protocol  # noqa: E402
 
@@ -38,16 +39,16 @@ HAND_DIM = 13
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="MIDAS action executor (client).")
+    p = argparse.ArgumentParser(description="MIDAS action executor (real hardware).")
     p.add_argument("--predictor", default="192.168.0.206",
                    help="Predictor (GPU box) LAN IP.")
     p.add_argument("--port", type=int, default=5555)
-    p.add_argument("--hz", type=float, default=15.0, help="Action execution rate.")
+    p.add_argument("--hz", type=float, default=15.0,
+                   help="Action application rate. Must match the policy's training "
+                        "rate (default 15).")
     p.add_argument("--jpeg-quality", type=int, default=85)
     p.add_argument("--max-cycles", type=int, default=0,
                    help="Stop after N predict cycles (0 = run until Ctrl-C).")
-    p.add_argument("--fake-robot", action="store_true",
-                   help="No hardware: synthetic camera + zero state, no-op actions.")
     # Camera (must match data collection).
     p.add_argument("--cam-width", type=int, default=640)
     p.add_argument("--cam-height", type=int, default=480)
@@ -75,7 +76,6 @@ class RealSenseCamera:
         import pyrealsense2 as rs
 
         self._cv2 = cv2
-        self._rs = rs
         self._flip = flip
         self._pipeline = rs.pipeline()
         cfg = rs.config()
@@ -97,25 +97,6 @@ class RealSenseCamera:
 
     def close(self):
         self._pipeline.stop()
-
-
-class FakeCamera:
-    """Smooth synthetic frame that compresses like a real photo (~tens of KB),
-    so --fake-robot network timings reflect a realistic payload, not JPEG
-    worst-case noise. A little per-frame jitter keeps it from being trivial."""
-
-    def __init__(self, width, height):
-        yy, xx = np.meshgrid(
-            np.linspace(0, 255, height), np.linspace(0, 255, width), indexing="ij"
-        )
-        self._base = np.stack([xx, yy, (xx + yy) / 2], axis=-1).astype(np.float32)
-
-    def read(self) -> np.ndarray:
-        frame = self._base + np.random.uniform(-4, 4, self._base.shape)
-        return np.clip(frame, 0, 255).astype(np.uint8)
-
-    def close(self):
-        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -146,10 +127,16 @@ class RobotIO:
         hand = self._hand.read_pos()
         if eef is None:
             raise RuntimeError("Piper EEF pose unavailable.")
-        return np.concatenate([
+        state = np.concatenate([
             np.asarray(eef, dtype=np.float32),
             np.asarray(hand, dtype=np.float32),
         ])
+        if state.shape[0] != EEF_DIM + HAND_DIM:
+            raise RuntimeError(
+                f"State dim {state.shape[0]} != {EEF_DIM + HAND_DIM} "
+                f"(eef={len(eef)}, hand={len(hand)})."
+            )
+        return state
 
     def apply_action(self, action: np.ndarray) -> None:
         self._piper.move_eef(action[:EEF_DIM].tolist())
@@ -162,22 +149,8 @@ class RobotIO:
             self._piper.disconnect()
 
 
-class FakeRobot:
-    def __init__(self):
-        self._state = np.zeros(EEF_DIM + HAND_DIM, dtype=np.float32)
-
-    def read_state(self) -> np.ndarray:
-        return self._state.copy()
-
-    def apply_action(self, action: np.ndarray) -> None:
-        self._state = action.astype(np.float32)
-
-    def close(self):
-        pass
-
-
 # --------------------------------------------------------------------------- #
-# Main loop
+# Shared control loop (also used by fake_executor.py)
 # --------------------------------------------------------------------------- #
 def connect_predictor(host, port) -> socket.socket:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -202,34 +175,29 @@ def run(args, robot, camera, sock):
         if reply is None:
             print("Predictor closed the connection.")
             return
-        rseq, chunk, header = reply
+        _rseq, chunk, header = reply
         rtt_ms = (time.perf_counter() - t_send) * 1e3
 
-        # Execute the chunk at a fixed rate.
+        # Execute the chunk at a fixed rate using an absolute schedule so timing
+        # does not drift across the chunk.
+        next_t = time.perf_counter()
         for a in chunk:
-            t0 = time.perf_counter()
             robot.apply_action(a)
-            sleep_s = dt - (time.perf_counter() - t0)
+            next_t += dt
+            sleep_s = next_t - time.perf_counter()
             if sleep_s > 0:
                 time.sleep(sleep_s)
 
-        print(f"cycle={seq} chunk={chunk.shape[0]} "
+        print(f"cycle={seq} chunk={chunk.shape[0]} @ {args.hz:g}Hz "
               f"infer={header.get('infer_ms', 0):.1f}ms rtt={rtt_ms:.1f}ms")
         seq += 1
 
 
 def main():
     args = parse_args()
-
-    if args.fake_robot:
-        robot = FakeRobot()
-        camera = FakeCamera(args.cam_width, args.cam_height)
-        print("[fake-robot] no hardware; testing the network path only.")
-    else:
-        robot = RobotIO(args)
-        camera = RealSenseCamera(args.cam_width, args.cam_height, args.cam_fps,
-                                 args.cam_serial, args.cam_flip)
-
+    robot = RobotIO(args)
+    camera = RealSenseCamera(args.cam_width, args.cam_height, args.cam_fps,
+                             args.cam_serial, args.cam_flip)
     sock = connect_predictor(args.predictor, args.port)
     try:
         run(args, robot, camera, sock)
