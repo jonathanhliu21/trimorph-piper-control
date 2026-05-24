@@ -14,7 +14,7 @@ tune_wifi
 echo
 if [[ -f "${SCRIPT_DIR}/executor.py" ]]; then
     echo "Starting executor..."
-    exec python3 "${SCRIPT_DIR}/executor.py" "$@"
+    exec python3 -u "${SCRIPT_DIR}/executor.py" "$@"
 else
     echo "WiFi tuned. (No executor.py yet — add it in ${SCRIPT_DIR} and re-run.)"
 fi

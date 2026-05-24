@@ -14,7 +14,7 @@ tune_wifi
 echo
 if [[ -f "${SCRIPT_DIR}/predictor.py" ]]; then
     echo "Starting predictor..."
-    exec python3 "${SCRIPT_DIR}/predictor.py" "$@"
+    exec python3 -u "${SCRIPT_DIR}/predictor.py" "$@"
 else
     echo "WiFi tuned. (No predictor.py yet — add it in ${SCRIPT_DIR} and re-run.)"
 fi
