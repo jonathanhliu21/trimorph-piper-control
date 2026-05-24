@@ -100,11 +100,19 @@ class RealSenseCamera:
 
 
 class FakeCamera:
+    """Smooth synthetic frame that compresses like a real photo (~tens of KB),
+    so --fake-robot network timings reflect a realistic payload, not JPEG
+    worst-case noise. A little per-frame jitter keeps it from being trivial."""
+
     def __init__(self, width, height):
-        self._shape = (height, width, 3)
+        yy, xx = np.meshgrid(
+            np.linspace(0, 255, height), np.linspace(0, 255, width), indexing="ij"
+        )
+        self._base = np.stack([xx, yy, (xx + yy) / 2], axis=-1).astype(np.float32)
 
     def read(self) -> np.ndarray:
-        return np.random.randint(0, 256, self._shape, dtype=np.uint8)
+        frame = self._base + np.random.uniform(-4, 4, self._base.shape)
+        return np.clip(frame, 0, 255).astype(np.uint8)
 
     def close(self):
         pass
