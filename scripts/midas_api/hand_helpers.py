@@ -34,7 +34,7 @@ def import_hand_api():
 
 def add_hand_connection_args(parser) -> None:
     parser.add_argument("--port", default=None, help="Dynamixel hand serial port.")
-    parser.add_argument("--baudrate", type=int, default=1_000_000)
+    parser.add_argument("--baudrate", type=int, default=4_000_000)
     parser.add_argument(
         "--config",
         default=str(DEFAULT_CONFIG_PATH),
