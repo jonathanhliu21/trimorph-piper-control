@@ -21,7 +21,7 @@ from collection.midas_worker import apply_midas_runtime_limits, load_midas_confi
 
 
 # Defaults. CLI flags can override the episode path and replay rate.
-DATASET_ROOT = Path("data_midas")
+DATASET_ROOT = Path("data_midas4")
 REPLAY_HZ = 30.0
 PREPOSITION = True
 PREPOSITION_SECONDS = 3.0
@@ -89,6 +89,23 @@ def parse_args() -> argparse.Namespace:
         "--no-piper-enable",
         action="store_true",
         help="Do not call Piper enable() before replay.",
+    )
+    parser.add_argument(
+        "--chunk",
+        action="store_true",
+        help="Mimic inference chunking: execute actions in groups with a short pause between each group.",
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=8,
+        help="Number of actions per group when --chunk is set. Default: 8",
+    )
+    parser.add_argument(
+        "--chunk-pause-ms",
+        type=float,
+        default=60.0,
+        help="Pause between groups in ms when --chunk is set. Default: 50",
     )
     return parser.parse_args()
 
@@ -265,28 +282,41 @@ def main() -> int:
             api.set_speed_percent(PIPER_REPLAY_SPEED_PERCENT)
 
         period_s = 1.0 / args.rate_hz
+        chunk_pause_s = args.chunk_pause_ms / 1000.0
         start_t = time.monotonic()
-        next_tick_t = start_t
         tick = 0
+        episode_t = 0.0   # episode time excluding chunk pauses
+        within_chunk = 0
         print(
             f"Replaying {episode_dir} for {duration_s:.3f}s at {args.rate_hz:.1f}Hz "
             f"({'hand' if replay_hand else ''}{'+' if replay_hand and replay_arm else ''}"
-            f"{'arm' if replay_arm else ''})."
+            f"{'arm' if replay_arm else ''})"
+            + (f" [chunk={args.chunk_size} pause={args.chunk_pause_ms:.0f}ms]" if args.chunk else "")
+            + "."
         )
         while True:
-            elapsed_s = time.monotonic() - start_t
-            if elapsed_s > duration_s:
+            if episode_t > duration_s:
                 break
             if hand is not None and hand_stream is not None:
-                hand.set_positions(sample_stream(*hand_stream, elapsed_s), clip=True)
+                hand.set_positions(sample_stream(*hand_stream, episode_t), clip=True)
             if api is not None and piper_stream is not None:
-                api.move_eef(sample_stream(*piper_stream, elapsed_s))
+                api.move_eef(sample_stream(*piper_stream, episode_t))
 
+            episode_t += period_s
             tick += 1
             next_tick_t = start_t + tick * period_s
             sleep_s = next_tick_t - time.monotonic()
             if sleep_s > 0:
                 time.sleep(sleep_s)
+
+            if args.chunk:
+                within_chunk += 1
+                if within_chunk >= args.chunk_size:
+                    within_chunk = 0
+                    time.sleep(chunk_pause_s)
+                    # Re-anchor so next chunk doesn't try to catch up through the pause
+                    start_t = time.monotonic()
+                    tick = 0
 
         print("Replay complete.")
         return 0

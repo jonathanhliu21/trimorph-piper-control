@@ -17,6 +17,7 @@ from collection.realsense_worker import format_realsense_devices
 from collection.runner import run_collection
 from scripts.piper_api.foot_pedal import format_input_devices, list_input_devices
 
+DATASET_ROOT = "data_midas4"  # e.g. "data_midas1" — overrides config.py; overridden by --dataset-root flag
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -25,6 +26,11 @@ def parse_args() -> argparse.Namespace:
             "data_collection/collection/config.py; these flags are only for "
             "device selection and quick inspection."
         )
+    )
+    parser.add_argument(
+        "--dataset-root",
+        default=None,
+        help="Output folder for collected data. Overrides DATASET_ROOT in config.py.",
     )
     parser.add_argument(
         "--realsense-serial",
@@ -99,6 +105,7 @@ def main() -> int:
 
     config = apply_device_overrides(
         build_config(),
+        dataset_root=args.dataset_root or DATASET_ROOT,
         realsense_serial=args.realsense_serial,
         teleop_camera=args.teleop_camera,
         foot_pedal_device=args.foot_pedal_device,

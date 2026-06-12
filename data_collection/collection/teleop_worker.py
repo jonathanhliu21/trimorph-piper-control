@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
+from pathlib import Path
 
 from .config import CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
@@ -20,6 +22,25 @@ def run_teleop_worker(
     from midas_hand_retargeter.adaptor import PIP_DIP_LOOKUP_MODE
     from midas_hand_teleop.detector import MediaPipeHandDetector
     from midas_hand_teleop.pipeline import MidasTeleopPipeline
+
+    import midas_hand_teleop as _teleop_pkg
+    pinch_calibration = None
+    try:
+        from midas_hand_teleop.pinch_calibration import (
+            PinchCalibration,
+            extract_pinch_features,
+            load_pinch_calibration,
+        )
+        _pinch_path = (
+            Path(_teleop_pkg.__file__).parent.parent / "config" / "pinch_calibration.json"
+        )
+        if _pinch_path.exists():
+            pinch_calibration = load_pinch_calibration(_pinch_path)
+            print(f"Loaded pinch calibration from {_pinch_path}")
+        else:
+            print("No pinch calibration found; running without pinch correction.")
+    except ImportError:
+        print("Pinch calibration not available in this version of midas_hand_teleop.")
 
     camera = (
         int(config.teleop_camera)
@@ -67,11 +88,19 @@ def run_teleop_worker(
 
             if hand_frame is not None:
                 teleop_frame = pipeline.process_landmark_frame(hand_frame)
+                if pinch_calibration is not None:
+                    pinch_features = extract_pinch_features(teleop_frame.landmarks)
+                    teleop_frame = replace(
+                        teleop_frame,
+                        retargeting=pinch_calibration.apply(teleop_frame.retargeting, pinch_features),
+                    )
                 last_teleop_frame = teleop_frame
                 teacher_active, _ = shared.teacher_mode()
                 if teacher_active:
                     shared.set_midas_target(teleop_frame.hardware_motor_positions)
                 detector.draw_landmarks(display, hand_frame)
+            elif pinch_calibration is not None:
+                pinch_calibration.update_confidence(None)
 
             if shared.calibrate_neutral.is_set():
                 shared.calibrate_neutral.clear()

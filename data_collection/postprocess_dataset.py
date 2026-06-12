@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import math
@@ -59,11 +60,24 @@ class ProcessedPaths:
     sync_path: Path
 
 
-def build_config() -> PostprocessConfig:
-    dataset_root = Path(DATASET_ROOT).expanduser()
-    raw_dir = Path(RAW_DIR).expanduser()
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Convert raw Midas/Piper episodes into diffusion-policy files."
+    )
+    parser.add_argument(
+        "dataset_root",
+        nargs="?",
+        default=None,
+        help="Path to the dataset directory to process. Overrides DATASET_ROOT.",
+    )
+    return parser.parse_args()
+
+
+def build_config(dataset_root: Path | None = None) -> PostprocessConfig:
+    root = Path(dataset_root).expanduser() if dataset_root is not None else Path(DATASET_ROOT).expanduser()
+    raw_dir = root / "raw"
     return PostprocessConfig(
-        dataset_root=dataset_root,
+        dataset_root=root,
         raw_dir=raw_dir,
         overwrite_processed_files=OVERWRITE_PROCESSED_FILES,
         process_only_raw_statuses=set(PROCESS_ONLY_RAW_STATUSES),
@@ -442,7 +456,8 @@ def validate_processed_dataset(dataset_root: Path) -> None:
 
 
 def main() -> int:
-    config = build_config()
+    args = parse_args()
+    config = build_config(args.dataset_root)
     validate_config(config)
     ensure_processed_dirs(config.dataset_root)
 

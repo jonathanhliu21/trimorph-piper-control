@@ -10,7 +10,7 @@ from scripts.midas_api import DEFAULT_CONFIG_PATH
 #   python3 data_collection/collect_raw_dataset.py
 DATASET_ROOT = Path("data_midas")
 
-READY_SECONDS = 1.0
+READY_SECONDS = 0.2
 STOP_EPISODE_ON_TEACHER_MODE_LOST = True
 
 SHOW_REALSENSE_VIEW = True
@@ -29,7 +29,7 @@ CAMERA_WARMUP_FRAMES = 30
 VIDEO_CODEC = "mp4v"
 
 RECORD_TELEOP_CAMERA = False
-TELEOP_CAMERA: int | str = 0
+TELEOP_CAMERA: int | str = 6
 TELEOP_CAMERA_FPS = 30
 TELEOP_HAND_TYPE = "Right"
 TELEOP_INPUT_HAND = "auto"
@@ -45,9 +45,9 @@ MIDAS_COMMAND_RATE_HZ = 50.0
 MIDAS_HAND_PORT: str | None = None
 MIDAS_HAND_BAUDRATE = 4_000_000
 MIDAS_HAND_CONFIG = str(DEFAULT_CONFIG_PATH)
-MIDAS_CURRENT_LIMIT_MA: int | None = 250
-MIDAS_PROFILE_VELOCITY_RAD_S: float | None = 2.0
-MIDAS_PROFILE_ACCELERATION_RAD_S2: float | None = 15.0
+MIDAS_CURRENT_LIMIT_MA: int | None = 300
+MIDAS_PROFILE_VELOCITY_RAD_S: float | None = 3.0
+MIDAS_PROFILE_ACCELERATION_RAD_S2: float | None = 50.0
 MIDAS_COMMAND_SCALE = 1.0
 MIDAS_MAX_STEP_RAD = 0.15
 MIDAS_INTERPOLATION_ALPHA = 0.4
@@ -196,11 +196,14 @@ def build_config() -> CollectionConfig:
 def apply_device_overrides(
     config: CollectionConfig,
     *,
+    dataset_root: str | None = None,
     realsense_serial: str | None = None,
     teleop_camera: str | None = None,
     foot_pedal_device: str | None = None,
 ) -> CollectionConfig:
     updates = {}
+    if dataset_root is not None:
+        updates["dataset_root"] = Path(dataset_root).expanduser()
     if realsense_serial is not None:
         updates["camera_serial"] = realsense_serial
     if teleop_camera is not None:
