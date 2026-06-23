@@ -226,6 +226,9 @@ def main_loop(
             break
         if key == ord("c"):
             shared.calibrate_neutral.set()
+        if key == ord("e"):
+            enabled = shared.toggle_teleop_enabled()
+            print(f"Teleop enabled: {enabled}")
 
         teacher_active, teacher_status = shared.teacher_mode()
         if (
@@ -297,6 +300,7 @@ def run_collection(config: CollectionConfig) -> int:
     raw_root(config.dataset_root).mkdir(parents=True, exist_ok=True)
 
     shared = SharedState()
+    shared.set_teleop_enabled(config.teleop_enable_default)
     recorder = RecordingManager()
     errors: queue.Queue[WorkerError] = queue.Queue()
 

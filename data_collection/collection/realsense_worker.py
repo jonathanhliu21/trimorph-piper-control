@@ -121,6 +121,7 @@ def run_realsense_worker(
     cv2 = import_cv2()
     rs = import_realsense()
     pipeline = rs.pipeline()
+    align = rs.align(rs.stream.color)
     writer = None
     writer_session: EpisodeBuffer | None = None
     frame_idx = 0
@@ -139,6 +140,13 @@ def run_realsense_worker(
         selected["width"],
         selected["height"],
         rs.format.rgb8,
+        selected["fps"],
+    )
+    rs_config.enable_stream(
+        rs.stream.depth,
+        selected["width"],
+        selected["height"],
+        rs.format.z16,
         selected["fps"],
     )
 
@@ -198,8 +206,10 @@ def run_realsense_worker(
                     ) from exc
                 continue
 
+            frames = align.process(frames)
             color_frame = frames.get_color_frame()
-            if not color_frame:
+            depth_frame = frames.get_depth_frame()
+            if not color_frame or not depth_frame:
                 continue
             timeout_count = 0
             sample_ns = time.monotonic_ns()
@@ -208,6 +218,23 @@ def run_realsense_worker(
             rgb = flip_frame(cv2, rgb, config.camera_flip)
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             shared.set_realsense_frame(bgr)
+            try:
+                intr = color_frame.profile.as_video_stream_profile().intrinsics
+                intrinsics = {
+                    "width": float(intr.width),
+                    "height": float(intr.height),
+                    "fx": float(intr.fx),
+                    "fy": float(intr.fy),
+                    "ppx": float(intr.ppx),
+                    "ppy": float(intr.ppy),
+                }
+            except Exception:
+                intrinsics = None
+
+            depth_raw = np.asanyarray(depth_frame.get_data())
+            depth_m = depth_raw.astype(np.float32) * float(depth_frame.get_units())
+            depth_m = flip_frame(cv2, depth_m, config.camera_flip)
+            shared.set_realsense_depth(depth_m, intrinsics)
 
             if writer is not None and writer_session is not None:
                 writer.write(bgr)

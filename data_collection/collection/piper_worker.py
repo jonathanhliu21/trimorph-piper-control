@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import math
 import time
+
+import numpy as np
 
 from scripts.piper_api.teacher_mode import get_teacher_mode
 
 from .config import RAW_EEF_FIELDS, CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
+
+
+def _matrix_to_euler_xyz(r: np.ndarray) -> tuple[float, float, float]:
+    # fixed-axis XYZ: R = Rz(yaw) * Ry(pitch) * Rx(roll)
+    pitch = math.asin(float(-r[2, 0]))
+    cp = math.cos(pitch)
+    if abs(cp) < 1e-9:
+        roll = 0.0
+        yaw = math.atan2(float(-r[0, 1]), float(r[1, 1]))
+    else:
+        roll = math.atan2(float(r[2, 1]), float(r[2, 2]))
+        yaw = math.atan2(float(r[1, 0]), float(r[0, 0]))
+    return roll, pitch, yaw
 
 
 def run_piper_worker(
@@ -29,11 +45,14 @@ def run_piper_worker(
     init_done.set()
 
     sample_period_ns = int(round(1_000_000_000 / config.piper_rate_hz))
+    command_period_ns = int(round(1_000_000_000 / config.piper_command_rate_hz))
     teacher_period_ns = int(round(1_000_000_000 / config.teacher_mode_poll_hz))
     next_sample_ns = time.monotonic_ns()
+    next_command_ns = next_sample_ns
     next_teacher_ns = 0
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
+    wrist_cam_to_piper = np.asarray(config.wrist_cam_to_piper_eef_4x4, dtype=np.float64)
     try:
         while not shared.shutdown.is_set():
             now_ns = time.monotonic_ns()
@@ -41,6 +60,19 @@ def run_piper_worker(
                 active, status = get_teacher_mode(api)
                 shared.set_teacher_mode(active, status)
                 next_teacher_ns = now_ns + teacher_period_ns
+
+            if now_ns >= next_command_ns:
+                if shared.teleop_enabled():
+                    wrist_pose_cam = shared.latest_wrist_pose_cam()
+                    if wrist_pose_cam is not None and wrist_pose_cam.shape == (4, 4):
+                        target = wrist_cam_to_piper @ wrist_pose_cam
+                        r = target[:3, :3]
+                        t = target[:3, 3]
+                        roll, pitch, yaw = _matrix_to_euler_xyz(r)
+                        api.move_eef([float(t[0]), float(t[1]), float(t[2]), float(roll), float(pitch), float(yaw)])
+                next_command_ns += command_period_ns
+                while next_command_ns < now_ns:
+                    next_command_ns += command_period_ns
 
             if now_ns >= next_sample_ns:
                 eef = api.get_eef_state()

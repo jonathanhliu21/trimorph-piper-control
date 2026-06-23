@@ -39,6 +39,9 @@ TELEOP_MIRROR_AXIS = "y"
 TELEOP_LOCK_INPUT_HAND = False
 TELEOP_HAND_LANDMARKER_MODEL: str | None = None
 TELEOP_SCALING_FACTOR = 1.15
+TELEOP_SOURCE = "realsense"  # one of: "realsense", "opencv"
+
+TELEOP_ENABLE_DEFAULT = False  # toggled at runtime (press 'e' in a display window)
 
 MIDAS_MEASURE_RATE_HZ = 200.0
 MIDAS_COMMAND_RATE_HZ = 50.0
@@ -54,11 +57,21 @@ MIDAS_INTERPOLATION_ALPHA = 0.4
 MIDAS_CONFIGURE_HARDWARE = True
 
 PIPER_RATE_HZ = 200.0
+PIPER_COMMAND_RATE_HZ = 30.0
 PIPER_INTERFACE = "socketcan"
 PIPER_CHANNEL = "can0"
 PIPER_FIRMWARE = "default"  # one of: "default", "v183", "v188"
 PIPER_INSTALLATION_POS: str | None = "right"
 TEACHER_MODE_POLL_HZ = 20.0
+
+# Wrist teleop: interpret the estimated wrist pose (in RealSense camera frame) as a target
+# pose for Piper EEF after applying this 4x4 transform.
+WRIST_CAM_TO_PIPER_EEF_4X4 = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [0.0, 0.0, 0.0, 1.0],
+]
 
 ENABLE_TACTILE = True
 REQUIRE_TACTILE = True
@@ -105,6 +118,8 @@ class CollectionConfig:
     teleop_lock_input_hand: bool
     teleop_hand_landmarker_model: str | None
     teleop_scaling_factor: float
+    teleop_source: str
+    teleop_enable_default: bool
     midas_measure_rate_hz: float
     midas_command_rate_hz: float
     midas_hand_port: str | None
@@ -118,11 +133,13 @@ class CollectionConfig:
     midas_interpolation_alpha: float
     midas_configure_hardware: bool
     piper_rate_hz: float
+    piper_command_rate_hz: float
     piper_interface: str
     piper_channel: str
     piper_firmware: str
     piper_installation_pos: str | None
     teacher_mode_poll_hz: float
+    wrist_cam_to_piper_eef_4x4: list[list[float]]
     enable_tactile: bool
     require_tactile: bool
     tactile_port: str | None
@@ -163,6 +180,8 @@ def build_config() -> CollectionConfig:
         teleop_lock_input_hand=TELEOP_LOCK_INPUT_HAND,
         teleop_hand_landmarker_model=TELEOP_HAND_LANDMARKER_MODEL,
         teleop_scaling_factor=TELEOP_SCALING_FACTOR,
+        teleop_source=TELEOP_SOURCE,
+        teleop_enable_default=TELEOP_ENABLE_DEFAULT,
         midas_measure_rate_hz=MIDAS_MEASURE_RATE_HZ,
         midas_command_rate_hz=MIDAS_COMMAND_RATE_HZ,
         midas_hand_port=MIDAS_HAND_PORT,
@@ -176,11 +195,13 @@ def build_config() -> CollectionConfig:
         midas_interpolation_alpha=MIDAS_INTERPOLATION_ALPHA,
         midas_configure_hardware=MIDAS_CONFIGURE_HARDWARE,
         piper_rate_hz=PIPER_RATE_HZ,
+        piper_command_rate_hz=PIPER_COMMAND_RATE_HZ,
         piper_interface=PIPER_INTERFACE,
         piper_channel=PIPER_CHANNEL,
         piper_firmware=PIPER_FIRMWARE,
         piper_installation_pos=PIPER_INSTALLATION_POS,
         teacher_mode_poll_hz=TEACHER_MODE_POLL_HZ,
+        wrist_cam_to_piper_eef_4x4=[list(row) for row in WRIST_CAM_TO_PIPER_EEF_4X4],
         enable_tactile=ENABLE_TACTILE,
         require_tactile=REQUIRE_TACTILE,
         tactile_port=TACTILE_PORT,
@@ -219,6 +240,7 @@ def validate_config(config: CollectionConfig) -> None:
         "MIDAS_MEASURE_RATE_HZ": config.midas_measure_rate_hz,
         "MIDAS_COMMAND_RATE_HZ": config.midas_command_rate_hz,
         "PIPER_RATE_HZ": config.piper_rate_hz,
+        "PIPER_COMMAND_RATE_HZ": config.piper_command_rate_hz,
         "TEACHER_MODE_POLL_HZ": config.teacher_mode_poll_hz,
         "TACTILE_RATE_HZ": config.tactile_rate_hz,
     }.items():
@@ -238,6 +260,14 @@ def validate_config(config: CollectionConfig) -> None:
         raise ValueError("TELEOP_HAND_TYPE must be Right or Left")
     if config.teleop_input_hand not in {"auto", "Right", "Left"}:
         raise ValueError("TELEOP_INPUT_HAND must be auto, Right, or Left")
+    if config.teleop_source not in {"realsense", "opencv"}:
+        raise ValueError("TELEOP_SOURCE must be one of: realsense, opencv")
+    if (
+        not isinstance(config.wrist_cam_to_piper_eef_4x4, list)
+        or len(config.wrist_cam_to_piper_eef_4x4) != 4
+        or any(not isinstance(row, list) or len(row) != 4 for row in config.wrist_cam_to_piper_eef_4x4)
+    ):
+        raise ValueError("WRIST_CAM_TO_PIPER_EEF_4X4 must be a 4x4 nested list")
     if (
         config.midas_profile_velocity_rad_s is not None
         and config.midas_profile_velocity_rad_s < 0
