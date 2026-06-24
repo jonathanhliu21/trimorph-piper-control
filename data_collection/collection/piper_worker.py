@@ -40,6 +40,7 @@ def run_piper_worker(
     delta_controller = DeltaTeleopController(delta_config)
     reported_calibrated = False
     last_calibration_report = -1
+    arm_teleop_active = False
     print(
         "Delta wrist teleop loaded:",
         f"config={config.delta_teleop_config_path}",
@@ -56,7 +57,14 @@ def run_piper_worker(
 
             if now_ns >= next_command_ns:
                 teacher_active, _ = shared.teacher_mode()
-                if teacher_active and shared.teleop_enabled():
+                should_run_arm_teleop = (not teacher_active) and shared.teleop_enabled()
+                if should_run_arm_teleop and not arm_teleop_active:
+                    delta_controller.reset_calibration()
+                    reported_calibrated = False
+                    last_calibration_report = -1
+                    print("Arm teleop enabled; recalibrating wrist reference.")
+                arm_teleop_active = should_run_arm_teleop
+                if should_run_arm_teleop:
                     wrist_pose_cam = shared.latest_wrist_pose_cam()
                     robot_eef = None if delta_controller.calibrated else api.get_eef_pose()
                     target_eef = delta_controller.update(wrist_pose_cam, robot_eef)

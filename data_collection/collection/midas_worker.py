@@ -90,7 +90,8 @@ def run_midas_worker(
 
             if now_ns >= next_command_ns:
                 teacher_active, _ = shared.teacher_mode()
-                target = shared.latest_midas_target() if teacher_active else None
+                control_active = teacher_active or shared.teleop_enabled()
+                target = shared.latest_midas_target() if control_active else None
                 if target is not None:
                     target = hand.clip_positions(target * config.midas_command_scale)
                     delta = target - last_command

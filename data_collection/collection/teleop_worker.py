@@ -109,7 +109,7 @@ def run_teleop_worker(
                     )
                 last_teleop_frame = teleop_frame
                 teacher_active, _ = shared.teacher_mode()
-                if teacher_active:
+                if teacher_active or shared.teleop_enabled():
                     shared.set_midas_target(teleop_frame.hardware_motor_positions)
                 # Wrist pose estimate in the RealSense camera optical frame (4x4).
                 if depth_m is not None and intrinsics is not None:

@@ -221,16 +221,19 @@ def main_loop(
         if config.show_teleop_view and teleop_bgr is not None:
             cv2.imshow(config.teleop_window_name, teleop_bgr)
         key = cv2.waitKey(1) & 0xFF
+        teacher_active, teacher_status = shared.teacher_mode()
         if key in (ord("q"), 27):
             shared.shutdown.set()
             break
         if key == ord("c"):
             shared.calibrate_neutral.set()
         if key == ord("e"):
-            enabled = shared.toggle_teleop_enabled()
-            print(f"Teleop enabled: {enabled}")
-
-        teacher_active, teacher_status = shared.teacher_mode()
+            if teacher_active:
+                shared.set_teleop_enabled(False)
+                print("Arm teleop disabled while Piper teacher mode is active.")
+            else:
+                enabled = shared.toggle_teleop_enabled()
+                print(f"Arm teleop enabled: {enabled}")
         if (
             recorder.is_recording()
             and config.stop_episode_on_teacher_mode_lost
