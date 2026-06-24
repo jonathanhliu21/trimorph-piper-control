@@ -1,29 +1,13 @@
 from __future__ import annotations
 
-import math
 import time
 
-import numpy as np
-
+from delta_teleop_controller import DeltaTeleopController, load_delta_teleop_config
 from scripts.piper_api.teacher_mode import get_teacher_mode
 
 from .config import RAW_EEF_FIELDS, CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
-
-
-def _matrix_to_euler_xyz(r: np.ndarray) -> tuple[float, float, float]:
-    # fixed-axis XYZ: R = Rz(yaw) * Ry(pitch) * Rx(roll)
-    pitch = math.asin(float(-r[2, 0]))
-    cp = math.cos(pitch)
-    if abs(cp) < 1e-9:
-        roll = 0.0
-        yaw = math.atan2(float(-r[0, 1]), float(r[1, 1]))
-    else:
-        roll = math.atan2(float(r[2, 1]), float(r[2, 2]))
-        yaw = math.atan2(float(r[1, 0]), float(r[0, 0]))
-    return roll, pitch, yaw
-
 
 def run_piper_worker(
     config: CollectionConfig,
@@ -52,7 +36,16 @@ def run_piper_worker(
     next_teacher_ns = 0
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
-    wrist_cam_to_piper = np.asarray(config.wrist_cam_to_piper_eef_4x4, dtype=np.float64)
+    delta_config = load_delta_teleop_config(config.delta_teleop_config_path)
+    delta_controller = DeltaTeleopController(delta_config)
+    reported_calibrated = False
+    last_calibration_report = -1
+    print(
+        "Delta wrist teleop loaded:",
+        f"config={config.delta_teleop_config_path}",
+        f"orientation_enabled={delta_config.orientation_enabled}",
+        f"scale_factor={delta_config.scale_factor}",
+    )
     try:
         while not shared.shutdown.is_set():
             now_ns = time.monotonic_ns()
@@ -64,12 +57,20 @@ def run_piper_worker(
             if now_ns >= next_command_ns:
                 if shared.teleop_enabled():
                     wrist_pose_cam = shared.latest_wrist_pose_cam()
-                    if wrist_pose_cam is not None and wrist_pose_cam.shape == (4, 4):
-                        target = wrist_cam_to_piper @ wrist_pose_cam
-                        r = target[:3, :3]
-                        t = target[:3, 3]
-                        roll, pitch, yaw = _matrix_to_euler_xyz(r)
-                        api.move_eef([float(t[0]), float(t[1]), float(t[2]), float(roll), float(pitch), float(yaw)])
+                    robot_eef = None if delta_controller.calibrated else api.get_eef_pose()
+                    target_eef = delta_controller.update(wrist_pose_cam, robot_eef)
+                    status = delta_controller.status()
+                    if not status.calibrated and status.calibration_count != last_calibration_report:
+                        last_calibration_report = status.calibration_count
+                        print(
+                            "Wrist delta calibration:",
+                            f"{status.calibration_count}/{status.calibration_frames}",
+                        )
+                    if status.calibrated and not reported_calibrated:
+                        reported_calibrated = True
+                        print("Wrist delta calibration complete.")
+                    if target_eef is not None:
+                        api.move_eef(target_eef)
                 next_command_ns += command_period_ns
                 while next_command_ns < now_ns:
                     next_command_ns += command_period_ns

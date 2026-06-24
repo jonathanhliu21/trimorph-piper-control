@@ -64,8 +64,11 @@ PIPER_FIRMWARE = "default"  # one of: "default", "v183", "v188"
 PIPER_INSTALLATION_POS: str | None = "right"
 TEACHER_MODE_POLL_HZ = 20.0
 
-# Wrist teleop: interpret the estimated wrist pose (in RealSense camera frame) as a target
-# pose for Piper EEF after applying this 4x4 transform.
+# Wrist delta teleop: manual camera-to-robot transform and safety parameters.
+DELTA_TELEOP_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.yaml"
+
+# Legacy absolute wrist teleop transform. Kept only for older scripts/configs; the
+# live Piper worker now uses DELTA_TELEOP_CONFIG_PATH and relative wrist deltas.
 WRIST_CAM_TO_PIPER_EEF_4X4 = [
     [1.0, 0.0, 0.0, 0.0],
     [0.0, 1.0, 0.0, 0.0],
@@ -139,6 +142,7 @@ class CollectionConfig:
     piper_firmware: str
     piper_installation_pos: str | None
     teacher_mode_poll_hz: float
+    delta_teleop_config_path: str
     wrist_cam_to_piper_eef_4x4: list[list[float]]
     enable_tactile: bool
     require_tactile: bool
@@ -201,6 +205,7 @@ def build_config() -> CollectionConfig:
         piper_firmware=PIPER_FIRMWARE,
         piper_installation_pos=PIPER_INSTALLATION_POS,
         teacher_mode_poll_hz=TEACHER_MODE_POLL_HZ,
+        delta_teleop_config_path=str(Path(DELTA_TELEOP_CONFIG_PATH).expanduser()),
         wrist_cam_to_piper_eef_4x4=[list(row) for row in WRIST_CAM_TO_PIPER_EEF_4X4],
         enable_tactile=ENABLE_TACTILE,
         require_tactile=REQUIRE_TACTILE,
@@ -256,6 +261,8 @@ def validate_config(config: CollectionConfig) -> None:
         raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
     if config.foot_pedal_debounce_seconds < 0:
         raise ValueError("FOOT_PEDAL_DEBOUNCE_SECONDS must be 0 or greater")
+    if not config.delta_teleop_config_path:
+        raise ValueError("DELTA_TELEOP_CONFIG_PATH must not be empty")
     if config.teleop_hand_type not in {"Right", "Left"}:
         raise ValueError("TELEOP_HAND_TYPE must be Right or Left")
     if config.teleop_input_hand not in {"auto", "Right", "Left"}:

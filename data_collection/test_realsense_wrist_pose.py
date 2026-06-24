@@ -15,48 +15,11 @@ Controls:
 
 from __future__ import annotations
 
-import math
 import time
 
 import numpy as np
 
-
-def _matrix_to_euler_xyz(r: np.ndarray) -> tuple[float, float, float]:
-    # fixed-axis XYZ: R = Rz(yaw) * Ry(pitch) * Rx(roll)
-    pitch = math.asin(float(-r[2, 0]))
-    cp = math.cos(pitch)
-    if abs(cp) < 1e-9:
-        roll = 0.0
-        yaw = math.atan2(float(-r[0, 1]), float(r[1, 1]))
-    else:
-        roll = math.atan2(float(r[2, 1]), float(r[2, 2]))
-        yaw = math.atan2(float(r[1, 0]), float(r[0, 0]))
-    return roll, pitch, yaw
-
-
-def _image_landmarks_to_pixels(image_landmarks, width: int, height: int) -> np.ndarray | None:
-    if image_landmarks is None:
-        return None
-    try:
-        if hasattr(image_landmarks, "landmark"):
-            image_landmarks = getattr(image_landmarks, "landmark")
-        pts = []
-        for lm in image_landmarks:
-            if hasattr(lm, "x") and hasattr(lm, "y"):
-                x = float(lm.x)
-                y = float(lm.y)
-            else:
-                x = float(lm[0])
-                y = float(lm[1])
-            pts.append([x * width, y * height])
-        arr = np.asarray(pts, dtype=np.float64)
-        if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] == 0:
-            return None
-        if not np.isfinite(arr).all():
-            return None
-        return arr
-    except Exception:
-        return None
+from wrist_pose_estimator import estimate_wrist_pose_cam, matrix_to_euler_xyz
 
 
 def main() -> int:
@@ -79,9 +42,6 @@ def main() -> int:
     from midas_hand_retargeter.adaptor import PIP_DIP_LOOKUP_MODE
     from midas_hand_teleop.detector import MediaPipeHandDetector
     from midas_hand_teleop.pipeline import MidasTeleopPipeline
-
-    # Reuse helpers from the collector’s teleop worker.
-    from collection.teleop_worker import _rigid_transform
 
     print("Starting RealSense wrist pose test...", flush=True)
 
@@ -131,96 +91,25 @@ def main() -> int:
             hand_frame = detector.detect_rgb(rgb)
             display = bgr.copy()
             pose = None
-            pixels_xy = None
 
             if hand_frame is not None:
                 teleop_frame = teleop.process_landmark_frame(hand_frame)
                 detector.draw_landmarks(display, hand_frame)
-
-                # 2D pixels from the detector frame.
-                pixels_xy = _image_landmarks_to_pixels(
-                    getattr(hand_frame, "image_landmarks", None),
-                    display.shape[1],
-                    display.shape[0],
+                pose = estimate_wrist_pose_cam(
+                    cv2,
+                    hand_frame,
+                    getattr(teleop_frame, "landmarks", None),
+                    depth_m,
+                    intrinsics,
+                    width=display.shape[1],
+                    height=display.shape[0],
                 )
-                # 3D keypoints in the local wrist frame from the existing pipeline output.
-                wrist_points = np.asarray(getattr(teleop_frame, "landmarks", None), dtype=np.float64)
-                if (
-                    pixels_xy is not None
-                    and wrist_points.ndim == 2
-                    and wrist_points.shape[1] == 3
-                    and len(pixels_xy) == len(wrist_points)
-                ):
-                    ok = np.isfinite(wrist_points).all(axis=1)
-                    if int(np.count_nonzero(ok)) >= 6:
-                        fx = float(intrinsics["fx"])
-                        fy = float(intrinsics["fy"])
-                        ppx = float(intrinsics["ppx"])
-                        ppy = float(intrinsics["ppy"])
-                        camera_matrix = np.asarray(
-                            [[fx, 0.0, ppx], [0.0, fy, ppy], [0.0, 0.0, 1.0]],
-                            dtype=np.float64,
-                        )
-                        dist = np.zeros((4, 1), dtype=np.float64)
-                        obj = wrist_points[ok].astype(np.float64, copy=False)
-                        img = pixels_xy[ok].astype(np.float64, copy=False)
-
-                        success = False
-                        try:
-                            success, rvec, tvec, _inliers = cv2.solvePnPRansac(
-                                obj,
-                                img,
-                                camera_matrix,
-                                distCoeffs=dist,
-                                flags=cv2.SOLVEPNP_EPNP,
-                                reprojectionError=6.0,
-                                confidence=0.99,
-                                iterationsCount=100,
-                            )
-                        except Exception:
-                            success = False
-
-                        if success:
-                            rmat, _ = cv2.Rodrigues(rvec)
-                            pose = np.eye(4, dtype=np.float64)
-                            pose[:3, :3] = np.asarray(rmat, dtype=np.float64)
-                            pose[:3, 3] = np.asarray(tvec, dtype=np.float64).reshape(3)
-                        else:
-                            # Fallback: form 3D camera points using depth then rigid-fit.
-                            cam_pts = []
-                            valid = []
-                            h, w = depth_m.shape[:2]
-                            for (u, v) in img:
-                                ui = int(round(float(u)))
-                                vi = int(round(float(v)))
-                                if ui < 0 or vi < 0 or ui >= w or vi >= h:
-                                    cam_pts.append([math.nan, math.nan, math.nan])
-                                    valid.append(False)
-                                    continue
-                                z = float(depth_m[vi, ui])
-                                if not math.isfinite(z) or z <= 0:
-                                    cam_pts.append([math.nan, math.nan, math.nan])
-                                    valid.append(False)
-                                    continue
-                                x = (float(ui) - ppx) / fx * z
-                                y = (float(vi) - ppy) / fy * z
-                                cam_pts.append([x, y, z])
-                                valid.append(True)
-                            cam_pts = np.asarray(cam_pts, dtype=np.float64)
-                            valid = np.asarray(valid, dtype=bool) & np.isfinite(cam_pts).all(axis=1)
-                            if int(np.count_nonzero(valid)) >= 6:
-                                rt = _rigid_transform(obj[valid], cam_pts[valid])
-                                if rt is not None:
-                                    r, t = rt
-                                    pose = np.eye(4, dtype=np.float64)
-                                    pose[:3, :3] = r
-                                    pose[:3, 3] = t
 
             # Print only when a pose is available.
             now = time.time()
             if pose is not None and now - last_print >= 0.2:
                 last_print = now
-                roll, pitch, yaw = _matrix_to_euler_xyz(pose[:3, :3])
+                roll, pitch, yaw = matrix_to_euler_xyz(pose[:3, :3])
                 t = pose[:3, 3]
                 print(
                     "wrist_pose_cam:",
@@ -234,7 +123,7 @@ def main() -> int:
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
-b    finally:
+    finally:
         try:
             teleop.close()
         except Exception:
