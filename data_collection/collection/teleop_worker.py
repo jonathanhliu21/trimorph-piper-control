@@ -108,7 +108,8 @@ def run_teleop_worker(
                         retargeting=pinch_calibration.apply(teleop_frame.retargeting, pinch_features),
                     )
                 last_teleop_frame = teleop_frame
-                if shared.teleop_enabled():
+                teacher_active, _ = shared.teacher_mode()
+                if teacher_active:
                     shared.set_midas_target(teleop_frame.hardware_motor_positions)
                 # Wrist pose estimate in the RealSense camera optical frame (4x4).
                 if depth_m is not None and intrinsics is not None:

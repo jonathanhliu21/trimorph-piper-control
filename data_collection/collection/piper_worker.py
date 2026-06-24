@@ -55,7 +55,8 @@ def run_piper_worker(
                 next_teacher_ns = now_ns + teacher_period_ns
 
             if now_ns >= next_command_ns:
-                if shared.teleop_enabled():
+                teacher_active, _ = shared.teacher_mode()
+                if teacher_active and shared.teleop_enabled():
                     wrist_pose_cam = shared.latest_wrist_pose_cam()
                     robot_eef = None if delta_controller.calibrated else api.get_eef_pose()
                     target_eef = delta_controller.update(wrist_pose_cam, robot_eef)

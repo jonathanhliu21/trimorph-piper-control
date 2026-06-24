@@ -26,8 +26,10 @@ class SharedState:
             was_active = self._teacher_mode_active
             self._teacher_mode_active = bool(active)
             self._teacher_mode_status = status
-            if not active and was_active:
-                self._stop_episode_reason = "teacher_mode_lost"
+            if not active:
+                self._latest_midas_target = None
+                if was_active:
+                    self._stop_episode_reason = "teacher_mode_lost"
 
     def teacher_mode(self) -> tuple[bool, object]:
         with self._lock:
