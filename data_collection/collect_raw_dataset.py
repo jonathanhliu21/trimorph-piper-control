@@ -12,6 +12,7 @@ from collection.config import (
     apply_device_overrides,
     build_config,
     validate_config,
+    WRIST_CAMERA_ENABLED,
 )
 from collection.realsense_worker import format_realsense_devices
 from collection.runner import run_collection
@@ -51,6 +52,33 @@ def parse_args() -> argparse.Namespace:
         "--foot-pedal-device",
         default=None,
         help="Foot pedal event device. Overrides FOOT_PEDAL_DEVICE.",
+    )
+    parser.add_argument(
+        "--curobo",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Enable cuRobo motion generation. Use --no-curobo to fall back to "
+            "firmware IK. Defaults to CUROBO_ENABLED from config.py."
+        ),
+    )
+    parser.add_argument(
+        "--wrist-camera",
+        dest="wrist_camera_device",
+        default=None,
+        metavar="DEVICE",
+        help=(
+            "Enable the wrist camera and set its OpenCV device index or /dev/video* path "
+            "(e.g. 4 or /dev/v4l/by-id/...). Overrides WRIST_CAMERA_DEVICE and sets "
+            "WRIST_CAMERA_ENABLED=True. Use --no-wrist-camera to disable."
+        ),
+    )
+    parser.add_argument(
+        "--no-wrist-camera",
+        dest="wrist_camera_disabled",
+        action="store_true",
+        default=False,
+        help="Disable the wrist camera even if WRIST_CAMERA_ENABLED=True in config.py.",
     )
     parser.add_argument(
         "--list-realsense",
@@ -103,12 +131,21 @@ def main() -> int:
         print(format_realsense_devices())
         return 0
 
+    wrist_camera_enabled: bool | None = None
+    if args.wrist_camera_disabled:
+        wrist_camera_enabled = False
+    elif args.wrist_camera_device is None and WRIST_CAMERA_ENABLED:
+        wrist_camera_enabled = True
+
     config = apply_device_overrides(
         build_config(),
         dataset_root=args.dataset_root or DATASET_ROOT,
         realsense_serial=args.realsense_serial,
         teleop_camera=args.teleop_camera,
         foot_pedal_device=args.foot_pedal_device,
+        curobo_enabled=args.curobo,
+        wrist_camera_device=args.wrist_camera_device,
+        wrist_camera_enabled=wrist_camera_enabled,
     )
     validate_config(config)
     return run_collection(config)

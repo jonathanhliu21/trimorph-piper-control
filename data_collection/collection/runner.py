@@ -22,6 +22,7 @@ from .realsense_worker import run_realsense_worker
 from .shared_state import SharedState
 from .tactile_worker import run_tactile_worker
 from .teleop_worker import run_teleop_worker
+from .wrist_camera_worker import run_wrist_camera_worker
 from .utils import WorkerError, import_cv2, worker_wrapper
 
 
@@ -53,6 +54,8 @@ def start_workers(
     ]
     if config.enable_tactile:
         specs.append(("tactile", run_tactile_worker))
+    if config.wrist_camera_enabled:
+        specs.append(("wrist_camera", run_wrist_camera_worker))
     if config.curobo_enabled:
         specs.append(("curobo", _curobo))
 
@@ -132,6 +135,15 @@ def _print_episode_summary(session: EpisodeBuffer) -> None:
                 _row_timestamps_ns(session.teleop_camera_rows),
             )
         )
+    if session.config.wrist_camera_enabled:
+        summaries.append(
+            (
+                "wrist camera",
+                len(session.wrist_camera_rows),
+                "frames",
+                _row_timestamps_ns(session.wrist_camera_rows),
+            )
+        )
 
     print(f"Saved episode {session.paths.episode_index:06d}: duration {duration_s:.3f}s")
     for name, count, unit, timestamps_ns in summaries:
@@ -164,6 +176,7 @@ def stop_and_flush_episode(
     print(f"Stopping episode {session.paths.episode_index:06d}: {reason}")
     session.video_done.wait(timeout=timeout_s)
     session.teleop_video_done.wait(timeout=timeout_s)
+    session.wrist_video_done.wait(timeout=timeout_s)
     session.flush()
     _print_episode_summary(session)
     if color:
@@ -182,6 +195,7 @@ def delete_and_discard_episode(
     print(f"Discarding episode {episode_index:06d}...")
     session.video_done.wait(timeout=timeout_s)
     session.teleop_video_done.wait(timeout=timeout_s)
+    session.wrist_video_done.wait(timeout=timeout_s)
     shutil.rmtree(session.paths.episode_dir, ignore_errors=True)
     print(f"{_ORANGE}Episode {episode_index:06d} deleted.{_RESET}")
 

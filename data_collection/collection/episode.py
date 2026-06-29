@@ -28,6 +28,8 @@ class EpisodePaths:
     metadata_path: Path
     teleop_camera_path: Path
     teleop_timestamps_path: Path
+    wrist_camera_path: Path
+    wrist_timestamps_path: Path
 
 
 def raw_root(dataset_root: Path) -> Path:
@@ -59,6 +61,8 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
         metadata_path=episode_dir / "metadata.json",
         teleop_camera_path=episode_dir / "teleop_camera.mp4",
         teleop_timestamps_path=episode_dir / "teleop_timestamps.csv",
+        wrist_camera_path=episode_dir / "wrist_camera.mp4",
+        wrist_timestamps_path=episode_dir / "wrist_timestamps.csv",
     )
 
 
@@ -78,6 +82,7 @@ class EpisodeBuffer:
         self.lock = threading.Lock()
         self.camera_rows: list[dict[str, object]] = []
         self.teleop_camera_rows: list[dict[str, object]] = []
+        self.wrist_camera_rows: list[dict[str, object]] = []
         self.midas_rows: list[dict[str, object]] = []
         self.piper_rows: list[dict[str, object]] = []
         self.tactile_timestamps: list[tuple[int, float, float]] = []
@@ -86,8 +91,11 @@ class EpisodeBuffer:
         }
         self.video_done = threading.Event()
         self.teleop_video_done = threading.Event()
+        self.wrist_video_done = threading.Event()
         if not config.record_teleop_camera:
             self.teleop_video_done.set()
+        if not config.wrist_camera_enabled:
+            self.wrist_video_done.set()
 
     def elapsed_s(self, sample_ns: int) -> float:
         return (sample_ns - self.start_ns) / 1e9
@@ -99,6 +107,10 @@ class EpisodeBuffer:
     def append_teleop_camera(self, row: dict[str, object]) -> None:
         with self.lock:
             self.teleop_camera_rows.append(row)
+
+    def append_wrist_camera(self, row: dict[str, object]) -> None:
+        with self.lock:
+            self.wrist_camera_rows.append(row)
 
     def append_midas(self, row: dict[str, object]) -> None:
         with self.lock:
@@ -143,6 +155,7 @@ class EpisodeBuffer:
         with self.lock:
             camera_rows = list(self.camera_rows)
             teleop_camera_rows = list(self.teleop_camera_rows)
+            wrist_camera_rows = list(self.wrist_camera_rows)
             midas_rows = list(self.midas_rows)
             piper_rows = list(self.piper_rows)
             tactile_timestamps = list(self.tactile_timestamps)
@@ -155,10 +168,12 @@ class EpisodeBuffer:
         write_csv(self.paths.piper_path, piper_rows)
         if self.config.record_teleop_camera:
             write_csv(self.paths.teleop_timestamps_path, teleop_camera_rows)
+        if self.config.wrist_camera_enabled:
+            write_csv(self.paths.wrist_timestamps_path, wrist_camera_rows)
         self._write_tactile_npz(tactile_timestamps, tactile_frames)
         write_json(
             self.paths.metadata_path,
-            self._metadata(camera_rows, midas_rows, piper_rows, tactile_timestamps),
+            self._metadata(camera_rows, midas_rows, piper_rows, tactile_timestamps, wrist_camera_rows),
         )
 
     def _write_tactile_npz(
@@ -190,6 +205,7 @@ class EpisodeBuffer:
         midas_rows: list[dict[str, object]],
         piper_rows: list[dict[str, object]],
         tactile_timestamps: list[tuple[int, float, float]],
+        wrist_camera_rows: list[dict[str, object]] | None = None,
     ) -> dict[str, Any]:
         stop_ns = self.stop_ns or time.monotonic_ns()
         return {
@@ -213,12 +229,23 @@ class EpisodeBuffer:
                     if self.config.record_teleop_camera
                     else None
                 ),
+                "wrist_camera_mp4": (
+                    self.paths.wrist_camera_path.name
+                    if self.config.wrist_camera_enabled
+                    else None
+                ),
+                "wrist_timestamps_csv": (
+                    self.paths.wrist_timestamps_path.name
+                    if self.config.wrist_camera_enabled
+                    else None
+                ),
             },
             "counts": {
                 "camera_frames": len(camera_rows),
                 "midas_samples": len(midas_rows),
                 "piper_samples": len(piper_rows),
                 "tactile_samples": len(tactile_timestamps),
+                "wrist_camera_frames": len(wrist_camera_rows) if wrist_camera_rows is not None else 0,
             },
             "camera": {
                 "width": self.config.camera_width,
@@ -259,6 +286,13 @@ class EpisodeBuffer:
                 "units": "Newtons, columns [Fx, Fy, Fz]",
                 "target_rate_hz": self.config.tactile_rate_hz,
                 "fingers": self.config.tactile_fingers,
+            },
+            "wrist_camera": {
+                "enabled": self.config.wrist_camera_enabled,
+                "device": self.config.wrist_camera_device if self.config.wrist_camera_enabled else None,
+                "width": self.config.wrist_camera_width if self.config.wrist_camera_enabled else None,
+                "height": self.config.wrist_camera_height if self.config.wrist_camera_enabled else None,
+                "fps": self.config.wrist_camera_fps if self.config.wrist_camera_enabled else None,
             },
             "errors": self.errors,
         }

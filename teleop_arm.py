@@ -4,7 +4,9 @@
 import argparse
 import math
 import sys
+import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +14,12 @@ from scipy.spatial.transform import Rotation as R
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from scripts.midas_api.hand_helpers import (
+    DEFAULT_CONFIG_PATH as DEFAULT_HAND_CONFIG_PATH,
+    add_hand_connection_args,
+    connect_hand,
+)
 
 
 TRANSLATION_SCALE = 0.5
@@ -119,6 +127,30 @@ def parse_args():
         default=True,
         help="Command home when teleop exits. Default: true",
     )
+    parser.add_argument(
+        "--finger",
+        action="store_true",
+        help="Enable finger retargeting from phone hand landmarks to control the MIDAS hand.",
+    )
+    parser.add_argument(
+        "--finger-scaling-factor",
+        type=float,
+        default=1.15,
+        help="Hand landmark scale factor. Default: 1.15",
+    )
+    parser.add_argument(
+        "--finger-max-step-rad",
+        type=float,
+        default=0.15,
+        help="Max joint change per arm-loop tick [rad]. Default: 0.15",
+    )
+    parser.add_argument(
+        "--finger-alpha",
+        type=float,
+        default=0.4,
+        help="Interpolation alpha for smoothing finger commands. Default: 0.4",
+    )
+    add_hand_connection_args(parser)
     return parser.parse_args()
 
 
@@ -137,6 +169,13 @@ def validate_args(args):
         raise ValueError("--home-tolerance-mm must be positive")
     if args.connect_timeout_seconds <= 0:
         raise ValueError("--connect-timeout-seconds must be positive")
+    if args.finger:
+        if args.finger_scaling_factor <= 0:
+            raise ValueError("--finger-scaling-factor must be positive")
+        if args.finger_max_step_rad < 0:
+            raise ValueError("--finger-max-step-rad must be >= 0")
+        if not (0.0 <= args.finger_alpha <= 1.0):
+            raise ValueError("--finger-alpha must be in [0, 1]")
 
 
 def eef6_to_matrix(pose):
@@ -288,6 +327,66 @@ def command_home(api, args, *, wait):
         print("Home reached.")
 
 
+class FingerRetargeter:
+    """Retargets phone hand landmarks to MIDAS motor positions.
+
+    Uses landmarks already provided by the Teledex phone session —
+    no separate camera needed. Call process() each teleop tick.
+    Call calibrate_neutral() (bound to 'c' key) to zero the current pose.
+    """
+
+    def __init__(self, args):
+        from midas_hand_retargeter import MidasHandRetargeter
+        from midas_hand_retargeter.adaptor import PIP_DIP_LOOKUP_MODE
+
+        self._retargeter = MidasHandRetargeter.create(
+            scaling_factor=args.finger_scaling_factor,
+            coupling_mode=PIP_DIP_LOOKUP_MODE,
+        )
+        print("Finger retargeter initialized (using phone hand landmarks).")
+        print("Press 'c' to calibrate neutral finger pose.")
+
+    def process(self, landmarks) -> np.ndarray:
+        result = self._retargeter.retarget_landmarks(
+            np.asarray(landmarks, dtype=np.float64)
+        )
+        return result.hardware_motor_positions
+
+    def calibrate_neutral(self) -> None:
+        try:
+            offsets = self._retargeter.calibrate_neutral_from_last_frame()
+            compact = {name: round(v, 3) for name, v in offsets.items()}
+            print(f"Neutral calibrated: {compact}")
+        except RuntimeError as exc:
+            print(f"Calibration skipped: {exc}")
+
+
+def _start_keyboard_listener(finger_retargeter: FingerRetargeter) -> threading.Thread:
+    """Daemon thread: reads 'c' from stdin (raw mode) to trigger calibration."""
+    import select
+    import termios
+    import tty
+
+    def _listen():
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while True:
+                if select.select([sys.stdin], [], [], 0.1)[0]:
+                    key = sys.stdin.read(1)
+                    if key == "c":
+                        finger_retargeter.calibrate_neutral()
+        except Exception:
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    t = threading.Thread(target=_listen, daemon=True)
+    t.start()
+    return t
+
+
 def format_target_line(tick, target_pose):
     return (
         f"target tick={tick:05d} "
@@ -297,7 +396,7 @@ def format_target_line(tick, target_pose):
     )
 
 
-def stream_teleop(api, phone, args):
+def stream_teleop(api, phone, args, *, hand=None, finger_retargeter=None):
     dt = 1.0 / args.rate_hz
     home_matrix = eef6_to_matrix(HOME_POSE)
 
@@ -310,6 +409,13 @@ def stream_teleop(api, phone, args):
     initial_T = phone_pose_matrix(phone)
     initial_R = initial_T[:3, :3].copy()
     initial_p = initial_T[:3, 3].copy()
+
+    last_hand_command = (
+        hand.clip_positions(hand.read_pos()) if hand is not None else None
+    )
+
+    if hand is not None and finger_retargeter is not None:
+        _start_keyboard_listener(finger_retargeter)
 
     start_t = time.monotonic()
     tick = 0
@@ -334,6 +440,18 @@ def stream_teleop(api, phone, args):
         api.move_eef(target_pose)
         print(format_target_line(tick, target_pose), flush=True)
 
+        if hand is not None and finger_retargeter is not None:
+            data = phone.session.get_latest_data()
+            landmarks = data.get("landmarks")
+            if landmarks is not None and len(landmarks) >= 21:
+                raw_target = finger_retargeter.process(landmarks)
+                delta = raw_target - last_hand_command
+                delta *= args.finger_alpha
+                if args.finger_max_step_rad > 0:
+                    delta = np.clip(delta, -args.finger_max_step_rad, args.finger_max_step_rad)
+                last_hand_command = hand.clip_positions(last_hand_command + delta)
+                hand.set_positions(last_hand_command, clip=True)
+
         tick += 1
         next_t = start_t + tick * dt
         sleep_s = next_t - time.monotonic()
@@ -355,6 +473,12 @@ def main():
     from scripts.piper_api import PiperAPI
 
     phone = None
+    hand = None
+    finger_retargeter = None
+
+    if args.finger:
+        hand = connect_hand(args, enable_torque=True)
+        finger_retargeter = FingerRetargeter(args)
 
     api = PiperAPI(
         firmware=args.firmware,
@@ -395,7 +519,7 @@ def main():
             phone.rotation_name = "rotation_hand"
 
         api.set_speed_percent(args.speed_percent)
-        stream_teleop(api, phone, args)
+        stream_teleop(api, phone, args, hand=hand, finger_retargeter=finger_retargeter)
         if args.return_home:
             command_home(api, args, wait=True)
 
@@ -404,6 +528,8 @@ def main():
         if args.return_home:
             command_home(api, args, wait=False)
     finally:
+        if hand is not None:
+            hand.shutdown()
         if phone is not None:
             stop_phone(phone)
         api.disconnect()

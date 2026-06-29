@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -88,6 +89,13 @@ FOOT_PEDAL_DEVICE: str | None = None
 FOOT_PEDAL_KEY_CODE: int | None = None
 FOOT_PEDAL_DEBOUNCE_SECONDS = 0.5
 
+# Wrist camera (GoPro, DroidCam, or any webcam connected as a v4l2 device)
+WRIST_CAMERA_ENABLED = True
+WRIST_CAMERA_DEVICE: int | str = 2   # DroidCam virtual camera at /dev/video2
+WRIST_CAMERA_WIDTH = 640
+WRIST_CAMERA_HEIGHT = 480
+WRIST_CAMERA_FPS = 30
+
 # cuRobo motion generation (replaces firmware IK when enabled)
 CUROBO_ENABLED = False
 CUROBO_URDF_PATH = Path(__file__).resolve().parents[2] / "assets" / "models" / "piper_arm.urdf"
@@ -103,6 +111,13 @@ CUROBO_WORLD_CUBOIDS: list[dict] = []   # Extra obstacles beyond the default tab
 CANONICAL_MIDAS_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 TACTILE_FINGER_ORDER = ("thumb", "index", "middle", "ring")
+
+
+def _module_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -167,6 +182,11 @@ class CollectionConfig:
     foot_pedal_device: str | None
     foot_pedal_key_code: int | None
     foot_pedal_debounce_seconds: float
+    wrist_camera_enabled: bool
+    wrist_camera_device: int | str
+    wrist_camera_width: int
+    wrist_camera_height: int
+    wrist_camera_fps: int
     curobo_enabled: bool
     curobo_urdf_path: Path
     curobo_xrdf_path: Path
@@ -241,6 +261,11 @@ def build_config() -> CollectionConfig:
         foot_pedal_device=FOOT_PEDAL_DEVICE,
         foot_pedal_key_code=FOOT_PEDAL_KEY_CODE,
         foot_pedal_debounce_seconds=FOOT_PEDAL_DEBOUNCE_SECONDS,
+        wrist_camera_enabled=WRIST_CAMERA_ENABLED,
+        wrist_camera_device=WRIST_CAMERA_DEVICE,
+        wrist_camera_width=WRIST_CAMERA_WIDTH,
+        wrist_camera_height=WRIST_CAMERA_HEIGHT,
+        wrist_camera_fps=WRIST_CAMERA_FPS,
         curobo_enabled=CUROBO_ENABLED,
         curobo_urdf_path=Path(CUROBO_URDF_PATH).expanduser(),
         curobo_xrdf_path=Path(CUROBO_XRDF_PATH).expanduser(),
@@ -261,6 +286,9 @@ def apply_device_overrides(
     realsense_serial: str | None = None,
     teleop_camera: str | None = None,
     foot_pedal_device: str | None = None,
+    curobo_enabled: bool | None = None,
+    wrist_camera_device: str | None = None,
+    wrist_camera_enabled: bool | None = None,
 ) -> CollectionConfig:
     updates = {}
     if dataset_root is not None:
@@ -271,6 +299,15 @@ def apply_device_overrides(
         updates["teleop_camera"] = int(teleop_camera) if teleop_camera.isdigit() else teleop_camera
     if foot_pedal_device is not None:
         updates["foot_pedal_device"] = foot_pedal_device
+    if curobo_enabled is not None:
+        updates["curobo_enabled"] = curobo_enabled
+    if wrist_camera_device is not None:
+        updates["wrist_camera_device"] = (
+            int(wrist_camera_device) if wrist_camera_device.isdigit() else wrist_camera_device
+        )
+        updates["wrist_camera_enabled"] = True
+    if wrist_camera_enabled is not None:
+        updates["wrist_camera_enabled"] = wrist_camera_enabled
     return replace(config, **updates) if updates else config
 
 
@@ -323,6 +360,31 @@ def validate_config(config: CollectionConfig) -> None:
             "MIDAS_PROFILE_ACCELERATION_RAD_S2 must be 0 or greater, or None"
         )
     if config.curobo_enabled:
+        if not _module_available("curobo"):
+            raise ValueError(
+                "CUROBO_ENABLED is true, but the 'curobo' Python package is not "
+                "installed in this environment. Install curobo or run "
+                "collect_raw_dataset.py --no-curobo to use firmware IK instead."
+            )
+        if not (
+            _module_available("curobo.geom.sdf.world")
+            or _module_available("curobo.motion_planner")
+        ):
+            raise ValueError(
+                "CUROBO_ENABLED is true, but the installed curobo package exposes "
+                "neither the v1 MotionGen API nor the v2 MotionPlanner API."
+            )
+        try:
+            import torch
+        except Exception as exc:
+            raise ValueError(
+                "CUROBO_ENABLED is true, but PyTorch could not be imported."
+            ) from exc
+        if not torch.cuda.is_available():
+            raise ValueError(
+                "CUROBO_ENABLED is true, but torch.cuda.is_available() is false. "
+                "cuRobo requires a working CUDA PyTorch install and NVIDIA driver."
+            )
         if not Path(config.curobo_urdf_path).exists():
             raise ValueError(f"CUROBO_URDF_PATH not found: {config.curobo_urdf_path}")
         if config.curobo_output_hz <= 0 or config.curobo_input_hz <= 0:

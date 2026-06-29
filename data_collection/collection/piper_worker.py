@@ -24,9 +24,10 @@ def _run_mit_step(
     config: CollectionConfig,
 ) -> None:
     """Single 120 Hz MIT impedance step: gravity feedforward + PD tracking."""
+    if not api.is_ok():
+        return
     joint_state = api.get_joint_state()
     if joint_state is None:
-        api.move_mit_torques([0.0] * 6, kp=0.0, kd=0.0, clamp=True)
         return
 
     q = joint_state.joints
@@ -83,6 +84,11 @@ def run_piper_worker(
     )
     api.connect()
     print("Piper connected:", api.is_ok(), "receive FPS:", api.get_fps())
+    if not api.is_ok():
+        raise RuntimeError(
+            "Piper arm is not responding on the CAN bus (receive FPS=0). "
+            "Check that the arm is powered on and the CAN cable is connected."
+        )
 
     grav_comp = None
     if config.curobo_enabled:

@@ -31,8 +31,8 @@ cspace:
 tool_frames:
   - flange_link
 
-collision:
-  geometry:
+geometry:
+  collision_model:
     spheres:
       base_link:
         - center: [0.0, 0.0, 0.06]
@@ -82,3 +82,12 @@ collision:
       flange_link:
         - center: [0.0, 0.0, 0.0]
           radius: 0.04
+
+collision:
+  geometry: collision_model
+  buffer_distance: 0.0
+
+self_collision:
+  geometry: collision_model
+  ignore: {}
+  buffer_distance: {}
