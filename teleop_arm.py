@@ -92,6 +92,18 @@ def parse_args():
         help="Installation profile sent on connect. Default: right",
     )
     parser.add_argument(
+        "--payload",
+        choices=("empty", "half", "full", "unchanged"),
+        default="half",
+        help="Payload profile sent on connect. Use 'unchanged' to skip it. Default: half",
+    )
+    parser.add_argument(
+        "--connect-timeout-seconds",
+        type=float,
+        default=3.0,
+        help="Maximum seconds to wait for Piper OK status after connect. Default: 3",
+    )
+    parser.add_argument(
         "--no-enable",
         action="store_true",
         help="Do not send enable before moving.",
@@ -123,6 +135,8 @@ def validate_args(args):
         raise ValueError("--home-timeout-seconds must be positive")
     if args.home_tolerance_mm <= 0:
         raise ValueError("--home-tolerance-mm must be positive")
+    if args.connect_timeout_seconds <= 0:
+        raise ValueError("--connect-timeout-seconds must be positive")
 
 
 def eef6_to_matrix(pose):
@@ -157,8 +171,24 @@ def phone_pose_matrix(phone):
     return matrix
 
 
-def transformed_phone_pose(phone_pose, scale):
-    frame_rotation = R.from_euler("z", 45.0, degrees=True).as_matrix() @ R.from_euler("y", -90.0, degrees=True).as_matrix()
+# teledex synthesizes position_hand / rotation_hand from the phone pose via this
+# fixed phone-frame offset (see teledex.Session._process_data).
+TELEDEX_PHONE_TO_HAND_ROTATION = R.from_euler("z", 180.0, degrees=True).as_matrix()
+
+
+def teledex_frame_rotation(*, hand=False):
+    # R_home^T cancels the R_home factor in home_matrix @ robot_pose,
+    # giving target_pos = home_pos + delta_pos * scale (no axis coupling).
+    home_R = R.from_euler("xyz", HOME_POSE[3:]).as_matrix()
+    # R_x(-90°): world Z → Piper Y, world Y → Piper -Z
+    phone_rotation = home_R.T @ R.from_euler("y", -135.0, degrees=True).as_matrix() @ R.from_euler("x", -90.0, degrees=True).as_matrix()
+    if hand:
+        return phone_rotation @ TELEDEX_PHONE_TO_HAND_ROTATION
+    return phone_rotation
+
+
+def transformed_phone_pose(phone_pose, scale, *, hand=False):
+    frame_rotation = teledex_frame_rotation(hand=hand)
     frame_transform = np.eye(4, dtype=np.float64)
     frame_transform[:3, :3] = frame_rotation
 
@@ -170,6 +200,41 @@ def transformed_phone_pose(phone_pose, scale):
 def format_pose(pose):
     labels = ["x", "y", "z", "roll", "pitch", "yaw"]
     return ", ".join(f"{label}={value:+.6f}" for label, value in zip(labels, pose))
+
+
+def format_piper_state(state):
+    fields = [
+        "is_ok",
+        "receive_fps",
+        "ctrl_mode",
+        "arm_status",
+        "mode_feedback",
+        "teach_status",
+        "motion_status",
+        "err_code",
+    ]
+    return ", ".join(f"{field}={state.get(field, '')}" for field in fields)
+
+
+def wait_for_piper_ok(api, *, timeout_s):
+    start_t = time.monotonic()
+    next_print_t = start_t
+    last_state = api.get_state()
+
+    while True:
+        if api.is_ok():
+            return True
+
+        now = time.monotonic()
+        if now >= next_print_t:
+            print(f"Piper status: {format_piper_state(last_state)}")
+            next_print_t = now + 0.5
+
+        if now - start_t >= timeout_s:
+            return False
+
+        time.sleep(0.05)
+        last_state = api.get_state()
 
 
 def xyz_error_norm_mm(target_pose, actual_pose):
@@ -241,7 +306,10 @@ def stream_teleop(api, phone, args):
         f"translation scale={args.scale:.3f}."
     )
     print("Press the primary phone button or Ctrl+C to stop.")
-    print("Using the streamed Teledex pose as already zeroed.")
+
+    initial_T = phone_pose_matrix(phone)
+    initial_R = initial_T[:3, :3].copy()
+    initial_p = initial_T[:3, 3].copy()
 
     start_t = time.monotonic()
     tick = 0
@@ -250,7 +318,16 @@ def stream_teleop(api, phone, args):
             print("Primary phone button pressed. Stopping teleop.")
             return
 
-        robot_phone_pose = transformed_phone_pose(phone_pose_matrix(phone), args.scale)
+        T_current = phone_pose_matrix(phone)
+        delta_matrix = np.eye(4, dtype=np.float64)
+        delta_matrix[:3, :3] = initial_R.T @ T_current[:3, :3]
+        if args.hand:
+            delta_matrix[:3, 3] = initial_R.T @ (T_current[:3, 3] - initial_p)
+        else:
+            delta_matrix[:3, 3] = T_current[:3, 3] - initial_p
+        robot_phone_pose = transformed_phone_pose(
+            delta_matrix, args.scale, hand=args.hand
+        )
         target_matrix = home_matrix @ robot_phone_pose
         target_pose = matrix_to_eef6(target_matrix)
 
@@ -284,18 +361,30 @@ def main():
         interface=args.interface,
         channel=args.channel,
         installation_pos=args.installation_pos,
+        payload=args.payload,
     )
     api.connect()
     time.sleep(0.3)
 
     try:
-        if not api.is_ok():
-            raise RuntimeError("Piper is not reporting OK after connect")
+        if not wait_for_piper_ok(api, timeout_s=args.connect_timeout_seconds):
+            state = api.get_state()
+            raise RuntimeError(
+                "Piper is not reporting OK after connect: "
+                f"{format_piper_state(state)}. "
+                "If receive_fps is 0, check CAN/power. If err_code or arm_status "
+                "shows a fault, run clear_piper_error.py. If only the payload write "
+                "is failing, retry with --payload unchanged."
+            )
 
         if not args.no_enable:
             print("Enabling Piper...")
             if not api.enable(timeout_s=5.0):
-                raise RuntimeError("Timed out while enabling Piper")
+                state = api.get_state()
+                raise RuntimeError(
+                    "Timed out while enabling Piper: "
+                    f"{format_piper_state(state)}"
+                )
 
         command_home(api, args, wait=True)
 
