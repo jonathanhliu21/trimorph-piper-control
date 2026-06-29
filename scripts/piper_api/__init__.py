@@ -34,6 +34,7 @@ try:
         PiperAPI,
         PiperEefState,
         PiperJointState,
+        PiperMotorState,
         create_piper_api,
         move_eef,
         move_joint,
@@ -46,7 +47,7 @@ try:
         timestamped_recording_path,
     )
 except ModuleNotFoundError as exc:
-    if exc.name != "pyAgxArm":
+    if exc.name not in {"pyAgxArm", "can"}:
         raise
 else:
     __all__.extend(
@@ -57,6 +58,7 @@ else:
             "PiperAPI",
             "PiperEefState",
             "PiperJointState",
+            "PiperMotorState",
             "create_piper_api",
             "move_eef",
             "move_joint",

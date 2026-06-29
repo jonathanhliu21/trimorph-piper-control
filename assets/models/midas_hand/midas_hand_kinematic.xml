@@ -1,0 +1,124 @@
+<mujoco model="midas_hand_kinematic">
+  <compiler angle="radian" />
+  <option timestep="0.001" gravity="0 0 -9.81" integrator="implicitfast" />
+  <default>
+    <joint type="hinge" limited="false" damping="0.01" armature="0.0001" />
+    <geom type="mesh" contype="0" conaffinity="0" group="1" />
+    <site type="sphere" size="0.002" rgba="0.8 0.2 0.05 1" group="3" />
+    <default class="fingertip_contact">
+      <geom type="capsule" size="0.0088 0.004" pos="0.0016 0.021 -0.0085" quat="0.7071067812 -0.7071067812 0 0" rgba="1 0 0 0.4" contype="1" conaffinity="1" group="2" />
+    </default>
+    <default class="pip_upper_contact">
+      <geom type="box" size="0.0095 0.01 0.008" pos="0.001 0.0 -0.0085" rgba="1 0 0 0.4" contype="1" conaffinity="1" group="2" />
+    </default>
+    <default class="pip_link_contact">
+      <geom type="box" size="0.0095 0.008 0.012" pos="0.0 0.014 -0.0128" rgba="1 0 0 0.4" contype="1" conaffinity="1" group="2" />
+    </default>
+    <default class="mcp_flex_contact">
+      <geom type="box" size="0.010 0.015 0.012" pos="-0.0005 0.025 -0.0128" rgba="1 0 0 0.4" contype="1" conaffinity="1" group="2" />
+    </default>
+    <default class="mcp_flex_joint_contact">
+      <geom type="capsule" size="0.01 0.0055" pos="0 0 -0.011" rgba="1 0 0 0.4" contype="1" conaffinity="1" group="2" />
+    </default>
+  </default>
+  <asset>
+    <material name="mat_palm" rgba="0.45 0.47 0.48 1" />
+    <material name="mat_link_gray" rgba="0.588235 0.588235 0.588235 1" />
+    <material name="mat_link_blue" rgba="0.231373 0.380392 0.705882 1" />
+    <material name="mat_link_white" rgba="1 0.992157 0.992157 1" />
+    <material name="mat_link_black" rgba="0.0901961 0.0901961 0.0901961 1" />
+    <material name="mat_linkage" rgba="0.992157 0.976471 0.976471 1" />
+  </asset>
+  <worldbody>
+    <body name="palm_base" pos="0 0 0" quat="0.7071067812 0.7071067812 0 0">
+      <inertial pos="0 0 0" mass="0.75" diaginertia="0.00214 0.00214 0.00214" />
+      <body name="index_mcp_abad_link" pos="-0.0331 0.09215 -0.0065" quat="1.326794897e-06 0 0 -1">
+        <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+        <joint name="index_mcp_abad_joint" axis="0 0 -1" pos="0 0 0" limited="true" range="-0.785 0.785" />
+        <body name="index_mcp_pitch_link" pos="-0.013 -0.0235 -0.003" quat="9.381839456e-07 0.7071080799 9.381873918e-07 -0.7071054825">
+          <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+          <joint name="index_mcp_pitch_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-1.8 0" />
+          <body name="index_dip_linkage" pos="-0.005 0.0475 -0.01505" quat="0.982682395 0 0 -0.1852978966">
+            <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+            <joint name="index_dip_linkage_joint" axis="0 1.4456e-16 1" pos="0 0 0" limited="true" range="-3.14 3.14" />
+            <site name="index_linkage_pin" pos="2.509602401e-07 0.033 0" />
+          </body>
+          <body name="index_pip_link" pos="0 0.0355 0" quat="0.9999999996 0 0 2.95998e-05">
+            <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+            <joint name="index_pip_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-1.45 0" />
+            <body name="index_dip_link" pos="1.83297e-06 0.0330001 -0.0045" quat="0.9999999996 0 0 -2.95998e-05">
+              <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+              <joint name="index_dip_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-3.14 3.14" />
+              <site name="index_dip_pin" pos="0.007018227081 0.009733678063 -0.01055" />
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="middle_mcp_abad_link" pos="-0.0025 0.09715 -0.0065" quat="1.326794897e-06 0 0 1">
+        <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+        <joint name="middle_mcp_abad_joint" axis="0 0 -1" pos="0 0 0" limited="true" range="-0.785 0.785" />
+        <body name="middle_mcp_pitch_link" pos="-0.013 -0.0235 -0.003" quat="9.381839456e-07 -0.7071080799 9.381873918e-07 0.7071054825">
+          <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+          <joint name="middle_mcp_pitch_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-1.8 0" />
+          <body name="middle_dip_linkage" pos="-0.005 0.0475 -0.01505" quat="0.982682395 0 0 -0.1852978966">
+            <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+            <joint name="middle_dip_linkage_joint" axis="0 1.4456e-16 1" pos="0 0 0" limited="true" range="-3.14 3.14" />
+            <site name="middle_linkage_pin" pos="2.509602401e-07 0.033 0" />
+          </body>
+          <body name="middle_pip_link" pos="0 0.0355 0" quat="0.9999999996 0 0 2.95998e-05">
+            <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+            <joint name="middle_pip_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-1.45 0" />
+            <body name="middle_dip_link" pos="1.83297e-06 0.0330001 -0.0045" quat="0.9999999996 0 0 -2.95998e-05">
+              <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+              <joint name="middle_dip_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-3.14 3.14" />
+              <site name="middle_dip_pin" pos="0.007018227081 0.009733678063 -0.01055" />
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="ring_mcp_abad_link" pos="0.0281 0.09215 -0.0065" quat="1.326794897e-06 0 0 -1">
+        <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+        <joint name="ring_mcp_abad_joint" axis="0 0 -1" pos="0 0 0" limited="true" range="-0.785 0.785" />
+        <body name="ring_mcp_pitch_link" pos="-0.013 -0.0235 -0.003" quat="9.381839456e-07 0.7071080799 9.381873918e-07 -0.7071054825">
+          <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+          <joint name="ring_mcp_pitch_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-1.8 0" />
+          <body name="ring_dip_linkage" pos="-0.005 0.0475 -0.01505" quat="0.982682395 0 0 -0.1852978966">
+            <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+            <joint name="ring_dip_linkage_joint" axis="0 1.4456e-16 1" pos="0 0 0" limited="true" range="-3.14 3.14" />
+            <site name="ring_linkage_pin" pos="2.509602401e-07 0.033 0" />
+          </body>
+          <body name="ring_pip_link" pos="0 0.0355 0" quat="0.9999999996 0 0 2.95998e-05">
+            <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+            <joint name="ring_pip_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-1.45 0" />
+            <body name="ring_dip_link" pos="1.83297e-06 0.0330001 -0.0045" quat="0.9999999996 0 0 -2.95998e-05">
+              <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+              <joint name="ring_dip_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-3.14 3.14" />
+              <site name="ring_dip_pin" pos="0.007018227081 0.009733678063 -0.01055" />
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="thumb_cmc_base" pos="-0.0275061 0.0341595 -0.0105" quat="1.315444016e-06 0.9914448867 0.130526 1.731812295e-07">
+        <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+        <joint name="thumb_cmc_roll_joint" axis="0 1 0" pos="0 0 0" limited="true" range="0 2.15" />
+        <body name="thumb_cmc_side" pos="-0.0195022 -0.0117032 0.0095" quat="0.7071054825 0 0 -0.7071080799">
+          <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+          <joint name="thumb_cmc_side_joint" axis="0 0 -1" pos="0 0 0" limited="true" range="-0.785 0.9" />
+          <body name="thumb_mcp" pos="0.0399963 -0.0190516 -0.017527" quat="0.2944537311 -0.700108326 -0.5090888595 -0.4049368658">
+            <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+            <joint name="thumb_mcp_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-1.57 1.57" />
+            <body name="thumb_dip" pos="0 0.0355 0" quat="1.326794897e-06 0 0 -1">
+              <inertial pos="0 0 0" mass="1e-8" diaginertia="1e-12 1e-12 1e-12" />
+              <joint name="thumb_dip_joint" axis="0 0 1" pos="0 0 0" limited="true" range="-1.57 1.57" />
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <equality>
+    <connect name="index_dip_loop" site1="index_dip_pin" site2="index_linkage_pin" solref="0.004 1" solimp="0.95 0.99 0.001" />
+    <connect name="middle_dip_loop" site1="middle_dip_pin" site2="middle_linkage_pin" solref="0.004 1" solimp="0.95 0.99 0.001" />
+    <connect name="ring_dip_loop" site1="ring_dip_pin" site2="ring_linkage_pin" solref="0.004 1" solimp="0.95 0.99 0.001" />
+  </equality>
+</mujoco>

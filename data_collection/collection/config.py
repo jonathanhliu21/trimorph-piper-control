@@ -62,6 +62,7 @@ PIPER_INTERFACE = "socketcan"
 PIPER_CHANNEL = "can0"
 PIPER_FIRMWARE = "default"  # one of: "default", "v183", "v188"
 PIPER_INSTALLATION_POS: str | None = "right"
+PIPER_PAYLOAD: str | None = "half"  # one of: "empty", "half", "full", or None to skip
 TEACHER_MODE_POLL_HZ = 20.0
 
 # Wrist delta teleop: manual camera-to-robot transform and safety parameters.
@@ -141,6 +142,7 @@ class CollectionConfig:
     piper_channel: str
     piper_firmware: str
     piper_installation_pos: str | None
+    piper_payload: str | None
     teacher_mode_poll_hz: float
     delta_teleop_config_path: str
     wrist_cam_to_piper_eef_4x4: list[list[float]]
@@ -204,6 +206,7 @@ def build_config() -> CollectionConfig:
         piper_channel=PIPER_CHANNEL,
         piper_firmware=PIPER_FIRMWARE,
         piper_installation_pos=PIPER_INSTALLATION_POS,
+        piper_payload=PIPER_PAYLOAD,
         teacher_mode_poll_hz=TEACHER_MODE_POLL_HZ,
         delta_teleop_config_path=str(Path(DELTA_TELEOP_CONFIG_PATH).expanduser()),
         wrist_cam_to_piper_eef_4x4=[list(row) for row in WRIST_CAM_TO_PIPER_EEF_4X4],

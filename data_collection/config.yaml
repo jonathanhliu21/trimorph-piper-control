@@ -19,7 +19,7 @@ max_translation_step_m: 0.01
 
 # First-order low-pass filters. 1.0 disables smoothing.
 position_alpha: 0.35
-orientation_alpha: 0.25
+orientation_alpha: 0.1
 
 # Keep false for initial tests; position-only delta teleop is safer to validate.
 orientation_enabled: false

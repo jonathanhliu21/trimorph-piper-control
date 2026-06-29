@@ -78,6 +78,58 @@ connects. `move_joint(...)` defaults to `mode="exact"`, which uses `move_js()`.
 `mode="smooth"` uses `move_j()`. `move_eef(...)` commands the flange pose with
 `move_p()`.
 
+## Piper Gravity Compensation
+
+The local gravity-compensation script uses MuJoCo to compute model-based torque
+commands, then sends them through Piper MIT feed-forward torque control. Install
+MuJoCo directly or install the Reimagine-Robotics gravity extras:
+
+```bash
+python3 -m pip install "piper_control[gravity]"
+```
+
+Bundled Piper arm models live under `assets/models/`:
+
+- `piper_grav_comp.xml`: copied from Reimagine-Robotics/piper_control
+- `piper_grav_comp_midas_hand.xml`: Piper arm + MIDAS hand kinematic payload (default)
+- `midas_hand/midas_hand_kinematic.xml`: mesh-free hand model derived from
+  `midas_hand_mujoco/assets/midas_description/midas_whole_hand.xml`
+- `piper_grav_comp_payload_700g.xml`: simple 700 g box payload for quick tests
+
+The default gravity-compensation model merges the Piper arm with the full MIDAS
+hand inertial tree instead of a single `payload_tool` box. Tune the mount at
+`gripper/midas_mount` in `piper_grav_comp_midas_hand.xml` if the physical
+flange-to-palm transform differs.
+Do not use `midas_hand_mujoco/assets/midas_description/midas_whole_hand.xml`
+for arm gravity compensation; that file models the hand, not the Piper arm.
+
+The CLI applies firmware-aware MIT scaling adapted from piper_control for
+pyAgxArm:
+
+- firmware `<= 1.8.post2`: send full MuJoCo torques for joints 1-3
+- firmware `> 1.8.post2`: pre-multiply joints 1-3 by 4.0 before `move_mit`,
+  because pyAgxArm always applies an internal 0.25 factor on those joints
+
+Run a dry calculation first:
+
+```bash
+python3 gravity_compensate_piper.py --dry-run --zero-velocity-if-missing
+```
+
+Then test live output with a low torque scale:
+
+```bash
+python3 gravity_compensate_piper.py --torque-scale 0.2 --damping 1.0
+```
+
+Useful options:
+
+```bash
+python3 gravity_compensate_piper.py --help
+python3 gravity_compensate_piper.py --model-path assets/models/piper_grav_comp.xml --dry-run
+python3 gravity_compensate_piper.py --software-version S-V1.8-3 --iterations 100 --dry-run
+```
+
 ## 3. Read Current State
 
 From this repo:

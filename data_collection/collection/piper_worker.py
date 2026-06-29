@@ -23,6 +23,7 @@ def run_piper_worker(
         interface=config.piper_interface,
         channel=config.piper_channel,
         installation_pos=config.piper_installation_pos,
+        payload=config.piper_payload,
     )
     api.connect()
     print("Piper connected:", api.is_ok(), "receive FPS:", api.get_fps())
