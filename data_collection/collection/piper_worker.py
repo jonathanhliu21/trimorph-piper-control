@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from delta_teleop_controller import DeltaTeleopController, load_delta_teleop_config
 from scripts.piper_api.teacher_mode import get_teacher_mode
@@ -9,10 +10,65 @@ from .config import RAW_EEF_FIELDS, CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
 
+if TYPE_CHECKING:
+    from scripts.piper_api.curobo_trajectory_buffer import CuRoboTrajectoryBuffer
+    from scripts.piper_api.gravity_compensation import MujocoGravityCompensator
+    from scripts.piper_api.piper_api import PiperAPI
+
+
+def _run_mit_step(
+    api: "PiperAPI",
+    grav_comp: "MujocoGravityCompensator",
+    shared: SharedState,
+    buf: "CuRoboTrajectoryBuffer",
+    config: CollectionConfig,
+) -> None:
+    """Single 120 Hz MIT impedance step: gravity feedforward + PD tracking."""
+    joint_state = api.get_joint_state()
+    if joint_state is None:
+        api.move_mit_torques([0.0] * 6, kp=0.0, kd=0.0, clamp=True)
+        return
+
+    q = joint_state.joints
+
+    motor_state = api.get_motor_state()
+    v = motor_state.velocities if motor_state is not None else [0.0] * 6
+
+    # Publish for cuRobo replanning
+    shared.set_latest_joint_positions(q)
+
+    waypoint = buf.next_waypoint()
+
+    grav_result = grav_comp.compute(
+        q,
+        joint_velocities=v,
+        damping=config.curobo_grav_comp_damping,
+    )
+    grav_torques = grav_result.command_torques
+
+    if waypoint is None:
+        # Buffer exhausted → hold current position with gravity compensation
+        p_des = list(q)
+        v_des = [0.0] * 6
+    else:
+        p_des = waypoint.positions.tolist()
+        v_des = waypoint.velocities.tolist()
+
+    api.move_mit_torques(
+        grav_torques,
+        p_des=p_des,
+        v_des=v_des,
+        kp=config.curobo_mit_kp,
+        kd=config.curobo_mit_kd,
+        clamp=True,
+    )
+
+
 def run_piper_worker(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
+    trajectory_buffer: "CuRoboTrajectoryBuffer | None" = None,
     *,
     init_done,
 ) -> None:
@@ -27,14 +83,34 @@ def run_piper_worker(
     )
     api.connect()
     print("Piper connected:", api.is_ok(), "receive FPS:", api.get_fps())
+
+    grav_comp = None
+    if config.curobo_enabled:
+        from scripts.piper_api.gravity_compensation import MujocoGravityCompensator
+        grav_comp = MujocoGravityCompensator(
+            driver=config.piper_firmware,
+            installation_pos=config.piper_installation_pos,
+        )
+        api.enable()
+        api.set_mit_mode()
+        print("[piper_worker] cuRobo MIT mode enabled.")
+
     init_done.set()
 
     sample_period_ns = int(round(1_000_000_000 / config.piper_rate_hz))
     command_period_ns = int(round(1_000_000_000 / config.piper_command_rate_hz))
     teacher_period_ns = int(round(1_000_000_000 / config.teacher_mode_poll_hz))
-    next_sample_ns = time.monotonic_ns()
-    next_command_ns = next_sample_ns
+    mit_period_ns = (
+        int(round(1_000_000_000 / config.curobo_output_hz))
+        if config.curobo_enabled else 0
+    )
+
+    now_ns = time.monotonic_ns()
+    next_sample_ns = now_ns
+    next_command_ns = now_ns
     next_teacher_ns = 0
+    next_mit_ns = now_ns
+
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
     delta_config = load_delta_teleop_config(config.delta_teleop_config_path)
@@ -80,10 +156,23 @@ def run_piper_worker(
                         reported_calibrated = True
                         print("Wrist delta calibration complete.")
                     if target_eef is not None:
-                        api.move_eef(target_eef)
+                        if config.curobo_enabled:
+                            # cuRobo path: publish target for GPU worker to plan
+                            shared.set_target_eef(target_eef)
+                        else:
+                            # Legacy path: firmware IK at 30 Hz
+                            api.move_eef(target_eef)
                 next_command_ns += command_period_ns
                 while next_command_ns < now_ns:
                     next_command_ns += command_period_ns
+
+            # 120 Hz MIT impedance loop (cuRobo path only)
+            if config.curobo_enabled and trajectory_buffer is not None and now_ns >= next_mit_ns:
+                assert grav_comp is not None
+                _run_mit_step(api, grav_comp, shared, trajectory_buffer, config)
+                next_mit_ns += mit_period_ns
+                while next_mit_ns < now_ns:
+                    next_mit_ns += mit_period_ns
 
             if now_ns >= next_sample_ns:
                 eef = api.get_eef_state()
@@ -113,6 +202,13 @@ def run_piper_worker(
                 while next_sample_ns < sample_ns:
                     next_sample_ns += sample_period_ns
             else:
-                shared.shutdown.wait(min((next_sample_ns - now_ns) / 1e9, 0.005))
+                # When cuRobo MIT loop is active, sleep at most one MIT period
+                if config.curobo_enabled:
+                    next_wake_ns = min(next_sample_ns, next_mit_ns, next_command_ns)
+                else:
+                    next_wake_ns = next_sample_ns
+                wait_s = (next_wake_ns - time.monotonic_ns()) / 1e9
+                if wait_s > 0:
+                    shared.shutdown.wait(min(wait_s, 0.005))
     finally:
         api.disconnect()

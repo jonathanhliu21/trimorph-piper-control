@@ -15,6 +15,7 @@ from .episode import (
     next_episode_index,
     raw_root,
 )
+from .curobo_worker import run_curobo_worker
 from .midas_worker import run_midas_worker
 from .piper_worker import run_piper_worker
 from .realsense_worker import run_realsense_worker
@@ -33,14 +34,27 @@ def start_workers(
     recorder: RecordingManager,
     errors: queue.Queue[WorkerError],
 ) -> list[threading.Thread]:
+    from scripts.piper_api.curobo_trajectory_buffer import CuRoboTrajectoryBuffer
+
+    trajectory_buffer = CuRoboTrajectoryBuffer() if config.curobo_enabled else None
+
+    # Bind trajectory_buffer into workers via lambda so worker_wrapper stays unchanged.
+    def _piper(cfg, sh, rec, *, init_done):
+        run_piper_worker(cfg, sh, rec, trajectory_buffer, init_done=init_done)
+
+    def _curobo(cfg, sh, rec, *, init_done):
+        run_curobo_worker(cfg, sh, rec, trajectory_buffer, init_done=init_done)
+
     specs = [
         ("realsense", run_realsense_worker),
-        ("piper", run_piper_worker),
+        ("piper", _piper),
         ("midas", run_midas_worker),
         ("teleop", run_teleop_worker),
     ]
     if config.enable_tactile:
         specs.append(("tactile", run_tactile_worker))
+    if config.curobo_enabled:
+        specs.append(("curobo", _curobo))
 
     threads = []
     for name, target in specs:

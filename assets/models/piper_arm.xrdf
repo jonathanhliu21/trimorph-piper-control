@@ -1,0 +1,84 @@
+##
+## cuRobo Extended Robot Description (XRDF) for Piper arm.
+## Sphere-based collision model; no mesh files required.
+## Joint order matches piper_arm.urdf joint1..joint6.
+##
+
+format: xrdf
+format_version: 1.0
+
+modifies: piper_arm.urdf
+
+default_joint_positions:
+  joint1: 0.0
+  joint2: 1.5708
+  joint3: -1.5708
+  joint4: 0.0
+  joint5: 0.0
+  joint6: 0.0
+
+cspace:
+  joint_names:
+    - joint1
+    - joint2
+    - joint3
+    - joint4
+    - joint5
+    - joint6
+  acceleration_limits: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  jerk_limits: [500.0, 500.0, 500.0, 500.0, 500.0, 500.0]
+
+tool_frames:
+  - flange_link
+
+collision:
+  geometry:
+    spheres:
+      base_link:
+        - center: [0.0, 0.0, 0.06]
+          radius: 0.08
+      link1:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.06
+        - center: [0.0, 0.0, -0.05]
+          radius: 0.055
+      link2:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.06
+        - center: [0.08, 0.0, 0.0]
+          radius: 0.055
+        - center: [0.16, 0.0, 0.0]
+          radius: 0.055
+        - center: [0.24, 0.0, 0.0]
+          radius: 0.055
+      link3:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.055
+        - center: [-0.08, 0.02, 0.0]
+          radius: 0.05
+        - center: [-0.16, 0.04, 0.0]
+          radius: 0.05
+        - center: [-0.22, 0.06, 0.0]
+          radius: 0.05
+      link4:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.05
+        - center: [0.0, 0.0, -0.03]
+          radius: 0.045
+      link5:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.05
+        - center: [0.0, 0.04, 0.0]
+          radius: 0.045
+        - center: [0.0, 0.08, 0.0]
+          radius: 0.045
+      link6:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.05
+        - center: [0.0, 0.01, 0.025]
+          radius: 0.045
+        - center: [0.0, 0.01, 0.05]
+          radius: 0.04
+      flange_link:
+        - center: [0.0, 0.0, 0.0]
+          radius: 0.04

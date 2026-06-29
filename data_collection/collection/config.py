@@ -88,6 +88,18 @@ FOOT_PEDAL_DEVICE: str | None = None
 FOOT_PEDAL_KEY_CODE: int | None = None
 FOOT_PEDAL_DEBOUNCE_SECONDS = 0.5
 
+# cuRobo motion generation (replaces firmware IK when enabled)
+CUROBO_ENABLED = False
+CUROBO_URDF_PATH = Path(__file__).resolve().parents[2] / "assets" / "models" / "piper_arm.urdf"
+CUROBO_XRDF_PATH = Path(__file__).resolve().parents[2] / "assets" / "models" / "piper_arm.xrdf"
+CUROBO_INPUT_HZ = 25.0        # EEF pose update rate fed to MotionGen
+CUROBO_OUTPUT_HZ = 120.0      # Joint trajectory / MIT command rate
+CUROBO_MIT_KP = 5.0           # Position gain (N·m/rad)
+CUROBO_MIT_KD = 0.5           # Velocity gain (N·m·s/rad)
+CUROBO_GRAV_COMP_DAMPING = 0.018
+CUROBO_STALE_TIMEOUT_S = 0.5
+CUROBO_WORLD_CUBOIDS: list[dict] = []   # Extra obstacles beyond the default table
+
 CANONICAL_MIDAS_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 TACTILE_FINGER_ORDER = ("thumb", "index", "middle", "ring")
@@ -155,6 +167,16 @@ class CollectionConfig:
     foot_pedal_device: str | None
     foot_pedal_key_code: int | None
     foot_pedal_debounce_seconds: float
+    curobo_enabled: bool
+    curobo_urdf_path: Path
+    curobo_xrdf_path: Path
+    curobo_input_hz: float
+    curobo_output_hz: float
+    curobo_mit_kp: float
+    curobo_mit_kd: float
+    curobo_grav_comp_damping: float
+    curobo_stale_timeout_s: float
+    curobo_world_cuboids: list
 
 
 def build_config() -> CollectionConfig:
@@ -219,6 +241,16 @@ def build_config() -> CollectionConfig:
         foot_pedal_device=FOOT_PEDAL_DEVICE,
         foot_pedal_key_code=FOOT_PEDAL_KEY_CODE,
         foot_pedal_debounce_seconds=FOOT_PEDAL_DEBOUNCE_SECONDS,
+        curobo_enabled=CUROBO_ENABLED,
+        curobo_urdf_path=Path(CUROBO_URDF_PATH).expanduser(),
+        curobo_xrdf_path=Path(CUROBO_XRDF_PATH).expanduser(),
+        curobo_input_hz=CUROBO_INPUT_HZ,
+        curobo_output_hz=CUROBO_OUTPUT_HZ,
+        curobo_mit_kp=CUROBO_MIT_KP,
+        curobo_mit_kd=CUROBO_MIT_KD,
+        curobo_grav_comp_damping=CUROBO_GRAV_COMP_DAMPING,
+        curobo_stale_timeout_s=CUROBO_STALE_TIMEOUT_S,
+        curobo_world_cuboids=list(CUROBO_WORLD_CUBOIDS),
     )
 
 
@@ -290,3 +322,10 @@ def validate_config(config: CollectionConfig) -> None:
         raise ValueError(
             "MIDAS_PROFILE_ACCELERATION_RAD_S2 must be 0 or greater, or None"
         )
+    if config.curobo_enabled:
+        if not Path(config.curobo_urdf_path).exists():
+            raise ValueError(f"CUROBO_URDF_PATH not found: {config.curobo_urdf_path}")
+        if config.curobo_output_hz <= 0 or config.curobo_input_hz <= 0:
+            raise ValueError("CUROBO_INPUT_HZ and CUROBO_OUTPUT_HZ must be > 0")
+        if config.curobo_mit_kp < 0 or config.curobo_mit_kd < 0:
+            raise ValueError("CUROBO_MIT_KP and CUROBO_MIT_KD must be >= 0")

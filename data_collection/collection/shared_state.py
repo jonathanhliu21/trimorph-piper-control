@@ -18,6 +18,10 @@ class SharedState:
         self._latest_teleop_bgr: np.ndarray | None = None
         self._latest_wrist_pose_cam: np.ndarray | None = None
         self._stop_episode_reason: str | None = None
+        # cuRobo motion generation state
+        self._latest_target_eef: list[float] | None = None
+        self._latest_joint_positions: list[float] | None = None
+        self._curobo_enabled: bool = False
         self.calibrate_neutral = threading.Event()
         self.shutdown = threading.Event()
 
@@ -121,3 +125,31 @@ class SharedState:
             reason = self._stop_episode_reason
             self._stop_episode_reason = None
             return reason
+
+    # ------------------------------------------------------------------
+    # cuRobo motion generation
+    # ------------------------------------------------------------------
+
+    def set_target_eef(self, eef: list[float] | None) -> None:
+        with self._lock:
+            self._latest_target_eef = None if eef is None else list(eef)
+
+    def latest_target_eef(self) -> list[float] | None:
+        with self._lock:
+            return None if self._latest_target_eef is None else list(self._latest_target_eef)
+
+    def set_latest_joint_positions(self, joints: list[float]) -> None:
+        with self._lock:
+            self._latest_joint_positions = list(joints)
+
+    def latest_joint_positions(self) -> list[float] | None:
+        with self._lock:
+            return None if self._latest_joint_positions is None else list(self._latest_joint_positions)
+
+    def set_curobo_enabled(self, enabled: bool) -> None:
+        with self._lock:
+            self._curobo_enabled = bool(enabled)
+
+    def curobo_enabled(self) -> bool:
+        with self._lock:
+            return self._curobo_enabled
