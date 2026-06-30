@@ -61,7 +61,7 @@ PIPER_RATE_HZ = 200.0
 PIPER_COMMAND_RATE_HZ = 30.0
 PIPER_INTERFACE = "socketcan"
 PIPER_CHANNEL = "can0"
-PIPER_FIRMWARE = "default"  # one of: "default", "v183", "v188"
+PIPER_FIRMWARE = "v183"  # one of: "default", "v183", "v188"
 PIPER_INSTALLATION_POS: str | None = "right"
 PIPER_PAYLOAD: str | None = "half"  # one of: "empty", "half", "full", or None to skip
 TEACHER_MODE_POLL_HZ = 20.0
@@ -110,6 +110,7 @@ CUROBO_OUTPUT_HZ = 120.0      # Joint trajectory / MIT command rate
 CUROBO_MIT_KP = 5.0           # Position gain (N·m/rad)
 CUROBO_MIT_KD = 0.5           # Velocity gain (N·m·s/rad)
 CUROBO_GRAV_COMP_DAMPING = 0.018
+CUROBO_GRAV_COMP_TORQUE_SCALE = 1.05  # Global gravity torque multiplier (calibrated)
 CUROBO_STALE_TIMEOUT_S = 0.5
 CUROBO_WORLD_CUBOIDS: list[dict] = []   # Extra obstacles beyond the default table
 
@@ -202,6 +203,7 @@ class CollectionConfig:
     curobo_mit_kp: float
     curobo_mit_kd: float
     curobo_grav_comp_damping: float
+    curobo_grav_comp_torque_scale: float
     curobo_stale_timeout_s: float
     curobo_world_cuboids: list
 
@@ -283,6 +285,7 @@ def build_config() -> CollectionConfig:
         curobo_mit_kp=CUROBO_MIT_KP,
         curobo_mit_kd=CUROBO_MIT_KD,
         curobo_grav_comp_damping=CUROBO_GRAV_COMP_DAMPING,
+        curobo_grav_comp_torque_scale=CUROBO_GRAV_COMP_TORQUE_SCALE,
         curobo_stale_timeout_s=CUROBO_STALE_TIMEOUT_S,
         curobo_world_cuboids=list(CUROBO_WORLD_CUBOIDS),
     )

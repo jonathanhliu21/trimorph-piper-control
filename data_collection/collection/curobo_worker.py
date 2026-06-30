@@ -236,6 +236,7 @@ def run_curobo_worker(
 
     input_period_s = 1.0 / config.curobo_input_hz
     last_eef: list[float] | None = None
+    _diag_plan_count = 0
 
     while not shared.shutdown.is_set():
         loop_start = time.monotonic()
@@ -264,8 +265,21 @@ def run_curobo_worker(
             planned = plan(q_current, target_eef)
             if planned is not None:
                 pos, vel = planned
+                _diag_plan_count += 1
+                if _diag_plan_count <= 5:
+                    print(
+                        f"[diag/cuRobo #{_diag_plan_count}] Plan OK  "
+                        f"tgt_eef={[f'{v:+.3f}' for v in target_eef]}  "
+                        f"waypoints={len(pos)}  "
+                        f"q_start={[f'{v:+.3f}' for v in pos[0].tolist()]}  "
+                        f"q_end={[f'{v:+.3f}' for v in pos[-1].tolist()]}"
+                    )
                 trajectory_buffer.push_trajectory(pos, vel, dt_s=1.0 / config.curobo_output_hz)
-            # On failure, buffer keeps current trajectory until exhausted → hold fallback
+            else:
+                print(
+                    f"[diag/cuRobo] Plan FAILED  tgt_eef={[f'{v:+.3f}' for v in target_eef]}  "
+                    f"q_current={[f'{v:+.3f}' for v in q_current]}"
+                )
         except Exception as exc:
             print(f"[curobo_worker] plan_single error: {exc}")
 

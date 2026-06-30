@@ -34,9 +34,6 @@ tool_frames:
 geometry:
   collision_model:
     spheres:
-      base_link:
-        - center: [0.0, 0.0, 0.06]
-          radius: 0.08
       link1:
         - center: [0.0, 0.0, 0.0]
           radius: 0.06
@@ -85,9 +82,16 @@ geometry:
 
 collision:
   geometry: collision_model
-  buffer_distance: 0.0
+  buffer_distance: {}
 
 self_collision:
   geometry: collision_model
-  ignore: {}
+  ignore:
+    link1: [link2]
+    link2: [link1, link3]
+    link3: [link2, link4, link5]
+    link4: [link3, link5, link6]
+    link5: [link4, link6, flange_link]
+    link6: [link5, flange_link, link4]
+    flange_link: [link6, link5]
   buffer_distance: {}

@@ -10,6 +10,8 @@ from .config import RAW_EEF_FIELDS, CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
 
+from scripts.piper_api.gravity_compensation import MIDAS_HAND_MODEL_PATH
+
 if TYPE_CHECKING:
     from scripts.piper_api.curobo_trajectory_buffer import CuRoboTrajectoryBuffer
     from scripts.piper_api.gravity_compensation import MujocoGravityCompensator
@@ -22,13 +24,22 @@ def _run_mit_step(
     shared: SharedState,
     buf: "CuRoboTrajectoryBuffer",
     config: CollectionConfig,
-) -> None:
-    """Single 120 Hz MIT impedance step: gravity feedforward + PD tracking."""
+    hold_pos: "list[float] | None",
+) -> "list[float] | None":
+    """Single 120 Hz MIT impedance step: gravity feedforward + PD tracking.
+
+    hold_pos is latched the first time the trajectory buffer runs dry and kept
+    fixed until a new trajectory arrives.  This ensures kp*(p_des - q) is
+    non-zero and actually corrects residual drift instead of being zeroed out
+    by a continuously-updated p_des = q.
+
+    Returns the (possibly updated) hold_pos.
+    """
     if not api.is_ok():
-        return
+        return hold_pos
     joint_state = api.get_joint_state()
     if joint_state is None:
-        return
+        return hold_pos
 
     q = joint_state.joints
 
@@ -44,14 +55,17 @@ def _run_mit_step(
         q,
         joint_velocities=v,
         damping=config.curobo_grav_comp_damping,
+        torque_scale=config.curobo_grav_comp_torque_scale,
     )
     grav_torques = grav_result.command_torques
 
     if waypoint is None:
-        # Buffer exhausted → hold current position with gravity compensation
-        p_des = list(q)
+        if hold_pos is None:
+            hold_pos = list(q)  # latch once; keep fixed until trajectory resumes
+        p_des = hold_pos
         v_des = [0.0] * 6
     else:
+        hold_pos = None  # clear latch while trajectory is active
         p_des = waypoint.positions.tolist()
         v_des = waypoint.velocities.tolist()
 
@@ -63,6 +77,7 @@ def _run_mit_step(
         kd=config.curobo_mit_kd,
         clamp=True,
     )
+    return hold_pos
 
 
 def run_piper_worker(
@@ -96,13 +111,13 @@ def run_piper_worker(
         firmware_version = api.get_software_version()
         print(f"[piper_worker] firmware version: {firmware_version!r}")
         grav_comp = MujocoGravityCompensator(
+            model_path=MIDAS_HAND_MODEL_PATH,
             driver=config.piper_firmware,
             firmware_version=firmware_version,
             installation_pos=config.piper_installation_pos,
         )
-        api.enable()
-        api.set_mit_mode()
-        print("[piper_worker] cuRobo MIT mode enabled.")
+        # api.enable() and api.set_mit_mode() are deferred until 'e' is first pressed
+        # so the arm stays in its current mode until the operator activates teleop.
 
     init_done.set()
 
@@ -122,6 +137,12 @@ def run_piper_worker(
 
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
+    mit_mode_active = False
+    mit_hold_pos: list[float] | None = None
+    _mit_diag_until: float = 0.0
+    _mit_diag_next_print: float = 0.0
+    mit_stale_since: float | None = None
+    mit_stale_warned = False
     delta_config = load_delta_teleop_config(config.delta_teleop_config_path)
     delta_controller = DeltaTeleopController(delta_config)
     reported_calibrated = False
@@ -149,6 +170,31 @@ def run_piper_worker(
                     reported_calibrated = False
                     last_calibration_report = -1
                     print("Arm teleop enabled; recalibrating wrist reference.")
+                    if config.curobo_enabled and not mit_mode_active:
+                        q_pre = api.get_joint_angles()
+                        eef_pre = api.get_eef_pose()
+                        print(
+                            f"[diag] Before enable — q={[f'{v:+.4f}' for v in (q_pre or [])]}  "
+                            f"eef={[f'{v:+.4f}' for v in (eef_pre or [])]}"
+                        )
+                        print(
+                            f"[diag] grav_comp model={grav_comp.model_path.name}  "
+                            f"gravity={list(grav_comp.get_gravity())}  "
+                            f"output_scales={grav_comp.output_scales}"
+                        )
+                        api.enable()
+                        api.set_mit_mode()
+                        mit_mode_active = True
+                        _mit_diag_until = time.monotonic() + 3.0
+                        q_post = api.get_joint_angles()
+                        eef_post = api.get_eef_pose()
+                        print(
+                            f"[diag] After MIT mode — q={[f'{v:+.4f}' for v in (q_post or [])]}  "
+                            f"eef={[f'{v:+.4f}' for v in (eef_post or [])]}"
+                        )
+                        print("[piper_worker] cuRobo MIT mode enabled.")
+                if arm_teleop_active and not should_run_arm_teleop:
+                    mit_hold_pos = None  # re-latch on next MIT cycle after teleop resumes
                 arm_teleop_active = should_run_arm_teleop
                 if should_run_arm_teleop:
                     wrist_pose_cam = shared.latest_wrist_pose_cam()
@@ -175,10 +221,44 @@ def run_piper_worker(
                 while next_command_ns < now_ns:
                     next_command_ns += command_period_ns
 
-            # 120 Hz MIT impedance loop (cuRobo path only)
-            if config.curobo_enabled and trajectory_buffer is not None and now_ns >= next_mit_ns:
+            # 120 Hz MIT impedance loop (cuRobo path only, after MIT mode is entered)
+            if config.curobo_enabled and mit_mode_active and trajectory_buffer is not None and now_ns >= next_mit_ns:
                 assert grav_comp is not None
-                _run_mit_step(api, grav_comp, shared, trajectory_buffer, config)
+                _now_diag = time.monotonic()
+                if _now_diag < _mit_diag_until and _now_diag >= _mit_diag_next_print:
+                    _mit_diag_next_print = _now_diag + 0.5  # print at 2 Hz
+                    js = api.get_joint_state()
+                    ms = api.get_motor_state()
+                    if js is not None:
+                        q_diag = js.joints
+                        v_diag = ms.velocities if ms is not None else [0.0] * 6
+                        gr = grav_comp.compute(
+                            q_diag, joint_velocities=v_diag,
+                            damping=config.curobo_grav_comp_damping,
+                            torque_scale=config.curobo_grav_comp_torque_scale,
+                        )
+                        tgt = shared.latest_target_eef()
+                        print(
+                            f"[diag/MIT] q={[f'{v:+.3f}' for v in q_diag]}  "
+                            f"grav_τ={[f'{v:+.3f}' for v in gr.command_torques]}  "
+                            f"buf_stale={trajectory_buffer.is_stale()}  "
+                            f"target_eef={[f'{v:+.3f}' for v in (tgt or [])]}"
+                        )
+                mit_hold_pos = _run_mit_step(api, grav_comp, shared, trajectory_buffer, config, mit_hold_pos)
+                if trajectory_buffer.is_stale():
+                    if mit_stale_since is None:
+                        mit_stale_since = time.monotonic()
+                    elif not mit_stale_warned and (
+                        time.monotonic() - mit_stale_since >= config.curobo_stale_timeout_s
+                    ):
+                        print(
+                            f"[piper_worker] WARNING: cuRobo trajectory stale for "
+                            f">{config.curobo_stale_timeout_s:.1f}s — replanning may have failed."
+                        )
+                        mit_stale_warned = True
+                else:
+                    mit_stale_since = None
+                    mit_stale_warned = False
                 next_mit_ns += mit_period_ns
                 while next_mit_ns < now_ns:
                     next_mit_ns += mit_period_ns
@@ -211,8 +291,8 @@ def run_piper_worker(
                 while next_sample_ns < sample_ns:
                     next_sample_ns += sample_period_ns
             else:
-                # When cuRobo MIT loop is active, sleep at most one MIT period
-                if config.curobo_enabled:
+                # When MIT loop is active, wake up at MIT frequency
+                if config.curobo_enabled and mit_mode_active:
                     next_wake_ns = min(next_sample_ns, next_mit_ns, next_command_ns)
                 else:
                     next_wake_ns = next_sample_ns
