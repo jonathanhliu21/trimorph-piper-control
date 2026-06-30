@@ -41,9 +41,8 @@
                       <body name="gripper" pos="0 0 0" quat="1 0 0 0">
                           <inertial pos="0.0010312 0.0121761 0.0315481" quat="0.0230402 0.707091 0.0373344 0.70576" mass="0.195187" diaginertia="0.000154294 0.000125965 6.43536e-05"/>
 
-                          <!-- Deprecated: use piper_grav_comp_midas_hand.xml for the full hand model. -->
-                          <body name="payload_tool" pos="0.08 0 0">
-                            <inertial pos="0 0 0" mass="0.7" diaginertia="0.002 0.002 0.002"/>
+                          <body name="payload_tool" pos="0 0 0.08">
+                            <inertial pos="0 0 0" mass="0.75" diaginertia="0.002 0.002 0.002"/>
                           </body>
 
                           <body name="finger0" pos="0 0 0.13503" quat="1.89468e-08 1.89469e-08 0.707108 0.707105">

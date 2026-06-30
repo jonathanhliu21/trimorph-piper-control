@@ -12,6 +12,7 @@ class SharedState:
         self._teacher_mode_status: object = None
         self._teleop_enabled = False
         self._latest_midas_target: np.ndarray | None = None
+        self._latest_task_bgr: np.ndarray | None = None
         self._latest_realsense_bgr: np.ndarray | None = None
         self._latest_realsense_depth_m: np.ndarray | None = None
         self._latest_realsense_intrinsics: dict[str, float] | None = None
@@ -64,6 +65,11 @@ class SharedState:
                 return None
             return self._latest_midas_target.copy()
 
+    def set_task_frame(self, bgr: np.ndarray) -> None:
+        """Set the primary display frame (DroidCam or other OpenCV task camera)."""
+        with self._lock:
+            self._latest_task_bgr = bgr.copy()
+
     def set_realsense_frame(self, bgr: np.ndarray) -> None:
         with self._lock:
             self._latest_realsense_bgr = bgr.copy()
@@ -83,15 +89,13 @@ class SharedState:
 
     def display_frames(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         with self._lock:
-            realsense = (
-                None
-                if self._latest_realsense_bgr is None
-                else self._latest_realsense_bgr.copy()
-            )
+            # Prefer dedicated task frame (DroidCam); fall back to realsense frame.
+            task_src = self._latest_task_bgr if self._latest_task_bgr is not None else self._latest_realsense_bgr
+            task = None if task_src is None else task_src.copy()
             teleop = (
                 None if self._latest_teleop_bgr is None else self._latest_teleop_bgr.copy()
             )
-            return realsense, teleop
+            return task, teleop
 
     def latest_realsense_rgbd(
         self,

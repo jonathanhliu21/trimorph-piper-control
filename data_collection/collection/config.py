@@ -23,7 +23,7 @@ CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30
 CAMERA_SERIAL: str | None = None
-CAMERA_FLIP = "both"  # one of: "none", "horizontal", "vertical", "both"
+CAMERA_FLIP = "none"  # one of: "none", "horizontal", "vertical", "both"
 CAMERA_TIMEOUT_MS = 500
 CAMERA_MAX_TIMEOUTS = 30
 CAMERA_WARMUP_FRAMES = 30
@@ -89,9 +89,14 @@ FOOT_PEDAL_DEVICE: str | None = None
 FOOT_PEDAL_KEY_CODE: int | None = None
 FOOT_PEDAL_DEBOUNCE_SECONDS = 0.5
 
-# Wrist camera (GoPro, DroidCam, or any webcam connected as a v4l2 device)
-WRIST_CAMERA_ENABLED = True
-WRIST_CAMERA_DEVICE: int | str = 2   # DroidCam virtual camera at /dev/video2
+# Task camera source: "realsense" uses Intel RealSense; "opencv" uses any v4l2/OpenCV device
+# (e.g. DroidCam smartphone camera at /dev/video2)
+TASK_CAMERA_SOURCE = "opencv"        # one of: "realsense", "opencv"
+TASK_CAMERA_DEVICE: int | str = 2    # used when TASK_CAMERA_SOURCE = "opencv"
+
+# Wrist camera (secondary close-up camera, separate from the task camera)
+WRIST_CAMERA_ENABLED = False
+WRIST_CAMERA_DEVICE: int | str = 0   # cv2 device index or /dev/video* path
 WRIST_CAMERA_WIDTH = 640
 WRIST_CAMERA_HEIGHT = 480
 WRIST_CAMERA_FPS = 30
@@ -182,6 +187,8 @@ class CollectionConfig:
     foot_pedal_device: str | None
     foot_pedal_key_code: int | None
     foot_pedal_debounce_seconds: float
+    task_camera_source: str
+    task_camera_device: int | str
     wrist_camera_enabled: bool
     wrist_camera_device: int | str
     wrist_camera_width: int
@@ -261,6 +268,8 @@ def build_config() -> CollectionConfig:
         foot_pedal_device=FOOT_PEDAL_DEVICE,
         foot_pedal_key_code=FOOT_PEDAL_KEY_CODE,
         foot_pedal_debounce_seconds=FOOT_PEDAL_DEBOUNCE_SECONDS,
+        task_camera_source=TASK_CAMERA_SOURCE,
+        task_camera_device=TASK_CAMERA_DEVICE,
         wrist_camera_enabled=WRIST_CAMERA_ENABLED,
         wrist_camera_device=WRIST_CAMERA_DEVICE,
         wrist_camera_width=WRIST_CAMERA_WIDTH,
@@ -287,6 +296,8 @@ def apply_device_overrides(
     teleop_camera: str | None = None,
     foot_pedal_device: str | None = None,
     curobo_enabled: bool | None = None,
+    task_camera_source: str | None = None,
+    task_camera_device: str | None = None,
     wrist_camera_device: str | None = None,
     wrist_camera_enabled: bool | None = None,
 ) -> CollectionConfig:
@@ -301,6 +312,13 @@ def apply_device_overrides(
         updates["foot_pedal_device"] = foot_pedal_device
     if curobo_enabled is not None:
         updates["curobo_enabled"] = curobo_enabled
+    if task_camera_source is not None:
+        updates["task_camera_source"] = task_camera_source
+    if task_camera_device is not None:
+        updates["task_camera_device"] = (
+            int(task_camera_device) if task_camera_device.isdigit() else task_camera_device
+        )
+        updates["task_camera_source"] = "opencv"
     if wrist_camera_device is not None:
         updates["wrist_camera_device"] = (
             int(wrist_camera_device) if wrist_camera_device.isdigit() else wrist_camera_device
@@ -331,6 +349,8 @@ def validate_config(config: CollectionConfig) -> None:
         raise ValueError("VIDEO_CODEC must be a 4-character fourcc")
     if config.piper_firmware not in {"default", "v183", "v188"}:
         raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
+    if config.task_camera_source not in {"realsense", "opencv"}:
+        raise ValueError("TASK_CAMERA_SOURCE must be one of: realsense, opencv")
     if config.foot_pedal_debounce_seconds < 0:
         raise ValueError("FOOT_PEDAL_DEBOUNCE_SECONDS must be 0 or greater")
     if not config.delta_teleop_config_path:

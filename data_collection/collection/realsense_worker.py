@@ -117,6 +117,7 @@ def run_realsense_worker(
     recorder: RecordingManager,
     *,
     init_done,
+    record: bool = True,
 ) -> None:
     cv2 = import_cv2()
     rs = import_realsense()
@@ -171,28 +172,32 @@ def run_realsense_worker(
     if warmup_received == 0:
         raise RuntimeError("RealSense produced no frames during warmup")
 
+    if not record:
+        print(f"RealSense stream: teleop-only (no recording), serial={info['serial']}")
+
     init_done.set()
-    fourcc = cv2.VideoWriter_fourcc(*config.video_codec)
+    fourcc = cv2.VideoWriter_fourcc(*config.video_codec) if record else None
     try:
         while not shared.shutdown.is_set():
-            session = recorder.current()
-            if session is not writer_session:
-                if writer is not None:
-                    writer.release()
-                    if writer_session is not None:
-                        writer_session.video_done.set()
-                writer = None
-                writer_session = session
-                frame_idx = 0
-                if session is not None:
-                    writer = cv2.VideoWriter(
-                        str(session.paths.camera_path),
-                        fourcc,
-                        float(config.camera_fps),
-                        (config.camera_width, config.camera_height),
-                    )
-                    if not writer.isOpened():
-                        raise RuntimeError(f"Could not open {session.paths.camera_path}")
+            if record:
+                session = recorder.current()
+                if session is not writer_session:
+                    if writer is not None:
+                        writer.release()
+                        if writer_session is not None:
+                            writer_session.video_done.set()
+                    writer = None
+                    writer_session = session
+                    frame_idx = 0
+                    if session is not None:
+                        writer = cv2.VideoWriter(
+                            str(session.paths.camera_path),
+                            fourcc,
+                            float(config.camera_fps),
+                            (config.camera_width, config.camera_height),
+                        )
+                        if not writer.isOpened():
+                            raise RuntimeError(f"Could not open {session.paths.camera_path}")
 
             try:
                 frames = pipeline.wait_for_frames(config.camera_timeout_ms)
@@ -236,7 +241,7 @@ def run_realsense_worker(
             depth_m = flip_frame(cv2, depth_m, config.camera_flip)
             shared.set_realsense_depth(depth_m, intrinsics)
 
-            if writer is not None and writer_session is not None:
+            if record and writer is not None and writer_session is not None:
                 writer.write(bgr)
                 writer_session.append_camera(
                     {
@@ -250,7 +255,7 @@ def run_realsense_worker(
                 )
                 frame_idx += 1
     finally:
-        if writer is not None:
+        if record and writer is not None:
             writer.release()
             if writer_session is not None:
                 writer_session.video_done.set()

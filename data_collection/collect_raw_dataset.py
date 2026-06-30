@@ -41,6 +41,23 @@ def parse_args() -> argparse.Namespace:
         help="RealSense serial number. Overrides CAMERA_SERIAL.",
     )
     parser.add_argument(
+        "--task-camera",
+        dest="task_camera_device",
+        default=None,
+        metavar="DEVICE",
+        help=(
+            "OpenCV task camera device index or /dev/video* path (e.g. 2 for DroidCam). "
+            "Sets TASK_CAMERA_SOURCE=opencv and overrides TASK_CAMERA_DEVICE."
+        ),
+    )
+    parser.add_argument(
+        "--task-camera-source",
+        dest="task_camera_source",
+        default=None,
+        choices=["realsense", "opencv"],
+        help="Task camera source: 'realsense' or 'opencv'. Overrides TASK_CAMERA_SOURCE.",
+    )
+    parser.add_argument(
         "--teleop-camera",
         default=None,
         help=(
@@ -141,6 +158,8 @@ def main() -> int:
         build_config(),
         dataset_root=args.dataset_root or DATASET_ROOT,
         realsense_serial=args.realsense_serial,
+        task_camera_source=args.task_camera_source,
+        task_camera_device=args.task_camera_device,
         teleop_camera=args.teleop_camera,
         foot_pedal_device=args.foot_pedal_device,
         curobo_enabled=args.curobo,

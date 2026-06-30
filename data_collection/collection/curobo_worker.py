@@ -264,7 +264,7 @@ def run_curobo_worker(
             planned = plan(q_current, target_eef)
             if planned is not None:
                 pos, vel = planned
-                trajectory_buffer.push_trajectory(pos, vel, dt_s=1.0 / output_hz)
+                trajectory_buffer.push_trajectory(pos, vel, dt_s=1.0 / config.curobo_output_hz)
             # On failure, buffer keeps current trajectory until exhausted → hold fallback
         except Exception as exc:
             print(f"[curobo_worker] plan_single error: {exc}")

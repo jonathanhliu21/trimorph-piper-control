@@ -93,8 +93,11 @@ def run_piper_worker(
     grav_comp = None
     if config.curobo_enabled:
         from scripts.piper_api.gravity_compensation import MujocoGravityCompensator
+        firmware_version = api.get_software_version()
+        print(f"[piper_worker] firmware version: {firmware_version!r}")
         grav_comp = MujocoGravityCompensator(
             driver=config.piper_firmware,
+            firmware_version=firmware_version,
             installation_pos=config.piper_installation_pos,
         )
         api.enable()

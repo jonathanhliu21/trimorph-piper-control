@@ -17,6 +17,7 @@ from .episode import (
 )
 from .curobo_worker import run_curobo_worker
 from .midas_worker import run_midas_worker
+from .opencv_task_camera_worker import run_opencv_task_camera_worker
 from .piper_worker import run_piper_worker
 from .realsense_worker import run_realsense_worker
 from .shared_state import SharedState
@@ -46,8 +47,19 @@ def start_workers(
     def _curobo(cfg, sh, rec, *, init_done):
         run_curobo_worker(cfg, sh, rec, trajectory_buffer, init_done=init_done)
 
-    specs = [
-        ("realsense", run_realsense_worker),
+    if config.task_camera_source == "opencv":
+        # DroidCam (or other OpenCV device) records camera.mp4.
+        # If teleop needs RealSense depth, run it in teleop-only mode alongside.
+        def _realsense_teleop_only(cfg, sh, rec, *, init_done):
+            run_realsense_worker(cfg, sh, rec, init_done=init_done, record=False)
+
+        specs = [("task_camera", run_opencv_task_camera_worker)]
+        if config.teleop_source == "realsense":
+            specs.append(("realsense", _realsense_teleop_only))
+    else:
+        specs = [("realsense", run_realsense_worker)]
+
+    specs += [
         ("piper", _piper),
         ("midas", run_midas_worker),
         ("teleop", run_teleop_worker),
