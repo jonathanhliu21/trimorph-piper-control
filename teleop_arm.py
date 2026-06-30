@@ -220,7 +220,7 @@ def teledex_frame_rotation(*, hand=False):
     # giving target_pos = home_pos + delta_pos * scale (no axis coupling).
     home_R = R.from_euler("xyz", HOME_POSE[3:]).as_matrix()
     # R_x(-90°): world Z → Piper Y, world Y → Piper -Z
-    phone_rotation = home_R.T @ R.from_euler("y", -135.0, degrees=True).as_matrix() @ R.from_euler("x", -90.0, degrees=True).as_matrix()
+    phone_rotation = home_R.T @ R.from_euler("y", -90.0, degrees=True).as_matrix() @ R.from_euler("x", -90.0, degrees=True).as_matrix()
     if hand:
         return phone_rotation @ TELEDEX_PHONE_TO_HAND_ROTATION
     return phone_rotation
