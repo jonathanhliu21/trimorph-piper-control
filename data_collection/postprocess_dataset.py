@@ -18,7 +18,7 @@ import numpy as np
 
 # Operator settings. Adjust these values, then run:
 #   python3 data_collection/postprocess_dataset.py
-DATASET_ROOT = Path("data_midas")
+DATASET_ROOT = Path("data_midas6")
 RAW_DIR = DATASET_ROOT / "raw"
 OVERWRITE_PROCESSED_FILES = True
 PROCESS_ONLY_RAW_STATUSES = {"complete"}

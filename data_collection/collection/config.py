@@ -439,11 +439,12 @@ def validate_config(config: CollectionConfig) -> None:
             )
         if not (
             _module_available("curobo.geom.sdf.world")
-            or _module_available("curobo.motion_planner")
+            or _module_available("curobo.model_predictive_control")
         ):
             raise ValueError(
                 "CUROBO_ENABLED is true, but the installed curobo package exposes "
-                "neither the v1 MotionGen API nor the v2 MotionPlanner API."
+                "neither the v1 MotionGen API (curobo.geom.sdf.world) nor the v2 "
+                "ModelPredictiveControl API (curobo.model_predictive_control)."
             )
         try:
             import torch

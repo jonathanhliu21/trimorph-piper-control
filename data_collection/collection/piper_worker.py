@@ -136,12 +136,17 @@ def run_piper_worker(
         int(round(1_000_000_000 / config.curobo_output_hz))
         if config.curobo_enabled else 0
     )
+    curobo_publish_period_ns = (
+        int(round(1_000_000_000 / config.curobo_input_hz))
+        if config.curobo_enabled else 0
+    )
 
     now_ns = time.monotonic_ns()
     next_sample_ns = now_ns
     next_command_ns = now_ns
     next_teacher_ns = 0
     next_mit_ns = now_ns
+    next_curobo_publish_ns = now_ns
 
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
@@ -207,6 +212,7 @@ def run_piper_worker(
                     delta_controller.reset_calibration()
                     reported_calibrated = False
                     last_calibration_report = -1
+                    next_curobo_publish_ns = now_ns
                     print("Arm teleop enabled; recalibrating wrist reference.")
                     if config.curobo_enabled and not mit_mode_active:
                         q_pre = api.get_joint_angles()
@@ -248,6 +254,7 @@ def run_piper_worker(
                     if home_req:
                         if config.curobo_enabled:
                             shared.set_target_eef(list(_HOME_EEF))
+                            next_curobo_publish_ns = now_ns
                         else:
                             api.move_eef(_HOME_EEF)
                     else:
@@ -266,8 +273,13 @@ def run_piper_worker(
                             print("Wrist delta calibration complete.")
                         if target_eef is not None:
                             if config.curobo_enabled:
-                                # cuRobo path: publish target for GPU worker to plan
-                                shared.set_target_eef(target_eef)
+                                # Delta runs at command rate (~30 Hz); publish EEF to
+                                # cuRobo at CUROBO_INPUT_HZ (25 Hz) via time gate.
+                                if now_ns >= next_curobo_publish_ns:
+                                    shared.set_target_eef(target_eef)
+                                    next_curobo_publish_ns += curobo_publish_period_ns
+                                    while next_curobo_publish_ns < now_ns:
+                                        next_curobo_publish_ns += curobo_publish_period_ns
                             else:
                                 # Legacy path: firmware IK at 30 Hz
                                 api.move_eef(target_eef)

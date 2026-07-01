@@ -1,4 +1,13 @@
-"""cuRobo MotionGen worker: 25 Hz EEF pose → 120 Hz joint trajectory."""
+"""cuRobo worker: 25 Hz EEF pose -> 120 Hz joint trajectory.
+
+Backend is chosen by what the installed curobo package exposes:
+  - v1 MotionGen (curobo.geom.sdf.world): plans a fresh trajectory only when
+    the EEF target changes, then the interpolated plan is drained by the
+    120 Hz MIT loop.
+  - v2 ModelPredictiveControl (curobo.model_predictive_control): re-optimizes
+    every tick using live joint feedback (closed-loop), and only the target
+    goal pose is updated when the EEF target changes.
+"""
 from __future__ import annotations
 
 import math
@@ -120,7 +129,7 @@ def _create_v1_planner(config: CollectionConfig):
         enable_opt=True,
     )
 
-    def plan(q_current: list[float], target_eef: list[float]):
+    def plan(q_current: list[float], target_eef: list[float], reset: bool = False):
         x, y, z, roll, pitch, yaw = target_eef
         w_q, x_q, y_q, z_q = _euler_xyz_to_quat_wxyz(roll, pitch, yaw)
         position = torch.tensor(
@@ -140,12 +149,22 @@ def _create_v1_planner(config: CollectionConfig):
             result.interpolated_plan.velocity.cpu().numpy(),
         )
 
-    return plan
+    return plan, False
 
 
-def _create_v2_planner(config: CollectionConfig):
+def _create_v2_mpc_planner(config: CollectionConfig):
+    """Closed-loop MPC planner using curobo.model_predictive_control.ModelPredictiveControl.
+
+    Unlike MotionGen/MotionPlanner (plan once per new EEF target), MPC must be
+    re-optimized every tick using the live joint state as feedback -- that
+    warm-started, receding-horizon re-solve is what makes it MPC. The goal
+    pose itself is only updated when the EEF target actually changes.
+    """
     import torch
-    from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
+    from curobo.model_predictive_control import (
+        ModelPredictiveControl,
+        ModelPredictiveControlCfg,
+    )
     from curobo.types import DeviceCfg, GoalToolPose, JointState
     from curobo._src.robot.kinematics.kinematics_cfg import KinematicsCfg
     from curobo._src.types.robot import RobotCfg
@@ -159,61 +178,86 @@ def _create_v2_planner(config: CollectionConfig):
     )
     robot_cfg = RobotCfg(kinematics=kinematics_cfg, device_cfg=device_cfg)
     all_cuboids = _world_cuboids(config)
-    planner_cfg = MotionPlannerCfg.create(
+
+    output_hz = config.curobo_output_hz
+    interpolation_steps = 4  # fixed by cuRobo; command_dt = optimization_dt / interpolation_steps
+    mpc_cfg = ModelPredictiveControlCfg.create(
         robot=robot_cfg,
         scene_model=_v2_scene_model(all_cuboids),
         collision_cache={"cuboid": max(1, len(all_cuboids))},
         device_cfg=device_cfg,
-        num_ik_seeds=32,
-        num_trajopt_seeds=4,
         self_collision_check=True,
         use_cuda_graph=True,
+        optimization_dt=interpolation_steps / output_hz,
+        interpolation_steps=interpolation_steps,
     )
-    planner = MotionPlanner(planner_cfg)
-    print("[curobo_worker] Using cuRobo v2 MotionPlanner.")
-    print("[curobo_worker] Warming up MotionPlanner (JIT compile)...")
-    planner.warmup(enable_graph=True, num_warmup_iterations=5)
-    print("[curobo_worker] Warmup complete.")
+    mpc = ModelPredictiveControl(mpc_cfg)
+    print("[curobo_worker] Using cuRobo v2 ModelPredictiveControl (MPC).")
 
-    def plan(q_current: list[float], target_eef: list[float]):
-        x, y, z, roll, pitch, yaw = target_eef
-        w_q, x_q, y_q, z_q = _euler_xyz_to_quat_wxyz(roll, pitch, yaw)
-        current_state = JointState.from_position(
-            torch.tensor(
-                [q_current],
-                dtype=device_cfg.dtype,
-                device=device_cfg.device,
-            ),
-            joint_names=planner.joint_names,
+    tool_frame = mpc.tool_frames[0]
+    setup_done = False
+    last_goal_eef: list[float] | None = None
+
+    def _current_state(q_current: list[float]) -> "JointState":
+        return JointState.from_position(
+            torch.tensor([q_current], dtype=device_cfg.dtype, device=device_cfg.device),
+            joint_names=mpc.joint_names,
         )
-        goal = GoalToolPose(
-            tool_frames=planner.tool_frames,
-            position=torch.tensor(
-                [[[[[x, y, z]]]]],
-                dtype=device_cfg.dtype,
-                device=device_cfg.device,
-            ),
-            quaternion=torch.tensor(
-                [[[[[w_q, x_q, y_q, z_q]]]]],
-                dtype=device_cfg.dtype,
-                device=device_cfg.device,
-            ),
-        )
-        result = planner.plan_pose(goal, current_state, max_attempts=4)
-        if result is None or not result.success.any().item():
+
+    def plan(q_current: list[float], target_eef: list[float], reset: bool = False):
+        nonlocal setup_done, last_goal_eef
+        current_state = _current_state(q_current)
+
+        if not setup_done:
+            print("[curobo_worker] Warming up MPC (initial setup + cold-start solve)...")
+            mpc.setup(current_state)
+            setup_done = True
+            last_goal_eef = None
+            print("[curobo_worker] Warmup complete.")
+        elif reset:
+            mpc.reset_robot(current_state)
+
+        if target_eef != last_goal_eef:
+            x, y, z, roll, pitch, yaw = target_eef
+            w_q, x_q, y_q, z_q = _euler_xyz_to_quat_wxyz(roll, pitch, yaw)
+            goal = GoalToolPose(
+                tool_frames=[tool_frame],
+                position=torch.tensor(
+                    [[[[[x, y, z]]]]], dtype=device_cfg.dtype, device=device_cfg.device
+                ),
+                quaternion=torch.tensor(
+                    [[[[[w_q, x_q, y_q, z_q]]]]], dtype=device_cfg.dtype, device=device_cfg.device
+                ),
+            )
+            # use_best_effort_ik: the MPC's built-in IK solver uses a single
+            # seed and often fails to converge to tight tolerance even for
+            # already-reachable poses (observed even for the arm's own
+            # current pose). MPC continuously re-optimizes toward the goal
+            # every tick regardless, so an inexact IK seed is refined away
+            # over subsequent ticks -- unlike MotionGen, which plans once and
+            # needs the goal nailed down up front.
+            if mpc.update_goal_tool_poses(goal, use_best_effort_ik=True):
+                last_goal_eef = target_eef
+            else:
+                print(f"[curobo_worker] MPC goal IK failed for tgt_eef={target_eef}")
+
+        result = mpc.optimize_action_sequence(current_state)
+        if result.action_sequence is None:
             return None
-        return _joint_state_to_arrays(result.get_interpolated_plan())
+        return _joint_state_to_arrays(result.action_sequence)
 
-    return plan
+    return plan, True
 
 
 def _create_curobo_planner(config: CollectionConfig):
     if _module_available("curobo.geom.sdf.world"):
         return _create_v1_planner(config)
-    if _module_available("curobo.motion_planner"):
-        return _create_v2_planner(config)
+    if _module_available("curobo.model_predictive_control"):
+        return _create_v2_mpc_planner(config)
     raise RuntimeError(
-        "Installed curobo package exposes neither v1 MotionGen nor v2 MotionPlanner."
+        "Installed curobo package exposes neither v1 MotionGen "
+        "(curobo.geom.sdf.world) nor v2 ModelPredictiveControl "
+        "(curobo.model_predictive_control)."
     )
 
 
@@ -226,16 +270,19 @@ def run_curobo_worker(
     init_done: threading.Event,
 ) -> None:
     """
-    GPU thread: polls SharedState for a new EEF target at CUROBO_INPUT_HZ,
-    runs cuRobo MotionGen, and pushes the interpolated joint trajectory
-    (sampled at CUROBO_OUTPUT_HZ) into trajectory_buffer.
+    GPU thread: polls SharedState for the EEF target at CUROBO_INPUT_HZ and
+    pushes a joint trajectory (sampled at CUROBO_OUTPUT_HZ) into
+    trajectory_buffer. For the event-driven v1 MotionGen backend this only
+    (re)plans when the target changes; for the closed-loop v2 MPC backend
+    this re-optimizes every tick using the live joint state as feedback.
     """
-    plan = _create_curobo_planner(config)
+    plan, is_continuous = _create_curobo_planner(config)
 
     init_done.set()
 
     input_period_s = 1.0 / config.curobo_input_hz
     last_eef: list[float] | None = None
+    needs_reseed = False
     _diag_plan_count = 0
 
     while not shared.shutdown.is_set():
@@ -243,12 +290,17 @@ def run_curobo_worker(
 
         if not shared.teleop_enabled():
             trajectory_buffer.reset()
+            needs_reseed = True
             elapsed = time.monotonic() - loop_start
             shared.shutdown.wait(max(0.0, input_period_s - elapsed))
             continue
 
         target_eef = shared.latest_target_eef()
-        if target_eef is None or target_eef == last_eef:
+        if target_eef is None:
+            elapsed = time.monotonic() - loop_start
+            shared.shutdown.wait(max(0.0, input_period_s - elapsed))
+            continue
+        if not is_continuous and target_eef == last_eef:
             elapsed = time.monotonic() - loop_start
             shared.shutdown.wait(max(0.0, input_period_s - elapsed))
             continue
@@ -262,7 +314,8 @@ def run_curobo_worker(
         last_eef = target_eef
 
         try:
-            planned = plan(q_current, target_eef)
+            planned = plan(q_current, target_eef, reset=needs_reseed)
+            needs_reseed = False
             if planned is not None:
                 pos, vel = planned
                 _diag_plan_count += 1
@@ -281,7 +334,7 @@ def run_curobo_worker(
                     f"q_current={[f'{v:+.3f}' for v in q_current]}"
                 )
         except Exception as exc:
-            print(f"[curobo_worker] plan_single error: {exc}")
+            print(f"[curobo_worker] plan error: {exc}")
 
         elapsed = time.monotonic() - loop_start
         shared.shutdown.wait(max(0.0, input_period_s - elapsed))
