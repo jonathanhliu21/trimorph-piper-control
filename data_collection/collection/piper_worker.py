@@ -12,6 +12,16 @@ from .shared_state import SharedState
 
 from scripts.piper_api.gravity_compensation import MIDAS_HAND_MODEL_PATH
 
+# Home EEF pose [x, y, z, roll, pitch, yaw] in metres / radians — from teleop_arm.py HOME_POSE
+_HOME_EEF = [0.325, -0.3, 0.2, -1.5707963267948966, -0.659612, -1.5707963267948966]
+
+# Backdrive mode parameters — matched to:
+#   test_mit_controller.py --firmware v183 --torque-scale 1.05 --coulomb-comp 0.05 --viscous-comp 0.05
+_BACKDRIVE_RATE_HZ = 120.0
+_BACKDRIVE_TORQUE_SCALE = 1.05
+_BACKDRIVE_COULOMB_COMP = 0.05
+_BACKDRIVE_VISCOUS_COMP = 0.05
+
 if TYPE_CHECKING:
     from scripts.piper_api.curobo_trajectory_buffer import CuRoboTrajectoryBuffer
     from scripts.piper_api.gravity_compensation import MujocoGravityCompensator
@@ -105,19 +115,17 @@ def run_piper_worker(
             "Check that the arm is powered on and the CAN cable is connected."
         )
 
-    grav_comp = None
-    if config.curobo_enabled:
-        from scripts.piper_api.gravity_compensation import MujocoGravityCompensator
-        firmware_version = api.get_software_version()
-        print(f"[piper_worker] firmware version: {firmware_version!r}")
-        grav_comp = MujocoGravityCompensator(
-            model_path=MIDAS_HAND_MODEL_PATH,
-            driver=config.piper_firmware,
-            firmware_version=firmware_version,
-            installation_pos=config.piper_installation_pos,
-        )
-        # api.enable() and api.set_mit_mode() are deferred until 'e' is first pressed
-        # so the arm stays in its current mode until the operator activates teleop.
+    from scripts.piper_api.gravity_compensation import MujocoGravityCompensator
+    firmware_version = api.get_software_version()
+    print(f"[piper_worker] firmware version: {firmware_version!r}")
+    grav_comp = MujocoGravityCompensator(
+        model_path=MIDAS_HAND_MODEL_PATH,
+        driver=config.piper_firmware,
+        firmware_version=firmware_version,
+        installation_pos=config.piper_installation_pos,
+    )
+    # api.enable() and api.set_mit_mode() are deferred until 'e' or 'b' is first pressed
+    # so the arm stays in its current mode until the operator activates teleop/backdrive.
 
     init_done.set()
 
@@ -139,6 +147,9 @@ def run_piper_worker(
     sample_session: EpisodeBuffer | None = None
     mit_mode_active = False
     mit_hold_pos: list[float] | None = None
+    backdrive_active = False
+    backdrive_period_ns = int(round(1_000_000_000 / _BACKDRIVE_RATE_HZ))
+    next_backdrive_ns = now_ns
     _mit_diag_until: float = 0.0
     _mit_diag_next_print: float = 0.0
     mit_stale_since: float | None = None
@@ -148,6 +159,7 @@ def run_piper_worker(
     reported_calibrated = False
     last_calibration_report = -1
     arm_teleop_active = False
+    was_home_requested = False
     print(
         "Delta wrist teleop loaded:",
         f"config={config.delta_teleop_config_path}",
@@ -162,9 +174,35 @@ def run_piper_worker(
                 shared.set_teacher_mode(active, status)
                 next_teacher_ns = now_ns + teacher_period_ns
 
+            # --- Backdrive mode state transitions ---
+            backdrive_requested = shared.backdrive_mode()
+            if backdrive_requested and not backdrive_active:
+                if not mit_mode_active:
+                    api.enable()
+                    api.set_mit_mode()
+                    mit_mode_active = True
+                backdrive_active = True
+                backdrive_hold_pos = None
+                print(
+                    f"[piper_worker] Backdrive mode ON "
+                    f"(torque_scale={_BACKDRIVE_TORQUE_SCALE}, "
+                    f"coulomb={_BACKDRIVE_COULOMB_COMP}, viscous={_BACKDRIVE_VISCOUS_COMP})"
+                )
+            elif backdrive_active and not backdrive_requested:
+                backdrive_active = False
+                mit_hold_pos = None  # re-latch curobo hold pos
+                if not config.curobo_enabled and mit_mode_active:
+                    # MIT 모드에서 빠져나와 position 모드로 복귀해야 move_eef()가 작동함
+                    api.disable()
+                    api.enable()
+                    mit_mode_active = False
+                    print("[piper_worker] Backdrive mode OFF — arm re-enabled in position mode.")
+                else:
+                    print("[piper_worker] Backdrive mode OFF.")
+
             if now_ns >= next_command_ns:
                 teacher_active, _ = shared.teacher_mode()
-                should_run_arm_teleop = (not teacher_active) and shared.teleop_enabled()
+                should_run_arm_teleop = (not teacher_active) and shared.teleop_enabled() and not backdrive_active
                 if should_run_arm_teleop and not arm_teleop_active:
                     delta_controller.reset_calibration()
                     reported_calibrated = False
@@ -195,34 +233,78 @@ def run_piper_worker(
                         print("[piper_worker] cuRobo MIT mode enabled.")
                 if arm_teleop_active and not should_run_arm_teleop:
                     mit_hold_pos = None  # re-latch on next MIT cycle after teleop resumes
+                    shared.set_home_requested(False)
                 arm_teleop_active = should_run_arm_teleop
                 if should_run_arm_teleop:
-                    wrist_pose_cam = shared.latest_wrist_pose_cam()
-                    robot_eef = None if delta_controller.calibrated else api.get_eef_pose()
-                    target_eef = delta_controller.update(wrist_pose_cam, robot_eef)
-                    status = delta_controller.status()
-                    if not status.calibrated and status.calibration_count != last_calibration_report:
-                        last_calibration_report = status.calibration_count
-                        print(
-                            "Wrist delta calibration:",
-                            f"{status.calibration_count}/{status.calibration_frames}",
-                        )
-                    if status.calibrated and not reported_calibrated:
-                        reported_calibrated = True
-                        print("Wrist delta calibration complete.")
-                    if target_eef is not None:
+                    home_req = shared.home_requested()
+                    if was_home_requested and not home_req:
+                        # Home mode just cancelled: recalibrate wrist reference from new position
+                        delta_controller.reset_calibration()
+                        reported_calibrated = False
+                        last_calibration_report = -1
+                        print("Home mode cancelled; recalibrating wrist reference.")
+                    was_home_requested = home_req
+
+                    if home_req:
                         if config.curobo_enabled:
-                            # cuRobo path: publish target for GPU worker to plan
-                            shared.set_target_eef(target_eef)
+                            shared.set_target_eef(list(_HOME_EEF))
                         else:
-                            # Legacy path: firmware IK at 30 Hz
-                            api.move_eef(target_eef)
+                            api.move_eef(_HOME_EEF)
+                    else:
+                        wrist_pose_cam = shared.latest_wrist_pose_cam()
+                        robot_eef = None if delta_controller.calibrated else api.get_eef_pose()
+                        target_eef = delta_controller.update(wrist_pose_cam, robot_eef)
+                        status = delta_controller.status()
+                        if not status.calibrated and status.calibration_count != last_calibration_report:
+                            last_calibration_report = status.calibration_count
+                            print(
+                                "Wrist delta calibration:",
+                                f"{status.calibration_count}/{status.calibration_frames}",
+                            )
+                        if status.calibrated and not reported_calibrated:
+                            reported_calibrated = True
+                            print("Wrist delta calibration complete.")
+                        if target_eef is not None:
+                            if config.curobo_enabled:
+                                # cuRobo path: publish target for GPU worker to plan
+                                shared.set_target_eef(target_eef)
+                            else:
+                                # Legacy path: firmware IK at 30 Hz
+                                api.move_eef(target_eef)
                 next_command_ns += command_period_ns
                 while next_command_ns < now_ns:
                     next_command_ns += command_period_ns
 
+            # Backdrive MIT loop: pure gravity comp, kp=0 kd=0 — arm freely backdriveable
+            if mit_mode_active and backdrive_active and now_ns >= next_backdrive_ns:
+                if api.is_ok():
+                    joint_state = api.get_joint_state()
+                    motor_state = api.get_motor_state()
+                    if joint_state is not None:
+                        q = joint_state.joints
+                        v = motor_state.velocities if motor_state is not None else [0.0] * 6
+                        shared.set_latest_joint_positions(q)
+                        grav_result = grav_comp.compute(
+                            q,
+                            joint_velocities=v,
+                            coulomb_comp=_BACKDRIVE_COULOMB_COMP,
+                            viscous_comp=_BACKDRIVE_VISCOUS_COMP,
+                            torque_scale=_BACKDRIVE_TORQUE_SCALE,
+                        )
+                        api.move_mit_torques(
+                            grav_result.command_torques,
+                            p_des=q,
+                            v_des=[0.0] * 6,
+                            kp=0.0,
+                            kd=0.0,
+                            clamp=True,
+                        )
+                next_backdrive_ns += backdrive_period_ns
+                while next_backdrive_ns < now_ns:
+                    next_backdrive_ns += backdrive_period_ns
+
             # 120 Hz MIT impedance loop (cuRobo path only, after MIT mode is entered)
-            if config.curobo_enabled and mit_mode_active and trajectory_buffer is not None and now_ns >= next_mit_ns:
+            if config.curobo_enabled and mit_mode_active and trajectory_buffer is not None and not backdrive_active and now_ns >= next_mit_ns:
                 assert grav_comp is not None
                 _now_diag = time.monotonic()
                 if _now_diag < _mit_diag_until and _now_diag >= _mit_diag_next_print:
@@ -291,8 +373,9 @@ def run_piper_worker(
                 while next_sample_ns < sample_ns:
                     next_sample_ns += sample_period_ns
             else:
-                # When MIT loop is active, wake up at MIT frequency
-                if config.curobo_enabled and mit_mode_active:
+                if mit_mode_active and backdrive_active:
+                    next_wake_ns = min(next_sample_ns, next_backdrive_ns, next_command_ns)
+                elif config.curobo_enabled and mit_mode_active:
                     next_wake_ns = min(next_sample_ns, next_mit_ns, next_command_ns)
                 else:
                     next_wake_ns = next_sample_ns

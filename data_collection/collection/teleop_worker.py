@@ -55,6 +55,22 @@ def run_teleop_worker(
         if not cap.isOpened():
             raise OSError(f"Could not open teleop camera/video: {config.teleop_camera}")
 
+    # Logitech cap for runtime z-key switching (realsense mode only)
+    logitech_cap = None
+    if config.teleop_source == "realsense":
+        logitech_device = (
+            int(config.teleop_camera)
+            if str(config.teleop_camera).isdigit()
+            else config.teleop_camera
+        )
+        _lc = cv2.VideoCapture(logitech_device)
+        if _lc.isOpened():
+            logitech_cap = _lc
+            print(f"Logitech finger camera opened: {config.teleop_camera} (press z to switch)")
+        else:
+            _lc.release()
+            print(f"Warning: Could not open Logitech camera at {config.teleop_camera}; z-key switching unavailable.")
+
     detector = MediaPipeHandDetector(
         hand_type=config.teleop_hand_type,
         input_hand_type=config.teleop_input_hand,
@@ -78,13 +94,28 @@ def run_teleop_worker(
     frame_idx = 0
     fourcc = cv2.VideoWriter_fourcc(*config.video_codec)
     last_teleop_frame = None
+    _prev_logitech_mode = False
     try:
         while not shared.shutdown.is_set():
+            use_logitech = shared.logitech_finger_mode() and logitech_cap is not None
+
+            # On first switch to Logitech: drain stale V4L2 buffer frames so
+            # hand detection starts on a fresh frame, not a seconds-old one.
+            if use_logitech and not _prev_logitech_mode:
+                for _ in range(8):
+                    logitech_cap.grab()
+            _prev_logitech_mode = use_logitech
+
             depth_m = None
             intrinsics = None
             if config.teleop_source == "opencv":
                 assert cap is not None
                 ok, bgr = cap.read()
+                if not ok:
+                    time.sleep(0.01)
+                    continue
+            elif use_logitech:
+                ok, bgr = logitech_cap.read()
                 if not ok:
                     time.sleep(0.01)
                     continue
@@ -181,3 +212,5 @@ def run_teleop_worker(
         pipeline.close()
         if cap is not None:
             cap.release()
+        if logitech_cap is not None:
+            logitech_cap.release()

@@ -247,7 +247,6 @@ def main_loop(
 ) -> None:
     cv2 = import_cv2()
     pending_start_deadline: float | None = None
-    next_idle_notice = 0.0
     recording_pedal_down = False
 
     while True:
@@ -272,8 +271,25 @@ def main_loop(
                 shared.set_teleop_enabled(False)
                 print("Arm teleop disabled while Piper teacher mode is active.")
             else:
-                enabled = shared.toggle_teleop_enabled()
-                print(f"Arm teleop enabled: {enabled}")
+                if shared.backdrive_mode():
+                    shared.set_backdrive_mode(False)
+                    print("Backdrive mode off. Arm teleop resumed.")
+                else:
+                    enabled = shared.toggle_teleop_enabled()
+                    print(f"Arm teleop enabled: {enabled}")
+        if key == ord("z"):
+            backdrive_enabled = shared.toggle_backdrive_mode()
+            if backdrive_enabled and not shared.teleop_enabled():
+                shared.set_teleop_enabled(True)
+            logitech_enabled = shared.toggle_logitech_finger_mode()
+            print(f"Arm MIT backdrive: {backdrive_enabled}, Logitech finger cam: {logitech_enabled}")
+        if key == ord("r"):
+            if shared.teleop_enabled() and not shared.backdrive_mode():
+                enabled = shared.toggle_home_requested()
+                if enabled:
+                    print("Returning to home pose... Press r again to cancel.")
+                else:
+                    print("Home mode cancelled.")
         if (
             recorder.is_recording()
             and config.stop_episode_on_teacher_mode_lost
@@ -285,7 +301,11 @@ def main_loop(
             continue
 
         requested_stop = shared.pop_stop_episode_reason()
-        if recorder.is_recording() and requested_stop == "teacher_mode_lost":
+        if (
+            recorder.is_recording()
+            and requested_stop == "teacher_mode_lost"
+            and config.stop_episode_on_teacher_mode_lost
+        ):
             stop_and_flush_episode(recorder, requested_stop)
             pending_start_deadline = None
             recording_pedal_down = False
@@ -308,29 +328,12 @@ def main_loop(
 
         if pending_start_deadline is None:
             if pedal_pressed:
-                if teacher_active:
-                    pending_start_deadline = time.monotonic() + config.ready_seconds
-                    print(
-                        f"Pedal pressed. Recording starts in {config.ready_seconds:.1f}s."
-                    )
-                else:
-                    print(
-                        "Pedal press ignored because Piper teacher mode is inactive "
-                        f"(teach_status={teacher_status!r})."
-                    )
-            else:
-                now = time.monotonic()
-                if not teacher_active and now >= next_idle_notice:
-                    print(
-                        "Waiting for Piper teacher mode before teleop/recording "
-                        f"(teach_status={teacher_status!r})."
-                    )
-                    next_idle_notice = now + 2.0
+                pending_start_deadline = time.monotonic() + config.ready_seconds
+                print(
+                    f"Pedal pressed. Recording starts in {config.ready_seconds:.1f}s."
+                )
         else:
-            if not teacher_active:
-                print("Start cancelled because Piper teacher mode is inactive.")
-                pending_start_deadline = None
-            elif pedal_pressed:
+            if pedal_pressed:
                 print("Start cancelled by second pedal press during ready delay.")
                 pending_start_deadline = None
             elif time.monotonic() >= pending_start_deadline:

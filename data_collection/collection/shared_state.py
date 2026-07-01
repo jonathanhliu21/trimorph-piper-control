@@ -23,6 +23,9 @@ class SharedState:
         self._latest_target_eef: list[float] | None = None
         self._latest_joint_positions: list[float] | None = None
         self._curobo_enabled: bool = False
+        self._backdrive_mode: bool = False
+        self._home_requested: bool = False
+        self._logitech_finger_mode: bool = False
         self.calibrate_neutral = threading.Event()
         self.shutdown = threading.Event()
 
@@ -157,3 +160,42 @@ class SharedState:
     def curobo_enabled(self) -> bool:
         with self._lock:
             return self._curobo_enabled
+
+    def set_backdrive_mode(self, enabled: bool) -> None:
+        with self._lock:
+            self._backdrive_mode = bool(enabled)
+
+    def toggle_backdrive_mode(self) -> bool:
+        with self._lock:
+            self._backdrive_mode = not self._backdrive_mode
+            return self._backdrive_mode
+
+    def backdrive_mode(self) -> bool:
+        with self._lock:
+            return self._backdrive_mode
+
+    def set_home_requested(self, enabled: bool) -> None:
+        with self._lock:
+            self._home_requested = bool(enabled)
+
+    def toggle_home_requested(self) -> bool:
+        with self._lock:
+            self._home_requested = not self._home_requested
+            return self._home_requested
+
+    def home_requested(self) -> bool:
+        with self._lock:
+            return self._home_requested
+
+    def set_logitech_finger_mode(self, enabled: bool) -> None:
+        with self._lock:
+            self._logitech_finger_mode = bool(enabled)
+
+    def toggle_logitech_finger_mode(self) -> bool:
+        with self._lock:
+            self._logitech_finger_mode = not self._logitech_finger_mode
+            return self._logitech_finger_mode
+
+    def logitech_finger_mode(self) -> bool:
+        with self._lock:
+            return self._logitech_finger_mode

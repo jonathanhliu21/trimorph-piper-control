@@ -1,5 +1,16 @@
+//environment setup
+/home/grasswonder/midas_hand/midas-piper-control/setup_record.sh
+
+//teledex operation
 python3 test_mit_controller.py --firmware v183 \
-    --hold-K 0.0 --hold-B 0.0 --damping 0.0 --torque-scale 1.05
+    --torque-scale 1.05 \
+    --coulomb-comp 0.05 --viscous-comp 0.05
+
+
+
+
+
+
 
 
 python3 test_mit_controller.py --firmware v183 \
