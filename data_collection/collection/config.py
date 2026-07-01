@@ -14,23 +14,35 @@ DATASET_ROOT = Path("data_midas")
 READY_SECONDS = 0.2
 STOP_EPISODE_ON_TEACHER_MODE_LOST = False
 
-SHOW_REALSENSE_VIEW = True
+SHOW_TASK_VIEW = True
 SHOW_TELEOP_VIEW = True
-REALSENSE_WINDOW_NAME = "realsense_task_camera"
+TASK_VIEW_WINDOW_NAME = "task_view"  # shows the task camera frame (RealSense frame as fallback)
 TELEOP_WINDOW_NAME = "midas_hand_teleop"
+LOGITECH_WINDOW_NAME = "logitech_finger_cam"  # z-key close-up view of the Logitech teleop camera
 
-CAMERA_WIDTH = 640
-CAMERA_HEIGHT = 480
-CAMERA_FPS = 30
-CAMERA_SERIAL: str | None = None
-CAMERA_FLIP = "none"  # one of: "none", "horizontal", "vertical", "both"
-CAMERA_TIMEOUT_MS = 500
-CAMERA_MAX_TIMEOUTS = 30
-CAMERA_WARMUP_FRAMES = 30
+# Task camera (OAK-1, via depthai) — the sole source of camera.mp4.
+TASK_CAMERA_WIDTH = 1280
+TASK_CAMERA_HEIGHT = 720
+TASK_CAMERA_FPS = 30
+TASK_CAMERA_FLIP = "none"  # one of: "none", "horizontal", "vertical", "both"
+
+# RealSense — used only to supply depth/intrinsics for teleop wrist-pose
+# estimation (when TELEOP_SOURCE="realsense"). Never recorded to video, so
+# this resolution is independent of TASK_CAMERA_WIDTH/HEIGHT/FPS above; pick
+# any profile the device actually supports (check with --list-realsense).
+REALSENSE_WIDTH = 640
+REALSENSE_HEIGHT = 480
+REALSENSE_FPS = 30
+REALSENSE_SERIAL: str | None = None
+REALSENSE_FLIP = "none"  # one of: "none", "horizontal", "vertical", "both"
+REALSENSE_TIMEOUT_MS = 500
+REALSENSE_MAX_TIMEOUTS = 30
+REALSENSE_WARMUP_FRAMES = 30
+
 VIDEO_CODEC = "mp4v"
 
 RECORD_TELEOP_CAMERA = False
-TELEOP_CAMERA: int | str = 0  # Logitech UVC Camera (046d:0825) at /dev/video0
+TELEOP_CAMERA: int | str = "/dev/v4l/by-id/usb-046d_0825_5259E8E0-video-index0"  # Logitech UVC Camera (046d:0825)
 TELEOP_CAMERA_FPS = 30
 TELEOP_HAND_TYPE = "Right"
 TELEOP_INPUT_HAND = "auto"
@@ -89,17 +101,41 @@ FOOT_PEDAL_DEVICE: str | None = None
 FOOT_PEDAL_KEY_CODE: int | None = None
 FOOT_PEDAL_DEBOUNCE_SECONDS = 0.5
 
-# Task camera source: "realsense" uses Intel RealSense; "opencv" uses any v4l2/OpenCV device
-# (e.g. DroidCam smartphone camera at /dev/video2)
-TASK_CAMERA_SOURCE = "opencv"        # one of: "realsense", "opencv"
-TASK_CAMERA_DEVICE: int | str = 2    # used when TASK_CAMERA_SOURCE = "opencv"
+# --------------------------------------------------------------------------
+# Camera map — three independent camera "slots", each backed by a physical
+# device that can change over time. Match by slot purpose, not by name:
+#
+#   slot        physical device                            saved to
+#   ----------  --------------------------------------    -------------------
+#   task        Luxonis OAK-1 camera, via the depthai       camera.mp4
+#               SDK (see test_oak1_camera.py). Always        (main training
+#               depthai — auto-detected over USB, no          video)
+#               /dev/video index to configure. (Formerly
+#               a DroidCam via v4l2loopback; see git
+#               history if that ever needs to come back.)
+#   teleop      Logitech UVC webcam (TELEOP_CAMERA).        teleop_camera.mp4
+#               MediaPipe hand-tracking input; primary        (only if
+#               source when TELEOP_SOURCE="opencv", or a      RECORD_TELEOP_
+#               toggleable close-up "finger cam" (press z)     CAMERA=True)
+#               when TELEOP_SOURCE="realsense".
+#   aux         Unused by default. A genuinely separate      wrist_camera.mp4
+#               camera device, distinct from the task and      (legacy file
+#               teleop cameras above — NOT "the camera on       name, kept for
+#               the wrist" (that's the task camera). Also       dataset compat)
+#               backed by depthai; see aux_camera_worker.py.
+#               If you only have one OAK unit, don't enable
+#               this at the same time as the task camera —
+#               both would try to grab the same device.
+#
+# RealSense is not a slot of its own: it always runs in the background to
+# supply depth/intrinsics for teleop wrist-pose estimation (when
+# TELEOP_SOURCE="realsense"), and is never recorded to video.
+# --------------------------------------------------------------------------
 
-# Wrist camera (secondary close-up camera, separate from the task camera)
-WRIST_CAMERA_ENABLED = False
-WRIST_CAMERA_DEVICE: int | str = 0   # cv2 device index or /dev/video* path
-WRIST_CAMERA_WIDTH = 640
-WRIST_CAMERA_HEIGHT = 480
-WRIST_CAMERA_FPS = 30
+AUX_CAMERA_ENABLED = False
+AUX_CAMERA_WIDTH = 1280
+AUX_CAMERA_HEIGHT = 720
+AUX_CAMERA_FPS = 30
 
 # cuRobo motion generation (replaces firmware IK when enabled)
 CUROBO_ENABLED = False
@@ -131,18 +167,23 @@ class CollectionConfig:
     dataset_root: Path
     ready_seconds: float
     stop_episode_on_teacher_mode_lost: bool
-    show_realsense_view: bool
+    show_task_view: bool
     show_teleop_view: bool
-    realsense_window_name: str
+    task_view_window_name: str
     teleop_window_name: str
-    camera_width: int
-    camera_height: int
-    camera_fps: int
-    camera_serial: str | None
-    camera_flip: str
-    camera_timeout_ms: int
-    camera_max_timeouts: int
-    camera_warmup_frames: int
+    logitech_window_name: str
+    task_camera_width: int
+    task_camera_height: int
+    task_camera_fps: int
+    task_camera_flip: str
+    realsense_width: int
+    realsense_height: int
+    realsense_fps: int
+    realsense_serial: str | None
+    realsense_flip: str
+    realsense_timeout_ms: int
+    realsense_max_timeouts: int
+    realsense_warmup_frames: int
     video_codec: str
     record_teleop_camera: bool
     teleop_camera: int | str
@@ -188,13 +229,10 @@ class CollectionConfig:
     foot_pedal_device: str | None
     foot_pedal_key_code: int | None
     foot_pedal_debounce_seconds: float
-    task_camera_source: str
-    task_camera_device: int | str
-    wrist_camera_enabled: bool
-    wrist_camera_device: int | str
-    wrist_camera_width: int
-    wrist_camera_height: int
-    wrist_camera_fps: int
+    aux_camera_enabled: bool
+    aux_camera_width: int
+    aux_camera_height: int
+    aux_camera_fps: int
     curobo_enabled: bool
     curobo_urdf_path: Path
     curobo_xrdf_path: Path
@@ -213,18 +251,23 @@ def build_config() -> CollectionConfig:
         dataset_root=Path(DATASET_ROOT).expanduser(),
         ready_seconds=READY_SECONDS,
         stop_episode_on_teacher_mode_lost=STOP_EPISODE_ON_TEACHER_MODE_LOST,
-        show_realsense_view=SHOW_REALSENSE_VIEW,
+        show_task_view=SHOW_TASK_VIEW,
         show_teleop_view=SHOW_TELEOP_VIEW,
-        realsense_window_name=REALSENSE_WINDOW_NAME,
+        task_view_window_name=TASK_VIEW_WINDOW_NAME,
         teleop_window_name=TELEOP_WINDOW_NAME,
-        camera_width=CAMERA_WIDTH,
-        camera_height=CAMERA_HEIGHT,
-        camera_fps=CAMERA_FPS,
-        camera_serial=CAMERA_SERIAL,
-        camera_flip=CAMERA_FLIP,
-        camera_timeout_ms=CAMERA_TIMEOUT_MS,
-        camera_max_timeouts=CAMERA_MAX_TIMEOUTS,
-        camera_warmup_frames=CAMERA_WARMUP_FRAMES,
+        logitech_window_name=LOGITECH_WINDOW_NAME,
+        task_camera_width=TASK_CAMERA_WIDTH,
+        task_camera_height=TASK_CAMERA_HEIGHT,
+        task_camera_fps=TASK_CAMERA_FPS,
+        task_camera_flip=TASK_CAMERA_FLIP,
+        realsense_width=REALSENSE_WIDTH,
+        realsense_height=REALSENSE_HEIGHT,
+        realsense_fps=REALSENSE_FPS,
+        realsense_serial=REALSENSE_SERIAL,
+        realsense_flip=REALSENSE_FLIP,
+        realsense_timeout_ms=REALSENSE_TIMEOUT_MS,
+        realsense_max_timeouts=REALSENSE_MAX_TIMEOUTS,
+        realsense_warmup_frames=REALSENSE_WARMUP_FRAMES,
         video_codec=VIDEO_CODEC,
         record_teleop_camera=RECORD_TELEOP_CAMERA,
         teleop_camera=TELEOP_CAMERA,
@@ -270,13 +313,10 @@ def build_config() -> CollectionConfig:
         foot_pedal_device=FOOT_PEDAL_DEVICE,
         foot_pedal_key_code=FOOT_PEDAL_KEY_CODE,
         foot_pedal_debounce_seconds=FOOT_PEDAL_DEBOUNCE_SECONDS,
-        task_camera_source=TASK_CAMERA_SOURCE,
-        task_camera_device=TASK_CAMERA_DEVICE,
-        wrist_camera_enabled=WRIST_CAMERA_ENABLED,
-        wrist_camera_device=WRIST_CAMERA_DEVICE,
-        wrist_camera_width=WRIST_CAMERA_WIDTH,
-        wrist_camera_height=WRIST_CAMERA_HEIGHT,
-        wrist_camera_fps=WRIST_CAMERA_FPS,
+        aux_camera_enabled=AUX_CAMERA_ENABLED,
+        aux_camera_width=AUX_CAMERA_WIDTH,
+        aux_camera_height=AUX_CAMERA_HEIGHT,
+        aux_camera_fps=AUX_CAMERA_FPS,
         curobo_enabled=CUROBO_ENABLED,
         curobo_urdf_path=Path(CUROBO_URDF_PATH).expanduser(),
         curobo_xrdf_path=Path(CUROBO_XRDF_PATH).expanduser(),
@@ -299,36 +339,21 @@ def apply_device_overrides(
     teleop_camera: str | None = None,
     foot_pedal_device: str | None = None,
     curobo_enabled: bool | None = None,
-    task_camera_source: str | None = None,
-    task_camera_device: str | None = None,
-    wrist_camera_device: str | None = None,
-    wrist_camera_enabled: bool | None = None,
+    aux_camera_enabled: bool | None = None,
 ) -> CollectionConfig:
     updates = {}
     if dataset_root is not None:
         updates["dataset_root"] = Path(dataset_root).expanduser()
     if realsense_serial is not None:
-        updates["camera_serial"] = realsense_serial
+        updates["realsense_serial"] = realsense_serial
     if teleop_camera is not None:
         updates["teleop_camera"] = int(teleop_camera) if teleop_camera.isdigit() else teleop_camera
     if foot_pedal_device is not None:
         updates["foot_pedal_device"] = foot_pedal_device
     if curobo_enabled is not None:
         updates["curobo_enabled"] = curobo_enabled
-    if task_camera_source is not None:
-        updates["task_camera_source"] = task_camera_source
-    if task_camera_device is not None:
-        updates["task_camera_device"] = (
-            int(task_camera_device) if task_camera_device.isdigit() else task_camera_device
-        )
-        updates["task_camera_source"] = "opencv"
-    if wrist_camera_device is not None:
-        updates["wrist_camera_device"] = (
-            int(wrist_camera_device) if wrist_camera_device.isdigit() else wrist_camera_device
-        )
-        updates["wrist_camera_enabled"] = True
-    if wrist_camera_enabled is not None:
-        updates["wrist_camera_enabled"] = wrist_camera_enabled
+    if aux_camera_enabled is not None:
+        updates["aux_camera_enabled"] = aux_camera_enabled
     return replace(config, **updates) if updates else config
 
 
@@ -344,16 +369,39 @@ def validate_config(config: CollectionConfig) -> None:
     }.items():
         if value <= 0:
             raise ValueError(f"{name} must be greater than 0")
-    if config.camera_width <= 0 or config.camera_height <= 0 or config.camera_fps <= 0:
-        raise ValueError("Camera dimensions and FPS must be greater than 0")
-    if config.camera_flip not in {"none", "horizontal", "vertical", "both"}:
-        raise ValueError("CAMERA_FLIP must be one of: none, horizontal, vertical, both")
+    if (
+        config.task_camera_width <= 0
+        or config.task_camera_height <= 0
+        or config.task_camera_fps <= 0
+    ):
+        raise ValueError("Task camera dimensions and FPS must be greater than 0")
+    if config.task_camera_flip not in {"none", "horizontal", "vertical", "both"}:
+        raise ValueError("TASK_CAMERA_FLIP must be one of: none, horizontal, vertical, both")
+    if (
+        config.realsense_width <= 0
+        or config.realsense_height <= 0
+        or config.realsense_fps <= 0
+    ):
+        raise ValueError("RealSense dimensions and FPS must be greater than 0")
+    if config.realsense_flip not in {"none", "horizontal", "vertical", "both"}:
+        raise ValueError("REALSENSE_FLIP must be one of: none, horizontal, vertical, both")
     if len(config.video_codec) != 4:
         raise ValueError("VIDEO_CODEC must be a 4-character fourcc")
     if config.piper_firmware not in {"default", "v183", "v188"}:
         raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
-    if config.task_camera_source not in {"realsense", "opencv"}:
-        raise ValueError("TASK_CAMERA_SOURCE must be one of: realsense, opencv")
+    if not _module_available("depthai"):
+        raise ValueError(
+            "The task camera (OAK-1) requires the 'depthai' Python package, which "
+            "is not installed in this environment. Install it with `pip install "
+            "depthai`."
+        )
+    if config.aux_camera_enabled and not _module_available("depthai"):
+        raise ValueError(
+            "AUX_CAMERA_ENABLED is true, but the 'depthai' Python package is not "
+            "installed in this environment. Install depthai (pip install depthai) "
+            "for the OAK-1 auxiliary camera, or run collect_raw_dataset.py "
+            "--no-aux-camera to disable it."
+        )
     if config.foot_pedal_debounce_seconds < 0:
         raise ValueError("FOOT_PEDAL_DEBOUNCE_SECONDS must be 0 or greater")
     if not config.delta_teleop_config_path:

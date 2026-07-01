@@ -26,6 +26,7 @@ class SharedState:
         self._backdrive_mode: bool = False
         self._home_requested: bool = False
         self._logitech_finger_mode: bool = False
+        self._logitech_display_bgr: np.ndarray | None = None
         self.calibrate_neutral = threading.Event()
         self.shutdown = threading.Event()
 
@@ -186,6 +187,16 @@ class SharedState:
     def home_requested(self) -> bool:
         with self._lock:
             return self._home_requested
+
+    def set_logitech_display_frame(self, bgr: np.ndarray) -> None:
+        with self._lock:
+            self._logitech_display_bgr = bgr.copy()
+
+    def latest_logitech_display_frame(self) -> np.ndarray | None:
+        with self._lock:
+            if self._logitech_display_bgr is None:
+                return None
+            return self._logitech_display_bgr.copy()
 
     def set_logitech_finger_mode(self, enabled: bool) -> None:
         with self._lock:

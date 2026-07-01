@@ -94,20 +94,14 @@ def run_teleop_worker(
     frame_idx = 0
     fourcc = cv2.VideoWriter_fourcc(*config.video_codec)
     last_teleop_frame = None
-    _prev_logitech_mode = False
     try:
         while not shared.shutdown.is_set():
             use_logitech = shared.logitech_finger_mode() and logitech_cap is not None
 
-            # On first switch to Logitech: drain stale V4L2 buffer frames so
-            # hand detection starts on a fresh frame, not a seconds-old one.
-            if use_logitech and not _prev_logitech_mode:
-                for _ in range(8):
-                    logitech_cap.grab()
-            _prev_logitech_mode = use_logitech
-
             depth_m = None
             intrinsics = None
+            logitech_raw: "np.ndarray | None" = None
+
             if config.teleop_source == "opencv":
                 assert cap is not None
                 ok, bgr = cap.read()
@@ -124,6 +118,12 @@ def run_teleop_worker(
                 if bgr is None:
                     time.sleep(0.005)
                     continue
+                # Read Logitech frame for display even when not the active input.
+                # The cap buffer is always draining so this read is nearly instant.
+                if logitech_cap is not None:
+                    ok_l, _lbgr = logitech_cap.read()
+                    if ok_l:
+                        logitech_raw = _lbgr
             sample_ns = time.monotonic_ns()
             wall_time_s = time.time()
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -169,6 +169,12 @@ def run_teleop_worker(
                     print(f"Captured retargeter neutral offsets: {compact}")
 
             shared.set_teleop_frame(display)
+
+            # Keep the Logitech window updated regardless of which source is active.
+            if use_logitech:
+                shared.set_logitech_display_frame(display)  # with landmarks
+            elif logitech_raw is not None:
+                shared.set_logitech_display_frame(logitech_raw)  # raw feed
 
             session = recorder.current()
             if not config.record_teleop_camera:

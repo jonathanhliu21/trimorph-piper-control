@@ -1,6 +1,6 @@
 import cv2
 
-cap = cv2.VideoCapture(2)  # DroidCam virtual camera at /dev/video2
+cap = cv2.VideoCapture(20)  # DroidCam virtual camera, pinned to /dev/video20 via v4l2loopback video_nr
 
 
 if not cap.isOpened():

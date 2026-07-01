@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect raw RealSense, Piper, Midas teleop, and tactile episodes."""
+"""Collect raw OAK-1 task camera, RealSense, Piper, Midas teleop, and tactile episodes."""
 
 from __future__ import annotations
 
@@ -12,13 +12,12 @@ from collection.config import (
     apply_device_overrides,
     build_config,
     validate_config,
-    WRIST_CAMERA_ENABLED,
 )
 from collection.realsense_worker import format_realsense_devices
 from collection.runner import run_collection
 from scripts.piper_api.foot_pedal import format_input_devices, list_input_devices
 
-DATASET_ROOT = "data_midas4"  # e.g. "data_midas1" — overrides config.py; overridden by --dataset-root flag
+DATASET_ROOT = "data_midas6"  # e.g. "data_midas1" — overrides config.py; overridden by --dataset-root flag
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -38,24 +37,11 @@ def parse_args() -> argparse.Namespace:
         "--realsense-id",
         dest="realsense_serial",
         default=None,
-        help="RealSense serial number. Overrides CAMERA_SERIAL.",
-    )
-    parser.add_argument(
-        "--task-camera",
-        dest="task_camera_device",
-        default=None,
-        metavar="DEVICE",
         help=(
-            "OpenCV task camera device index or /dev/video* path (e.g. 2 for DroidCam). "
-            "Sets TASK_CAMERA_SOURCE=opencv and overrides TASK_CAMERA_DEVICE."
+            "RealSense serial number. Overrides REALSENSE_SERIAL. The RealSense "
+            "only supplies depth for teleop wrist-pose estimation now — the task "
+            "camera is always the OAK-1 (depthai)."
         ),
-    )
-    parser.add_argument(
-        "--task-camera-source",
-        dest="task_camera_source",
-        default=None,
-        choices=["realsense", "opencv"],
-        help="Task camera source: 'realsense' or 'opencv'. Overrides TASK_CAMERA_SOURCE.",
     )
     parser.add_argument(
         "--teleop-camera",
@@ -80,22 +66,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--wrist-camera",
-        dest="wrist_camera_device",
+        "--aux-camera",
+        dest="aux_camera_enabled",
+        action=argparse.BooleanOptionalAction,
         default=None,
-        metavar="DEVICE",
         help=(
-            "Enable the wrist camera and set its OpenCV device index or /dev/video* path "
-            "(e.g. 4 or /dev/v4l/by-id/...). Overrides WRIST_CAMERA_DEVICE and sets "
-            "WRIST_CAMERA_ENABLED=True. Use --no-wrist-camera to disable."
+            "Enable/disable the auxiliary OAK-1 camera (Luxonis depthai; a separate "
+            "physical device from the task and teleop cameras, auto-detected over "
+            "USB). Defaults to AUX_CAMERA_ENABLED from config.py. Requires the "
+            "'depthai' package. Saved as wrist_camera.mp4 for dataset compatibility."
         ),
-    )
-    parser.add_argument(
-        "--no-wrist-camera",
-        dest="wrist_camera_disabled",
-        action="store_true",
-        default=False,
-        help="Disable the wrist camera even if WRIST_CAMERA_ENABLED=True in config.py.",
     )
     parser.add_argument(
         "--list-realsense",
@@ -148,23 +128,14 @@ def main() -> int:
         print(format_realsense_devices())
         return 0
 
-    wrist_camera_enabled: bool | None = None
-    if args.wrist_camera_disabled:
-        wrist_camera_enabled = False
-    elif args.wrist_camera_device is None and WRIST_CAMERA_ENABLED:
-        wrist_camera_enabled = True
-
     config = apply_device_overrides(
         build_config(),
         dataset_root=args.dataset_root or DATASET_ROOT,
         realsense_serial=args.realsense_serial,
-        task_camera_source=args.task_camera_source,
-        task_camera_device=args.task_camera_device,
         teleop_camera=args.teleop_camera,
         foot_pedal_device=args.foot_pedal_device,
         curobo_enabled=args.curobo,
-        wrist_camera_device=args.wrist_camera_device,
-        wrist_camera_enabled=wrist_camera_enabled,
+        aux_camera_enabled=args.aux_camera_enabled,
     )
     validate_config(config)
     return run_collection(config)

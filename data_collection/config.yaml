@@ -21,6 +21,5 @@ max_translation_step_m: 0.01
 position_alpha: 0.35
 orientation_alpha: 0.1
 
-# Keep false for initial tests; position-only delta teleop is safer to validate.
 orientation_enabled: false
 calibration_frames: 50

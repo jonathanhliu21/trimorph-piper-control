@@ -30,6 +30,24 @@ python3 data_collection/collect_raw_dataset.py --list-video-devices
 python3 data_collection/collect_raw_dataset.py --list-input-devices
 ```
 
+### Camera map
+
+There are two independent camera "slots" that record video, plus RealSense
+running in the background purely for depth. Match by slot purpose, not by
+name — the physical device behind a slot can change over time:
+
+| Slot     | Config prefix       | CLI flag                          | Physical device                                  | Saved to                                    |
+|----------|----------------------|------------------------------------|------------------------------------------------------------|----------------------------------------------|
+| task     | `TASK_CAMERA_*`      | (none — always depthai)            | Luxonis OAK-1 camera via the `depthai` SDK (see `test_oak1_camera.py`), auto-detected over USB — no `/dev/video` index to configure. Requires `pip install depthai`. | `camera.mp4` (the main training video) |
+| teleop   | `TELEOP_CAMERA`      | `--teleop-camera`                  | Logitech UVC webcam. Primary MediaPipe hand-tracking input when `TELEOP_SOURCE="opencv"`, or a toggleable close-up "finger cam" (press `z`) when `TELEOP_SOURCE="realsense"`. | `teleop_camera.mp4` (only if `RECORD_TELEOP_CAMERA=True`) |
+| aux      | `AUX_CAMERA_*`       | `--aux-camera`, `--no-aux-camera`  | Disabled by default. Unused unless you have a second, genuinely separate camera device beyond the task and teleop cameras above — **not** "the camera on the wrist" (that's the task camera). Also depthai-based (see `aux_camera_worker.py`). If you only have one OAK unit, don't enable this at the same time as the task camera — both would grab the same device. | `wrist_camera.mp4` (legacy file name, kept for dataset compatibility) |
+
+RealSense is not a recording slot: it always runs in the background (when
+`TELEOP_SOURCE="realsense"`) to supply depth/intrinsics for teleop wrist-pose
+estimation, and is never written to video. Its resolution (`REALSENSE_WIDTH`/
+`REALSENSE_HEIGHT`/`REALSENSE_FPS`) is independent of the task camera's —
+check supported profiles with `--list-realsense` before changing it.
+
 ## Raw Collection
 
 ```bash
@@ -38,9 +56,10 @@ python3 data_collection/collect_raw_dataset.py
 
 Sequence:
 
-1. The script connects Piper, Midas hand, Paxini tactile, foot pedal, RealSense,
-   and the teleop webcam.
-2. RealSense and teleop preview windows stay live.
+1. The script connects Piper, Midas hand, Paxini tactile, foot pedal, the task
+   camera, RealSense (depth for teleop), and the teleop webcam.
+2. Task view and teleop preview windows stay live (and a Logitech close-up
+   window when `z` toggles it on).
 3. Piper teacher mode gates both teleop commands and recording.
 4. Press `c` in a display window to capture teleop neutral calibration.
 5. Press the foot pedal once.
@@ -70,9 +89,9 @@ If `RECORD_TELEOP_CAMERA = True`, raw episodes also contain:
 
 Defaults:
 
-- RealSense RGB: `640x480 @ 30Hz`
-- RealSense selection: `CAMERA_SERIAL = None`; use `--realsense-serial` for a stable camera ID
-- Teleop webcam selection: `TELEOP_CAMERA = 0`; use `--teleop-camera` for an OpenCV index or `/dev/v4l/by-id/...` path
+- Task camera: always the OAK-1 (depthai), `TASK_CAMERA_WIDTH/HEIGHT/FPS = 1280x720 @ 30Hz`
+- RealSense (teleop depth only, never recorded): `REALSENSE_WIDTH/HEIGHT/FPS = 640x480 @ 30Hz`; selection via `REALSENSE_SERIAL = None`, use `--realsense-serial` for a stable camera ID
+- Teleop webcam selection: `TELEOP_CAMERA = <Logitech /dev/v4l/by-id path>`; use `--teleop-camera` for an OpenCV index or `/dev/v4l/by-id/...` path
 - Teleop webcam overlay: shown
 - Midas teleop commands: target `50Hz`, only while Piper teacher mode is active
 - Midas measured positions: target `200Hz`
@@ -92,11 +111,15 @@ data_collection/
     config.py
     episode.py
     shared_state.py
-    realsense_worker.py
-    teleop_worker.py
+    realsense_worker.py           # RealSense: teleop-depth feed only, never recorded
+    depthai_task_camera_worker.py # task camera (OAK-1, always depthai) — records camera.mp4
+    depthai_utils.py              # shared depthai pipeline/warmup helpers
+    teleop_worker.py              # MediaPipe hand tracking (Logitech or RealSense input)
+    aux_camera_worker.py          # optional separate camera slot, disabled by default (depthai)
     midas_worker.py
     piper_worker.py
     tactile_worker.py
+    curobo_worker.py
     runner.py
 ```
 
@@ -120,9 +143,9 @@ data_midas/
   syncs/000000.npz
 ```
 
-Sync rows are keyed to RealSense frame timestamps. For each camera frame, the
-nearest Midas hand sample and nearest Piper EEF sample are selected by
-`monotonic_ns`.
+Sync rows are keyed to task camera frame timestamps (`camera_timestamps.csv`).
+For each camera frame, the nearest Midas hand sample and nearest Piper EEF
+sample are selected by `monotonic_ns`.
 
 The postprocessor uses measured Midas positions from `midas.csv`. It ignores
 `tactile.npz` for now.

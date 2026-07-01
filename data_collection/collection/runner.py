@@ -15,15 +15,15 @@ from .episode import (
     next_episode_index,
     raw_root,
 )
+from .aux_camera_worker import run_aux_camera_worker
 from .curobo_worker import run_curobo_worker
+from .depthai_task_camera_worker import run_depthai_task_camera_worker
 from .midas_worker import run_midas_worker
-from .opencv_task_camera_worker import run_opencv_task_camera_worker
 from .piper_worker import run_piper_worker
 from .realsense_worker import run_realsense_worker
 from .shared_state import SharedState
 from .tactile_worker import run_tactile_worker
 from .teleop_worker import run_teleop_worker
-from .wrist_camera_worker import run_wrist_camera_worker
 from .utils import WorkerError, import_cv2, worker_wrapper
 
 
@@ -47,17 +47,12 @@ def start_workers(
     def _curobo(cfg, sh, rec, *, init_done):
         run_curobo_worker(cfg, sh, rec, trajectory_buffer, init_done=init_done)
 
-    if config.task_camera_source == "opencv":
-        # DroidCam (or other OpenCV device) records camera.mp4.
-        # If teleop needs RealSense depth, run it in teleop-only mode alongside.
-        def _realsense_teleop_only(cfg, sh, rec, *, init_done):
-            run_realsense_worker(cfg, sh, rec, init_done=init_done, record=False)
-
-        specs = [("task_camera", run_opencv_task_camera_worker)]
-        if config.teleop_source == "realsense":
-            specs.append(("realsense", _realsense_teleop_only))
-    else:
-        specs = [("realsense", run_realsense_worker)]
+    # OAK-1 (depthai) is the task camera and always records camera.mp4. If
+    # teleop needs RealSense depth for wrist-pose estimation, run RealSense
+    # alongside it purely to supply depth/intrinsics (never recorded).
+    specs = [("task_camera", run_depthai_task_camera_worker)]
+    if config.teleop_source == "realsense":
+        specs.append(("realsense", run_realsense_worker))
 
     specs += [
         ("piper", _piper),
@@ -66,8 +61,8 @@ def start_workers(
     ]
     if config.enable_tactile:
         specs.append(("tactile", run_tactile_worker))
-    if config.wrist_camera_enabled:
-        specs.append(("wrist_camera", run_wrist_camera_worker))
+    if config.aux_camera_enabled:
+        specs.append(("aux_camera", run_aux_camera_worker))
     if config.curobo_enabled:
         specs.append(("curobo", _curobo))
 
@@ -147,13 +142,13 @@ def _print_episode_summary(session: EpisodeBuffer) -> None:
                 _row_timestamps_ns(session.teleop_camera_rows),
             )
         )
-    if session.config.wrist_camera_enabled:
+    if session.config.aux_camera_enabled:
         summaries.append(
             (
-                "wrist camera",
-                len(session.wrist_camera_rows),
+                "auxiliary camera",
+                len(session.aux_camera_rows),
                 "frames",
-                _row_timestamps_ns(session.wrist_camera_rows),
+                _row_timestamps_ns(session.aux_camera_rows),
             )
         )
 
@@ -188,7 +183,7 @@ def stop_and_flush_episode(
     print(f"Stopping episode {session.paths.episode_index:06d}: {reason}")
     session.video_done.wait(timeout=timeout_s)
     session.teleop_video_done.wait(timeout=timeout_s)
-    session.wrist_video_done.wait(timeout=timeout_s)
+    session.aux_video_done.wait(timeout=timeout_s)
     session.flush()
     _print_episode_summary(session)
     if color:
@@ -207,7 +202,7 @@ def delete_and_discard_episode(
     print(f"Discarding episode {episode_index:06d}...")
     session.video_done.wait(timeout=timeout_s)
     session.teleop_video_done.wait(timeout=timeout_s)
-    session.wrist_video_done.wait(timeout=timeout_s)
+    session.aux_video_done.wait(timeout=timeout_s)
     shutil.rmtree(session.paths.episode_dir, ignore_errors=True)
     print(f"{_ORANGE}Episode {episode_index:06d} deleted.{_RESET}")
 
@@ -254,11 +249,14 @@ def main_loop(
         if shared.shutdown.is_set():
             break
 
-        realsense_bgr, teleop_bgr = shared.display_frames()
-        if config.show_realsense_view and realsense_bgr is not None:
-            cv2.imshow(config.realsense_window_name, realsense_bgr)
+        task_bgr, teleop_bgr = shared.display_frames()
+        logitech_bgr = shared.latest_logitech_display_frame()
+        if config.show_task_view and task_bgr is not None:
+            cv2.imshow(config.task_view_window_name, task_bgr)
         if config.show_teleop_view and teleop_bgr is not None:
             cv2.imshow(config.teleop_window_name, teleop_bgr)
+        if logitech_bgr is not None:
+            cv2.imshow(config.logitech_window_name, logitech_bgr)
         key = cv2.waitKey(1) & 0xFF
         teacher_active, teacher_status = shared.teacher_mode()
         if key in (ord("q"), 27):

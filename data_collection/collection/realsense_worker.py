@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import time
-
 import numpy as np
 
 from .config import CollectionConfig
-from .episode import EpisodeBuffer, RecordingManager
+from .episode import RecordingManager
 from .shared_state import SharedState
 from .utils import import_cv2
 
@@ -78,15 +76,15 @@ def choose_color_profile(rs, device, config: CollectionConfig) -> dict[str, int]
     profiles = color_profiles(rs, device)
     for profile in profiles:
         if (
-            profile["width"] == config.camera_width
-            and profile["height"] == config.camera_height
-            and profile["fps"] == config.camera_fps
+            profile["width"] == config.realsense_width
+            and profile["height"] == config.realsense_height
+            and profile["fps"] == config.realsense_fps
         ):
             return profile
     supported = ", ".join(f"{p['width']}x{p['height']}@{p['fps']}" for p in profiles)
     raise RuntimeError(
-        f"No RealSense RGB8 profile for {config.camera_width}x{config.camera_height}@"
-        f"{config.camera_fps}. Supported: {supported or '(none)'}"
+        f"No RealSense RGB8 profile for {config.realsense_width}x{config.realsense_height}@"
+        f"{config.realsense_fps}. Supported: {supported or '(none)'}"
     )
 
 
@@ -117,18 +115,19 @@ def run_realsense_worker(
     recorder: RecordingManager,
     *,
     init_done,
-    record: bool = True,
 ) -> None:
+    """Supplies RealSense color/depth to teleop wrist-pose estimation.
+
+    Never recorded to video — RealSense isn't a task-camera source anymore,
+    so `recorder` is accepted only to match the generic worker signature.
+    """
     cv2 = import_cv2()
     rs = import_realsense()
     pipeline = rs.pipeline()
     align = rs.align(rs.stream.color)
-    writer = None
-    writer_session: EpisodeBuffer | None = None
-    frame_idx = 0
     timeout_count = 0
 
-    device = find_realsense_device(rs, config.camera_serial)
+    device = find_realsense_device(rs, config.realsense_serial)
     selected = choose_color_profile(rs, device, config)
     info = device_info(rs, device)
     if info["usb"].startswith("2"):
@@ -153,15 +152,15 @@ def run_realsense_worker(
 
     pipeline.start(rs_config)
     print(
-        "RealSense stream: "
+        "RealSense stream (teleop depth only): "
         f"{selected['width']}x{selected['height']} rgb8 @{selected['fps']}fps "
         f"serial={info['serial']}"
     )
-    warmup_timeout_ms = max(config.camera_timeout_ms, 3000)
+    warmup_timeout_ms = max(config.realsense_timeout_ms, 3000)
     warmup_received = 0
     warmup_attempts = 0
-    warmup_max_attempts = config.camera_warmup_frames * 6
-    while warmup_received < config.camera_warmup_frames and warmup_attempts < warmup_max_attempts:
+    warmup_max_attempts = config.realsense_warmup_frames * 6
+    while warmup_received < config.realsense_warmup_frames and warmup_attempts < warmup_max_attempts:
         warmup_attempts += 1
         try:
             pipeline.wait_for_frames(warmup_timeout_ms)
@@ -172,40 +171,16 @@ def run_realsense_worker(
     if warmup_received == 0:
         raise RuntimeError("RealSense produced no frames during warmup")
 
-    if not record:
-        print(f"RealSense stream: teleop-only (no recording), serial={info['serial']}")
-
     init_done.set()
-    fourcc = cv2.VideoWriter_fourcc(*config.video_codec) if record else None
     try:
         while not shared.shutdown.is_set():
-            if record:
-                session = recorder.current()
-                if session is not writer_session:
-                    if writer is not None:
-                        writer.release()
-                        if writer_session is not None:
-                            writer_session.video_done.set()
-                    writer = None
-                    writer_session = session
-                    frame_idx = 0
-                    if session is not None:
-                        writer = cv2.VideoWriter(
-                            str(session.paths.camera_path),
-                            fourcc,
-                            float(config.camera_fps),
-                            (config.camera_width, config.camera_height),
-                        )
-                        if not writer.isOpened():
-                            raise RuntimeError(f"Could not open {session.paths.camera_path}")
-
             try:
-                frames = pipeline.wait_for_frames(config.camera_timeout_ms)
+                frames = pipeline.wait_for_frames(config.realsense_timeout_ms)
             except RuntimeError as exc:
                 if "Frame didn't arrive" not in str(exc):
                     raise
                 timeout_count += 1
-                if config.camera_max_timeouts and timeout_count >= config.camera_max_timeouts:
+                if config.realsense_max_timeouts and timeout_count >= config.realsense_max_timeouts:
                     raise RuntimeError(
                         f"No RealSense frames after {timeout_count} timeouts"
                     ) from exc
@@ -217,10 +192,8 @@ def run_realsense_worker(
             if not color_frame or not depth_frame:
                 continue
             timeout_count = 0
-            sample_ns = time.monotonic_ns()
-            wall_time_s = time.time()
             rgb = np.asanyarray(color_frame.get_data())
-            rgb = flip_frame(cv2, rgb, config.camera_flip)
+            rgb = flip_frame(cv2, rgb, config.realsense_flip)
             bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             shared.set_realsense_frame(bgr)
             try:
@@ -238,25 +211,7 @@ def run_realsense_worker(
 
             depth_raw = np.asanyarray(depth_frame.get_data())
             depth_m = depth_raw.astype(np.float32) * float(depth_frame.get_units())
-            depth_m = flip_frame(cv2, depth_m, config.camera_flip)
+            depth_m = flip_frame(cv2, depth_m, config.realsense_flip)
             shared.set_realsense_depth(depth_m, intrinsics)
-
-            if record and writer is not None and writer_session is not None:
-                writer.write(bgr)
-                writer_session.append_camera(
-                    {
-                        "frame_idx": frame_idx,
-                        "monotonic_ns": sample_ns,
-                        "wall_time_s": f"{wall_time_s:.6f}",
-                        "elapsed_s": f"{writer_session.elapsed_s(sample_ns):.9f}",
-                        "realsense_timestamp_ms": f"{float(color_frame.get_timestamp()):.6f}",
-                        "realsense_frame_number": int(color_frame.get_frame_number()),
-                    }
-                )
-                frame_idx += 1
     finally:
-        if record and writer is not None:
-            writer.release()
-            if writer_session is not None:
-                writer_session.video_done.set()
         pipeline.stop()
