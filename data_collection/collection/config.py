@@ -150,14 +150,37 @@ CUROBO_XRDF_PATH = Path(__file__).resolve().parents[2] / "assets" / "models" / "
 CUROBO_INPUT_HZ = 25.0        # EEF pose update rate fed to MotionGen
 CUROBO_OUTPUT_HZ = 120.0      # Joint trajectory / MIT command rate
 CUROBO_MIT_KP = 15.0          # Position gain, J1-J3 (N·m/rad)
-# J4-J6 (wrist) have much lower inertia than J1-J3 and were always tuned
-# with a separate, higher gain in the manual test harness (test_curobo_reach.py
-# / test_mit_controller2.py's --kp-wrist, typically 4x --kp) -- this constant
-# was previously missing here entirely, so piper_worker.py sent the same
-# soft J1-J3 gain to the wrist too, which read as the wrist lagging/not
-# tightly tracking the teleop target.
-CUROBO_MIT_KP_WRIST = 30.0    # Position gain, J4-J6 (N·m/rad)
-CUROBO_MIT_KD = 0.5           # Velocity gain (N·m·s/rad)
+# J4-J6 (wrist) have much lower inertia than J1-J3, and a *higher* kp there
+# (previously 30, 2x body) turned out to make things worse, not better:
+# JointJitterDiag (piper_worker.py) showed J4-J6 measured-velocity
+# peak-to-peak consistently 2-4x higher than J1-J3 throughout an entire
+# run, not just transiently. Low-inertia joints have a higher natural
+# frequency for a given kp, so stacking extra stiffness on top of already-low
+# inertia pushed the wrist into more oscillation, not less. Landed on a
+# *lower* wrist kp than body kp instead.
+
+# Dropping wrist kp to 15 (equal to body) and kd to 1.0 barely moved the
+# needle: JointJitterDiag still showed J4-J6 measured-velocity peak-to-peak
+# running ~2-3x J1-J3 throughout an entire run, essentially unchanged from
+# the kp_wrist=30/kd_wrist=1.5 case. Since matching body's gain didn't fix
+# it, the wrist's low inertia itself (not "gain higher than body") is the
+# main driver -- go lower than body instead of equal to it.
+CUROBO_MIT_KP_WRIST = 10.0    # Position gain, J4-J6 (N·m/rad)
+# kd=0.5 was tuned against the original kp=5 (ratio 10:1). Raising kp to
+# 15/(was 30) without raising kd drops the damping ratio well below that
+# baseline, which read as judder during motion. But scaling kd all the way
+# up to 1.5/3.0 (matching the kp ratio exactly) instead produced audible
+# mid/high-frequency buzzing immediately on MIT-mode entry -- kd amplifies
+# velocity-estimate noise directly into torque, so that was noise
+# amplification rather than under-damping.
+CUROBO_MIT_KD = 0.8           # Velocity gain, J1-J3 (N·m·s/rad)
+CUROBO_MIT_KD_WRIST = 0.7     # Velocity gain, J4-J6 (N·m·s/rad)
+# Low-pass filter (EMA) applied to measured joint velocity before it feeds
+# grav_comp's damping/coulomb/viscous friction-compensation terms -- those
+# terms are velocity-dependent, so raw encoder-differentiated velocity noise
+# becomes torque noise directly, on top of whatever the wrist's own gains
+# contribute. 1.0 = no filtering; lower = heavier smoothing (more lag).
+CUROBO_VEL_FILTER_ALPHA = 0.3
 CUROBO_GRAV_COMP_DAMPING = 0.018
 CUROBO_GRAV_COMP_TORQUE_SCALE = 1.2   # Global gravity torque multiplier (calibrated)
 CUROBO_STALE_TIMEOUT_S = 0.5
@@ -255,6 +278,8 @@ class CollectionConfig:
     curobo_mit_kp: float
     curobo_mit_kp_wrist: float
     curobo_mit_kd: float
+    curobo_mit_kd_wrist: float
+    curobo_vel_filter_alpha: float
     curobo_grav_comp_damping: float
     curobo_grav_comp_torque_scale: float
     curobo_stale_timeout_s: float
@@ -341,6 +366,8 @@ def build_config() -> CollectionConfig:
         curobo_mit_kp=CUROBO_MIT_KP,
         curobo_mit_kp_wrist=CUROBO_MIT_KP_WRIST,
         curobo_mit_kd=CUROBO_MIT_KD,
+        curobo_mit_kd_wrist=CUROBO_MIT_KD_WRIST,
+        curobo_vel_filter_alpha=CUROBO_VEL_FILTER_ALPHA,
         curobo_grav_comp_damping=CUROBO_GRAV_COMP_DAMPING,
         curobo_grav_comp_torque_scale=CUROBO_GRAV_COMP_TORQUE_SCALE,
         curobo_stale_timeout_s=CUROBO_STALE_TIMEOUT_S,
@@ -478,5 +505,15 @@ def validate_config(config: CollectionConfig) -> None:
             raise ValueError(f"CUROBO_URDF_PATH not found: {config.curobo_urdf_path}")
         if config.curobo_output_hz <= 0 or config.curobo_input_hz <= 0:
             raise ValueError("CUROBO_INPUT_HZ and CUROBO_OUTPUT_HZ must be > 0")
-        if config.curobo_mit_kp < 0 or config.curobo_mit_kp_wrist < 0 or config.curobo_mit_kd < 0:
-            raise ValueError("CUROBO_MIT_KP, CUROBO_MIT_KP_WRIST, and CUROBO_MIT_KD must be >= 0")
+        if (
+            config.curobo_mit_kp < 0
+            or config.curobo_mit_kp_wrist < 0
+            or config.curobo_mit_kd < 0
+            or config.curobo_mit_kd_wrist < 0
+        ):
+            raise ValueError(
+                "CUROBO_MIT_KP, CUROBO_MIT_KP_WRIST, CUROBO_MIT_KD, and "
+                "CUROBO_MIT_KD_WRIST must be >= 0"
+            )
+        if not (0.0 < config.curobo_vel_filter_alpha <= 1.0):
+            raise ValueError("CUROBO_VEL_FILTER_ALPHA must be in (0, 1]")

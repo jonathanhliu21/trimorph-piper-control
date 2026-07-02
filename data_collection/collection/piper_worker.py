@@ -28,6 +28,67 @@ if TYPE_CHECKING:
     from scripts.piper_api.piper_api import PiperAPI
 
 
+class JointJitterDiag:
+    """Tracks per-joint measured-velocity peak-to-peak over a short rolling
+    window and prints it periodically.
+
+    curobo_worker.py's [diag/J1]-style diagnostic only samples once per
+    cuRobo replan (curobo_input_hz, 25Hz -> Nyquist ~12.5Hz), so it cannot
+    resolve judder/buzz faster than that -- which is exactly the band a PD
+    control loop running at 120Hz (this loop) can actually excite. This
+    samples the real measured velocity at the full MIT rate to surface which
+    joint(s), if any, are oscillating.
+    """
+
+    def __init__(self, window_s: float = 0.25, print_period_s: float = 1.0) -> None:
+        self._window_s = window_s
+        self._print_period_s = print_period_s
+        self._samples: list[tuple[float, list[float]]] = []
+        self._next_print = 0.0
+
+    def update(self, v: "list[float]") -> None:
+        now = time.monotonic()
+        self._samples.append((now, list(v)))
+        cutoff = now - self._window_s
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.pop(0)
+        if now < self._next_print or len(self._samples) < 2:
+            return
+        self._next_print = now + self._print_period_s
+        vs = [s[1] for s in self._samples]
+        peak_to_peak = [max(row[j] for row in vs) - min(row[j] for row in vs) for j in range(6)]
+        print(
+            f"[diag/jitter] measured |v| peak-to-peak over {self._window_s * 1000:.0f}ms "
+            f"({len(vs)} samples): "
+            + "  ".join(f"J{j + 1}={peak_to_peak[j]:.3f}" for j in range(6))
+            + " rad/s"
+        )
+
+
+class VelocityLowPassFilter:
+    """Per-joint EMA filter for measured velocity fed into grav_comp.
+
+    grav_comp's damping/coulomb/viscous friction-compensation terms are
+    velocity-dependent, so raw encoder-differentiated velocity noise turns
+    directly into torque noise on every tick -- on top of whatever the
+    wrist's own kp/kd contribute to judder. Does not touch v_des (the
+    planned feedforward velocity) or the kp/kd sent to the firmware, only
+    the measured v used as grav_comp's damping input.
+    """
+
+    def __init__(self, alpha: float) -> None:
+        self._alpha = alpha
+        self._state: list[float] | None = None
+
+    def update(self, v: "list[float]") -> "list[float]":
+        if self._alpha >= 1.0 or self._state is None:
+            self._state = list(v)
+        else:
+            a = self._alpha
+            self._state = [a * v[j] + (1.0 - a) * self._state[j] for j in range(6)]
+        return self._state
+
+
 def _run_mit_step(
     api: "PiperAPI",
     grav_comp: "MujocoGravityCompensator",
@@ -35,6 +96,8 @@ def _run_mit_step(
     buf: "CuRoboTrajectoryBuffer",
     config: CollectionConfig,
     hold_pos: "list[float] | None",
+    jitter_diag: "JointJitterDiag | None" = None,
+    vel_filter: "VelocityLowPassFilter | None" = None,
 ) -> "list[float] | None":
     """Single 120 Hz MIT impedance step: gravity feedforward + PD tracking.
 
@@ -55,15 +118,18 @@ def _run_mit_step(
 
     motor_state = api.get_motor_state()
     v = motor_state.velocities if motor_state is not None else [0.0] * 6
+    if jitter_diag is not None:
+        jitter_diag.update(v)
 
     # Publish for cuRobo replanning
     shared.set_latest_joint_positions(q)
 
     waypoint = buf.next_waypoint()
 
+    v_filtered = vel_filter.update(v) if vel_filter is not None else v
     grav_result = grav_comp.compute(
         q,
-        joint_velocities=v,
+        joint_velocities=v_filtered,
         damping=config.curobo_grav_comp_damping,
         torque_scale=config.curobo_grav_comp_torque_scale,
     )
@@ -79,11 +145,12 @@ def _run_mit_step(
         p_des = waypoint.positions.tolist()
         v_des = waypoint.velocities.tolist()
 
-    # J4-J6 (wrist) need a separate, higher kp than J1-J3 (body) -- same
+    # J4-J6 (wrist) need separate, higher kp/kd than J1-J3 (body) -- same
     # per-joint split validated in test_curobo_reach.py/test_mit_controller2.py's
     # --kp/--kp-wrist. api.move_mit_torques() only accepts a single scalar
-    # kp broadcast to all 6 joints, so send each joint individually instead.
+    # kp/kd broadcast to all 6 joints, so send each joint individually instead.
     kp_list = [config.curobo_mit_kp] * 3 + [config.curobo_mit_kp_wrist] * 3
+    kd_list = [config.curobo_mit_kd] * 3 + [config.curobo_mit_kd_wrist] * 3
     for j in range(6):
         api.move_mit_torque(
             j + 1,
@@ -91,7 +158,7 @@ def _run_mit_step(
             p_des=p_des[j],
             v_des=v_des[j],
             kp=kp_list[j],
-            kd=config.curobo_mit_kd,
+            kd=kd_list[j],
             clamp=True,
         )
     return hold_pos
@@ -159,6 +226,8 @@ def run_piper_worker(
     sample_session: EpisodeBuffer | None = None
     mit_mode_active = False
     mit_hold_pos: list[float] | None = None
+    jitter_diag = JointJitterDiag()
+    vel_filter = VelocityLowPassFilter(config.curobo_vel_filter_alpha)
     backdrive_active = False
     backdrive_period_ns = int(round(1_000_000_000 / _BACKDRIVE_RATE_HZ))
     next_backdrive_ns = now_ns
@@ -345,7 +414,10 @@ def run_piper_worker(
                             f"buf_stale={trajectory_buffer.is_stale()}  "
                             f"target_eef={[f'{v:+.3f}' for v in (tgt or [])]}"
                         )
-                mit_hold_pos = _run_mit_step(api, grav_comp, shared, trajectory_buffer, config, mit_hold_pos)
+                mit_hold_pos = _run_mit_step(
+                    api, grav_comp, shared, trajectory_buffer, config, mit_hold_pos,
+                    jitter_diag, vel_filter,
+                )
                 if trajectory_buffer.is_stale():
                     if mit_stale_since is None:
                         mit_stale_since = time.monotonic()

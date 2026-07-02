@@ -400,6 +400,20 @@ def run_curobo_worker(
     last_eef: list[float] | None = None
     needs_reseed = False
     _diag_plan_count = 0
+    # Per-joint judder diagnostic: distinguish "robot is physically
+    # oscillating" (measured q jumps tick to tick -- a gain/control issue)
+    # from "the plan itself is unstable" (this call's final commanded angle
+    # differs a lot from the previous call's, even though the robot barely
+    # moved -- an MPC/IK solution-branch-flip issue, not a gain issue).
+    # Uncapped (unlike the first-5 print above) but self-limiting: only
+    # fires past the threshold. Note this only samples once per cuRobo
+    # replan (curobo_input_hz, 25Hz -> Nyquist ~12.5Hz) -- it cannot resolve
+    # oscillation faster than that; see piper_worker.JointJitterDiag (120Hz)
+    # for the higher-frequency band this can alias away.
+    _JOINT_DIAG_THRESHOLD_RAD = 0.01  # ~0.57 deg per curobo_input_hz tick (40ms)
+    _prev_q_measured: list[float] | None = None
+    _prev_q_planned_end: list[float] | None = None
+    _solve_diag_next_print = 0.0
 
     while not shared.shutdown.is_set():
         loop_start = time.monotonic()
@@ -428,22 +442,77 @@ def run_curobo_worker(
             continue
 
         last_eef = target_eef
+        solve_start = time.monotonic()
 
         try:
             planned = plan(q_current, target_eef, reset=needs_reseed)
             needs_reseed = False
             if planned is not None:
                 pos, vel = planned
+                # pos[0] was computed for q_current as sampled at the top of
+                # this iteration, but the GPU solve above takes real wall-clock
+                # time, and push_trajectory() always resets the consumer's
+                # read_idx to 0. Left uncorrected, the 120Hz MIT loop's p_des
+                # snaps back to "the robot's position when the solve started"
+                # every single replan (25Hz) -- a structural discontinuity no
+                # amount of kp/kd tuning removes, since it's not a control-gain
+                # issue. Drop however many waypoints the solve itself consumed
+                # so the buffer picks up close to "now" instead of "then".
+                solve_elapsed_s = time.monotonic() - solve_start
+                skip = int(round(solve_elapsed_s * config.curobo_output_hz))
+                skip = max(0, min(skip, len(pos) - 1))
+                if skip > 0:
+                    pos = pos[skip:]
+                    vel = vel[skip:]
+                _now_solve_diag = time.monotonic()
+                if _now_solve_diag >= _solve_diag_next_print:
+                    _solve_diag_next_print = _now_solve_diag + 1.0  # 1 Hz
+                    print(
+                        f"[diag/solve] solve={solve_elapsed_s * 1000:.1f}ms  "
+                        f"skip={skip}/{skip + len(pos)} waypoints "
+                        f"({skip / config.curobo_output_hz * 1000:.1f}ms dropped)"
+                    )
                 _diag_plan_count += 1
                 if _diag_plan_count <= 5:
                     print(
                         f"[diag/cuRobo #{_diag_plan_count}] Plan OK  "
                         f"tgt_eef={[f'{v:+.3f}' for v in target_eef]}  "
                         f"waypoints={len(pos)}  "
+                        f"solve={solve_elapsed_s * 1000:.1f}ms  skip={skip}  "
                         f"q_start={[f'{v:+.3f}' for v in pos[0].tolist()]}  "
                         f"q_end={[f'{v:+.3f}' for v in pos[-1].tolist()]}"
                     )
                 trajectory_buffer.push_trajectory(pos, vel, dt_s=1.0 / config.curobo_output_hz)
+
+                q_measured = list(q_current)
+                q_planned_end = [float(x) for x in pos[-1].tolist()]
+                measured_delta = (
+                    None if _prev_q_measured is None
+                    else [q_measured[j] - _prev_q_measured[j] for j in range(6)]
+                )
+                planned_delta = (
+                    None if _prev_q_planned_end is None
+                    else [q_planned_end[j] - _prev_q_planned_end[j] for j in range(6)]
+                )
+                flagged = [
+                    j for j in range(6)
+                    if (measured_delta is not None and abs(measured_delta[j]) > _JOINT_DIAG_THRESHOLD_RAD)
+                    or (planned_delta is not None and abs(planned_delta[j]) > _JOINT_DIAG_THRESHOLD_RAD)
+                ]
+                if flagged:
+                    def _fmt(deltas: "list[float] | None", j: int) -> str:
+                        return "n/a" if deltas is None else f"{deltas[j]:+.4f}"
+
+                    print(
+                        "[diag/joint] "
+                        + "  ".join(
+                            f"J{j + 1}(measured_dq={_fmt(measured_delta, j)},"
+                            f"planned_end_dq={_fmt(planned_delta, j)})"
+                            for j in flagged
+                        )
+                    )
+                _prev_q_measured = q_measured
+                _prev_q_planned_end = q_planned_end
             else:
                 print(
                     f"[diag/cuRobo] Plan FAILED  tgt_eef={[f'{v:+.3f}' for v in target_eef]}  "
