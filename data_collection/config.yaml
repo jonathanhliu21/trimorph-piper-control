@@ -4,8 +4,14 @@
 # - RealSense camera optical frame: +x right, +y down, +z forward.
 # - Piper robot frame: whatever base-frame convention Piper move_p() uses.
 # - r_cam2robot maps camera-frame delta vectors into Piper robot-frame delta vectors.
-#   Start with this identity only for dry-run; replace it with manual measured
-#   extrinsics before live robot motion. Hand-eye calibration script is TODO.
+#   Confirmed correct as-is: the --no-curobo path (piper_worker.py) feeds the
+#   exact same DeltaTeleopController/r_cam2robot output straight into
+#   api.move_eef() (firmware position control, no MPC involved), and that
+#   moves in the directions the operator expects. So the judder + downward
+#   drift seen with --curobo is NOT a coordinate-mapping bug here -- it's in
+#   the MIT/MPC control path itself. Do not "fix" this matrix without new
+#   hardware evidence; a previous attempt to re-derive it from an assumed
+#   camera-mounting orientation was wrong (see git history / conversation log).
 
 r_cam2robot: [[0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0]]
 scale_factor: 0.7

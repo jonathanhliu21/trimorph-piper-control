@@ -75,6 +75,12 @@ PIPER_INTERFACE = "socketcan"
 PIPER_CHANNEL = "can0"
 PIPER_FIRMWARE = "v183"  # one of: "default", "v183", "v188"
 PIPER_INSTALLATION_POS: str | None = "right"
+# Distance (m) from the base_link origin down to the real floor/work surface,
+# measured along the physically-vertical axis. For a horizontal (floor)
+# mount this is normally ~0 (base_link sits at table height); for a side
+# mount (right/left) the arm is raised on a bracket, so this must be
+# measured on the actual rig -- do not reuse the floor-mount value.
+PIPER_MOUNT_HEIGHT_M = 0.5
 PIPER_PAYLOAD: str | None = "half"  # one of: "empty", "half", "full", or None to skip
 TEACHER_MODE_POLL_HZ = 20.0
 
@@ -143,10 +149,17 @@ CUROBO_URDF_PATH = Path(__file__).resolve().parents[2] / "assets" / "models" / "
 CUROBO_XRDF_PATH = Path(__file__).resolve().parents[2] / "assets" / "models" / "piper_arm.xrdf"
 CUROBO_INPUT_HZ = 25.0        # EEF pose update rate fed to MotionGen
 CUROBO_OUTPUT_HZ = 120.0      # Joint trajectory / MIT command rate
-CUROBO_MIT_KP = 5.0           # Position gain (N·m/rad)
+CUROBO_MIT_KP = 15.0          # Position gain, J1-J3 (N·m/rad)
+# J4-J6 (wrist) have much lower inertia than J1-J3 and were always tuned
+# with a separate, higher gain in the manual test harness (test_curobo_reach.py
+# / test_mit_controller2.py's --kp-wrist, typically 4x --kp) -- this constant
+# was previously missing here entirely, so piper_worker.py sent the same
+# soft J1-J3 gain to the wrist too, which read as the wrist lagging/not
+# tightly tracking the teleop target.
+CUROBO_MIT_KP_WRIST = 30.0    # Position gain, J4-J6 (N·m/rad)
 CUROBO_MIT_KD = 0.5           # Velocity gain (N·m·s/rad)
 CUROBO_GRAV_COMP_DAMPING = 0.018
-CUROBO_GRAV_COMP_TORQUE_SCALE = 1.05  # Global gravity torque multiplier (calibrated)
+CUROBO_GRAV_COMP_TORQUE_SCALE = 1.2   # Global gravity torque multiplier (calibrated)
 CUROBO_STALE_TIMEOUT_S = 0.5
 CUROBO_WORLD_CUBOIDS: list[dict] = []   # Extra obstacles beyond the default table
 
@@ -216,6 +229,7 @@ class CollectionConfig:
     piper_channel: str
     piper_firmware: str
     piper_installation_pos: str | None
+    piper_mount_height_m: float
     piper_payload: str | None
     teacher_mode_poll_hz: float
     delta_teleop_config_path: str
@@ -239,6 +253,7 @@ class CollectionConfig:
     curobo_input_hz: float
     curobo_output_hz: float
     curobo_mit_kp: float
+    curobo_mit_kp_wrist: float
     curobo_mit_kd: float
     curobo_grav_comp_damping: float
     curobo_grav_comp_torque_scale: float
@@ -300,6 +315,7 @@ def build_config() -> CollectionConfig:
         piper_channel=PIPER_CHANNEL,
         piper_firmware=PIPER_FIRMWARE,
         piper_installation_pos=PIPER_INSTALLATION_POS,
+        piper_mount_height_m=PIPER_MOUNT_HEIGHT_M,
         piper_payload=PIPER_PAYLOAD,
         teacher_mode_poll_hz=TEACHER_MODE_POLL_HZ,
         delta_teleop_config_path=str(Path(DELTA_TELEOP_CONFIG_PATH).expanduser()),
@@ -323,6 +339,7 @@ def build_config() -> CollectionConfig:
         curobo_input_hz=CUROBO_INPUT_HZ,
         curobo_output_hz=CUROBO_OUTPUT_HZ,
         curobo_mit_kp=CUROBO_MIT_KP,
+        curobo_mit_kp_wrist=CUROBO_MIT_KP_WRIST,
         curobo_mit_kd=CUROBO_MIT_KD,
         curobo_grav_comp_damping=CUROBO_GRAV_COMP_DAMPING,
         curobo_grav_comp_torque_scale=CUROBO_GRAV_COMP_TORQUE_SCALE,
@@ -461,5 +478,5 @@ def validate_config(config: CollectionConfig) -> None:
             raise ValueError(f"CUROBO_URDF_PATH not found: {config.curobo_urdf_path}")
         if config.curobo_output_hz <= 0 or config.curobo_input_hz <= 0:
             raise ValueError("CUROBO_INPUT_HZ and CUROBO_OUTPUT_HZ must be > 0")
-        if config.curobo_mit_kp < 0 or config.curobo_mit_kd < 0:
-            raise ValueError("CUROBO_MIT_KP and CUROBO_MIT_KD must be >= 0")
+        if config.curobo_mit_kp < 0 or config.curobo_mit_kp_wrist < 0 or config.curobo_mit_kd < 0:
+            raise ValueError("CUROBO_MIT_KP, CUROBO_MIT_KP_WRIST, and CUROBO_MIT_KD must be >= 0")

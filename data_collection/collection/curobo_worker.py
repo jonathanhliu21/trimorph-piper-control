@@ -48,11 +48,51 @@ def _euler_xyz_to_quat_wxyz(roll: float, pitch: float, yaw: float) -> list[float
 
 
 def _world_cuboids(config: CollectionConfig) -> list[dict]:
-    table_cuboid = {
-        "name": "table",
-        "dims": [2.0, 2.0, 0.05],
-        "pose": [0.0, 0.0, -0.025, 1.0, 0.0, 0.0, 0.0],
-    }
+    # The 2x2m "table" plate approximates the real floor/work surface as a
+    # thin slab perpendicular to whichever base axis is physically vertical,
+    # positioned config.piper_mount_height_m below the base_link origin
+    # along that axis (measured on the actual rig -- see PIPER_MOUNT_HEIGHT_M
+    # in config.py). For a horizontal (floor) mount base_link sits at table
+    # height, so that axis is base +Z and the offset is ~0. For a side mount
+    # (right/left) the arm is raised on a bracket, so the vertical axis is
+    # base +Y instead (test_mit_controller2.py's _room_delta_to_base()
+    # empirically verified this for "right" by moving each base axis in
+    # isolation on hardware) and the offset is the real, measured mount
+    # height -- reusing the floor-mount's near-zero offset here previously
+    # placed a 2m collision wall a few cm from the robot's own body and
+    # caused a violent collision-avoidance lurch into the floor the instant
+    # MIT mode engaged. Do not shrink this offset without re-measuring the
+    # rig; a too-small value recreates that hazard.
+    key = (config.piper_installation_pos or "horizontal").strip().lower()
+    height = max(0.0, float(config.piper_mount_height_m))
+    if key == "right":
+        table_cuboid = {
+            "name": "table",
+            "dims": [2.0, 0.05, 2.0],
+            "pose": [0.0, -(height + 0.025), 0.0, 1.0, 0.0, 0.0, 0.0],
+        }
+    elif key == "left":
+        # _room_delta_to_base() marks "left" as hardware-unverified (best
+        # effort: base -Y vertical, mirrored sign from "right"). Flag it
+        # loudly rather than silently trusting an unverified guess.
+        print(
+            "[curobo_worker] WARNING: 'left' installation's vertical-axis "
+            "mapping has not been hardware-verified (see "
+            "test_mit_controller2.py _room_delta_to_base) -- the table "
+            "collision cuboid pose below is a best-effort guess, not a "
+            "measured value."
+        )
+        table_cuboid = {
+            "name": "table",
+            "dims": [2.0, 0.05, 2.0],
+            "pose": [0.0, height + 0.025, 0.0, 1.0, 0.0, 0.0, 0.0],
+        }
+    else:
+        table_cuboid = {
+            "name": "table",
+            "dims": [2.0, 2.0, 0.05],
+            "pose": [0.0, 0.0, -(height + 0.025), 1.0, 0.0, 0.0, 0.0],
+        }
     return [table_cuboid] + list(config.curobo_world_cuboids)
 
 
@@ -152,6 +192,11 @@ def _create_v1_planner(config: CollectionConfig):
     return plan, False
 
 
+# Minimum EEF position movement (m) before a new teleop target is actually
+# pushed into the MPC's goal (see _create_v2_mpc_planner docstring).
+_GOAL_UPDATE_THRESHOLD_M = 0.005
+
+
 def _create_v2_mpc_planner(config: CollectionConfig):
     """Closed-loop MPC planner using curobo.model_predictive_control.ModelPredictiveControl.
 
@@ -159,8 +204,23 @@ def _create_v2_mpc_planner(config: CollectionConfig):
     re-optimized every tick using the live joint state as feedback -- that
     warm-started, receding-horizon re-solve is what makes it MPC. The goal
     pose itself is only updated when the EEF target actually changes.
+
+    Committing every raw target_eef update (25 Hz teleop tracking) to
+    update_goal_tool_poses() defeats that warm-starting: the built-in IK
+    uses a single seed that's only expected to converge by refining over
+    several *consecutive* ticks against the *same* goal (see the
+    use_best_effort_ik comment below). If the goal itself changes every
+    tick, the seed never gets that many ticks and the arm was observed to
+    stall completely a few cm short of the target (measured joint velocity
+    pinned at exactly 0 while the MPC kept computing a small nonzero
+    v_des -- reproduced and root-caused in test_mit_controller2.py). Fix:
+    only commit a new goal once the raw target has moved more than
+    _GOAL_UPDATE_THRESHOLD_M since the last committed goal.
     """
+    import os
+
     import torch
+    from curobo.content import get_task_configs_path
     from curobo.model_predictive_control import (
         ModelPredictiveControl,
         ModelPredictiveControlCfg,
@@ -168,6 +228,7 @@ def _create_v2_mpc_planner(config: CollectionConfig):
     from curobo.types import DeviceCfg, GoalToolPose, JointState
     from curobo._src.robot.kinematics.kinematics_cfg import KinematicsCfg
     from curobo._src.types.robot import RobotCfg
+    from curobo._src.util.config_io import load_yaml
 
     device_cfg = DeviceCfg()
     kinematics_cfg = KinematicsCfg.from_robot_yaml_file(
@@ -179,10 +240,21 @@ def _create_v2_mpc_planner(config: CollectionConfig):
     robot_cfg = RobotCfg(kinematics=kinematics_cfg, device_cfg=device_cfg)
     all_cuboids = _world_cuboids(config)
 
+    # lbfgs_mpc.yml's default tool_pose_cfg.weight is [position=5000, orientation=200]
+    # -- a 25:1 ratio that lets the real-time optimizer sacrifice orientation
+    # tracking to chase a fast-moving teleop position target, plus the default
+    # orientation_tolerance=0.05rad (~2.9deg) lets the goal-seeding IK accept a
+    # coarse orientation match up front. Observed on hardware: EEF tilts even
+    # at rest right after a goal is set, worsening during motion. Tighten both.
+    mpc_cost_yaml = os.path.join(str(get_task_configs_path()), "mpc", "lbfgs_mpc.yml")
+    mpc_cost_cfg = load_yaml(mpc_cost_yaml)
+    mpc_cost_cfg["rollout"]["cost_cfg"]["tool_pose_cfg"]["weight"][1] = 2000.0
+
     output_hz = config.curobo_output_hz
     interpolation_steps = 4  # fixed by cuRobo; command_dt = optimization_dt / interpolation_steps
     mpc_cfg = ModelPredictiveControlCfg.create(
         robot=robot_cfg,
+        optimizer_configs=[mpc_cost_cfg],
         scene_model=_v2_scene_model(all_cuboids),
         collision_cache={"cuboid": max(1, len(all_cuboids))},
         device_cfg=device_cfg,
@@ -190,23 +262,60 @@ def _create_v2_mpc_planner(config: CollectionConfig):
         use_cuda_graph=True,
         optimization_dt=interpolation_steps / output_hz,
         interpolation_steps=interpolation_steps,
+        orientation_tolerance=0.01,
     )
     mpc = ModelPredictiveControl(mpc_cfg)
     print("[curobo_worker] Using cuRobo v2 ModelPredictiveControl (MPC).")
 
+    # optimize_action_sequence() returns get_command_sequence(), a slice of
+    # the interpolated horizon of length (command_end_idx - command_start_idx).
+    # The library defaults command_end_idx to interpolation_steps * 2, which
+    # (with command_start_idx == interpolation_steps for bspline transition
+    # models) yields exactly `interpolation_steps` waypoints -- here 4
+    # waypoints * 1/output_hz = 33.3ms of trajectory. But this planner is
+    # only re-invoked every 1/curobo_input_hz = 40ms, so the pushed
+    # trajectory is ~7ms short of covering the gap to the next replan on
+    # every single cycle (worse once GPU solve latency is added). Each
+    # shortfall starves CuRoboTrajectoryBuffer, latching hold_pos in
+    # piper_worker._run_mit_step() and causing a stall/resume judder at
+    # curobo_input_hz. Widen the exposed command window so it comfortably
+    # covers one input period with margin.
+    output_dt_s = 1.0 / output_hz
+    input_period_s = 1.0 / config.curobo_input_hz
+    min_waypoints = math.ceil(input_period_s / output_dt_s)
+    command_span = min_waypoints + interpolation_steps  # +1 window of margin
+    tem = mpc.trajectory_execution_manager
+    tem.command_end_idx = tem.command_start_idx + command_span
+    print(
+        f"[curobo_worker] MPC command window widened to {command_span} waypoints "
+        f"({command_span * output_dt_s * 1000:.1f}ms) to cover the "
+        f"{input_period_s * 1000:.1f}ms replan period."
+    )
+
     tool_frame = mpc.tool_frames[0]
     setup_done = False
     last_goal_eef: list[float] | None = None
+    last_velocity: "torch.Tensor | None" = None
+    last_acceleration: "torch.Tensor | None" = None
 
-    def _current_state(q_current: list[float]) -> "JointState":
-        return JointState.from_position(
-            torch.tensor([q_current], dtype=device_cfg.dtype, device=device_cfg.device),
-            joint_names=mpc.joint_names,
-        )
+    def _current_state(q_current: list[float], *, reset_velocity: bool) -> "JointState":
+        nonlocal last_velocity, last_acceleration
+        q_t = torch.tensor([q_current], dtype=device_cfg.dtype, device=device_cfg.device)
+        state = JointState.from_position(q_t, joint_names=mpc.joint_names)
+        # MPC's warm-started B-spline transition model expects continuity
+        # with the velocity/acceleration it commanded last tick. Re-zeroing
+        # both every call (JointState.from_position's default) tells the
+        # optimizer "you're at rest" even mid-trajectory, which stalls
+        # convergence almost completely (verified: with this fix a nearby
+        # goal converges in ~2s; without it, error stays put indefinitely).
+        if not reset_velocity and last_velocity is not None:
+            state.velocity = last_velocity
+            state.acceleration = last_acceleration
+        return state
 
     def plan(q_current: list[float], target_eef: list[float], reset: bool = False):
-        nonlocal setup_done, last_goal_eef
-        current_state = _current_state(q_current)
+        nonlocal setup_done, last_goal_eef, last_velocity, last_acceleration
+        current_state = _current_state(q_current, reset_velocity=(not setup_done) or reset)
 
         if not setup_done:
             print("[curobo_worker] Warming up MPC (initial setup + cold-start solve)...")
@@ -217,7 +326,10 @@ def _create_v2_mpc_planner(config: CollectionConfig):
         elif reset:
             mpc.reset_robot(current_state)
 
-        if target_eef != last_goal_eef:
+        needs_goal_update = last_goal_eef is None or math.sqrt(
+            sum((target_eef[i] - last_goal_eef[i]) ** 2 for i in range(3))
+        ) >= _GOAL_UPDATE_THRESHOLD_M
+        if needs_goal_update:
             x, y, z, roll, pitch, yaw = target_eef
             w_q, x_q, y_q, z_q = _euler_xyz_to_quat_wxyz(roll, pitch, yaw)
             goal = GoalToolPose(
@@ -243,7 +355,11 @@ def _create_v2_mpc_planner(config: CollectionConfig):
 
         result = mpc.optimize_action_sequence(current_state)
         if result.action_sequence is None:
+            last_velocity = None
+            last_acceleration = None
             return None
+        last_velocity = result.action_sequence.velocity[:, -1, :].detach()
+        last_acceleration = result.action_sequence.acceleration[:, -1, :].detach()
         return _joint_state_to_arrays(result.action_sequence)
 
     return plan, True

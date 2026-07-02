@@ -48,8 +48,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--gravity", type=float, nargs=3, metavar=("GX", "GY", "GZ"),
-        default=[0.240, -9.800, -0.375],
-        help="MuJoCo 중력 벡터 (m/s²). Default: calibrated right-mount.",
+        default=[0.0, -9.81, 0.0],
+        help="MuJoCo 중력 벡터 (m/s²). Default: right-mount (pure -Y).",
     )
     parser.add_argument("--torque-scale", type=float, default=1.2)
     parser.add_argument("--duration", type=float, default=None)

@@ -79,14 +79,21 @@ def _run_mit_step(
         p_des = waypoint.positions.tolist()
         v_des = waypoint.velocities.tolist()
 
-    api.move_mit_torques(
-        grav_torques,
-        p_des=p_des,
-        v_des=v_des,
-        kp=config.curobo_mit_kp,
-        kd=config.curobo_mit_kd,
-        clamp=True,
-    )
+    # J4-J6 (wrist) need a separate, higher kp than J1-J3 (body) -- same
+    # per-joint split validated in test_curobo_reach.py/test_mit_controller2.py's
+    # --kp/--kp-wrist. api.move_mit_torques() only accepts a single scalar
+    # kp broadcast to all 6 joints, so send each joint individually instead.
+    kp_list = [config.curobo_mit_kp] * 3 + [config.curobo_mit_kp_wrist] * 3
+    for j in range(6):
+        api.move_mit_torque(
+            j + 1,
+            grav_torques[j],
+            p_des=p_des[j],
+            v_des=v_des[j],
+            kp=kp_list[j],
+            kd=config.curobo_mit_kd,
+            clamp=True,
+        )
     return hold_pos
 
 
