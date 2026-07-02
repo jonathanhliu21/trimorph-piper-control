@@ -365,7 +365,72 @@ def _create_v2_mpc_planner(config: CollectionConfig):
     return plan, True
 
 
+def _create_remote_planner(config: CollectionConfig):
+    """Offload the MPC solve to a second machine's GPU over TCP.
+
+    Local solves on this box's GPU were measured at 70-150ms/call while
+    nvidia-smi showed the GPU itself mostly idle (1-40% util) -- suspected
+    GIL contention from the other CPU-bound worker threads sharing this
+    process (see CUROBO_REMOTE_ENABLED in config.py). The remote box runs
+    scripts/curobo_solver_server.py, which calls the *same*
+    _create_curobo_planner() locally and serves plan() over a plain framed
+    TCP socket (scripts/piper_api/curobo_remote_protocol.py). Matches the
+    plan(q_current, target_eef, reset) -> (pos, vel) | None contract exactly,
+    so run_curobo_worker()'s loop needs no changes for this backend.
+    """
+    from scripts.piper_api import curobo_remote_protocol as protocol
+
+    host = config.curobo_remote_host
+    port = config.curobo_remote_port
+    timeout_s = config.curobo_remote_timeout_s
+    sock: "object | None" = None
+
+    def _connect():
+        import socket as socket_module
+
+        s = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_STREAM)
+        protocol.set_low_latency(s)
+        s.settimeout(timeout_s)
+        print(f"[curobo_worker] Connecting to remote solver {host}:{port} ...")
+        s.connect((host, port))
+        print("[curobo_worker] Connected to remote solver.")
+        return s
+
+    sock = _connect()
+
+    def plan(q_current: list[float], target_eef: list[float], reset: bool = False):
+        nonlocal sock
+        _rtt_start = time.monotonic()
+        try:
+            protocol.send_plan_request(sock, q_current, target_eef, reset)
+            result = protocol.recv_plan_response(sock)
+        except Exception as exc:
+            rtt_ms = (time.monotonic() - _rtt_start) * 1000
+            print(
+                f"[curobo_worker] remote solver connection error after {rtt_ms:.1f}ms: "
+                f"{exc} -- reconnecting"
+            )
+            try:
+                sock.close()
+            except Exception:
+                pass
+            try:
+                sock = _connect()
+            except Exception as reconnect_exc:
+                print(f"[curobo_worker] remote solver reconnect failed: {reconnect_exc}")
+            return None
+        rtt_ms = (time.monotonic() - _rtt_start) * 1000
+        print(f"[diag/remote_rtt] {rtt_ms:.1f}ms  ok={result is not None}")
+        if result is None:
+            return None
+        return result
+
+    return plan, True
+
+
 def _create_curobo_planner(config: CollectionConfig):
+    if config.curobo_remote_enabled:
+        return _create_remote_planner(config)
     if _module_available("curobo.geom.sdf.world"):
         return _create_v1_planner(config)
     if _module_available("curobo.model_predictive_control"):
@@ -452,15 +517,19 @@ def run_curobo_worker(
                 # pos[0] was computed for q_current as sampled at the top of
                 # this iteration, but the GPU solve above takes real wall-clock
                 # time, and push_trajectory() always resets the consumer's
-                # read_idx to 0. Left uncorrected, the 120Hz MIT loop's p_des
-                # snaps back to "the robot's position when the solve started"
-                # every single replan (25Hz) -- a structural discontinuity no
-                # amount of kp/kd tuning removes, since it's not a control-gain
-                # issue. Drop however many waypoints the solve itself consumed
-                # so the buffer picks up close to "now" instead of "then".
+                # read_idx to 0. In principle this correction drops however
+                # many waypoints the solve itself consumed so the buffer picks
+                # up close to "now" instead of "then" -- but on this hardware
+                # measured solves regularly run 70-150ms (vs. the 40ms input
+                # period the buffer coverage was sized for), so the naive
+                # correction was skipping 8 of 9 waypoints almost every cycle,
+                # leaving just 1 (8.3ms) to cover a 70-150ms gap -- far worse
+                # starvation than not correcting at all. Cap the skip at half
+                # the buffer so a slow solve degrades to "a bit stale" instead
+                # of "buffer nearly empty".
                 solve_elapsed_s = time.monotonic() - solve_start
                 skip = int(round(solve_elapsed_s * config.curobo_output_hz))
-                skip = max(0, min(skip, len(pos) - 1))
+                skip = max(0, min(skip, len(pos) // 2))
                 if skip > 0:
                     pos = pos[skip:]
                     vel = vel[skip:]

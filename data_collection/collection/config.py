@@ -186,6 +186,18 @@ CUROBO_GRAV_COMP_TORQUE_SCALE = 1.2   # Global gravity torque multiplier (calibr
 CUROBO_STALE_TIMEOUT_S = 0.5
 CUROBO_WORLD_CUBOIDS: list[dict] = []   # Extra obstacles beyond the default table
 
+# Remote cuRobo MPC solve: offload the MPC solve to a second machine's GPU
+# (see scripts/curobo_solver_server.py) over a plain TCP socket, instead of
+# solving locally. Local solves on this box's RTX 3050 Ti were measured at
+# 70-150ms/call (vs. GPU utilization mostly 1-40% -- not GPU-saturation-bound),
+# suspected GIL contention from the other CPU-bound worker threads (esp.
+# MediaPipe hand tracking) sharing this process. Off by default; the local
+# backend (_create_v1_planner/_create_v2_mpc_planner) remains the fallback.
+CUROBO_REMOTE_ENABLED = True
+CUROBO_REMOTE_HOST = "192.168.10.1"  # LAN IP of the solver box, e.g. "192.168.1.50"
+CUROBO_REMOTE_PORT = 5556
+CUROBO_REMOTE_TIMEOUT_S = 2.0        # TEMP: widened from 0.15 to diagnose remote solve latency
+
 CANONICAL_MIDAS_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 TACTILE_FINGER_ORDER = ("thumb", "index", "middle", "ring")
@@ -284,6 +296,10 @@ class CollectionConfig:
     curobo_grav_comp_torque_scale: float
     curobo_stale_timeout_s: float
     curobo_world_cuboids: list
+    curobo_remote_enabled: bool
+    curobo_remote_host: str
+    curobo_remote_port: int
+    curobo_remote_timeout_s: float
 
 
 def build_config() -> CollectionConfig:
@@ -372,6 +388,10 @@ def build_config() -> CollectionConfig:
         curobo_grav_comp_torque_scale=CUROBO_GRAV_COMP_TORQUE_SCALE,
         curobo_stale_timeout_s=CUROBO_STALE_TIMEOUT_S,
         curobo_world_cuboids=list(CUROBO_WORLD_CUBOIDS),
+        curobo_remote_enabled=CUROBO_REMOTE_ENABLED,
+        curobo_remote_host=CUROBO_REMOTE_HOST,
+        curobo_remote_port=CUROBO_REMOTE_PORT,
+        curobo_remote_timeout_s=CUROBO_REMOTE_TIMEOUT_S,
     )
 
 
@@ -517,3 +537,10 @@ def validate_config(config: CollectionConfig) -> None:
             )
         if not (0.0 < config.curobo_vel_filter_alpha <= 1.0):
             raise ValueError("CUROBO_VEL_FILTER_ALPHA must be in (0, 1]")
+        if config.curobo_remote_enabled:
+            if not config.curobo_remote_host:
+                raise ValueError("CUROBO_REMOTE_HOST must be set when CUROBO_REMOTE_ENABLED")
+            if config.curobo_remote_port <= 0:
+                raise ValueError("CUROBO_REMOTE_PORT must be > 0")
+            if config.curobo_remote_timeout_s <= 0:
+                raise ValueError("CUROBO_REMOTE_TIMEOUT_S must be > 0")
