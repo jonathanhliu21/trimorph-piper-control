@@ -55,7 +55,8 @@ def run_teleop_worker(
         if not cap.isOpened():
             raise OSError(f"Could not open teleop camera/video: {config.teleop_camera}")
 
-    # Logitech cap for runtime z-key switching (realsense mode only)
+    # Logitech cap: the default hand-tracking source when teleop_source="realsense"
+    # (RealSense still supplies depth/intrinsics for wrist-pose estimation).
     logitech_cap = None
     if config.teleop_source == "realsense":
         logitech_device = (
@@ -66,10 +67,10 @@ def run_teleop_worker(
         _lc = cv2.VideoCapture(logitech_device)
         if _lc.isOpened():
             logitech_cap = _lc
-            print(f"Logitech finger camera opened: {config.teleop_camera} (press z to switch)")
+            print(f"Logitech finger camera opened: {config.teleop_camera}")
         else:
             _lc.release()
-            print(f"Warning: Could not open Logitech camera at {config.teleop_camera}; z-key switching unavailable.")
+            print(f"Warning: Could not open Logitech camera at {config.teleop_camera}; hand tracking will fall back to RealSense.")
 
     detector = MediaPipeHandDetector(
         hand_type=config.teleop_hand_type,

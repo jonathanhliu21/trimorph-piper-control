@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
+
 
 DEFAULT_JOINT_NAMES = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 DEFAULT_JOINT_TORQUE_SCALES = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
@@ -25,6 +27,7 @@ class GravityTorqueResult:
     gravity_torques: list[float]
     damping_torques: list[float]
     friction_comp_torques: list[float]
+    inertia_torques: list[float]
     output_scales: list[float]
     joint_torque_scales: list[float]
     command_torques: list[float]
@@ -188,6 +191,7 @@ class MujocoGravityCompensator:
 
         self.model = mujoco.MjModel.from_xml_path(str(self.model_path))
         self.data = mujoco.MjData(self.model)
+        self._full_mass_matrix = np.zeros((self.model.nv, self.model.nv))
         if gravity is not None:
             self.set_gravity(gravity)
         elif installation_pos is not None:
@@ -240,11 +244,20 @@ class MujocoGravityCompensator:
             self._qpos_indices.append(qpos_index)
             self._qvel_indices.append(qvel_index)
 
+        if self._qvel_indices != list(range(6)):
+            raise ValueError(
+                f"Expected joint1..joint6 DOF indices to be contiguous [0..5], got "
+                f"{self._qvel_indices}; mass-matrix submatrix extraction assumes this. "
+                f"Model {self.model_path} may have been restructured."
+            )
+
     def compute(
         self,
         joint_positions: Sequence[float],
         *,
         joint_velocities: Sequence[float] | None = None,
+        joint_accelerations: Sequence[float] | None = None,
+        inertia_scale: float = 0.0,
         damping: float = 0.0,
         torque_scale: float = 1.0,
         joint_torque_scales: Sequence[float] | None = None,
@@ -291,10 +304,28 @@ class MujocoGravityCompensator:
             (fc * _deadband_sign(velocity, comp_velocity_deadband)) + (fv * velocity)
             for fc, fv, velocity in zip(coulomb, viscous, velocities)
         ]
+
+        if inertia_scale != 0.0 and joint_accelerations is not None:
+            accelerations = _as_float_list(
+                joint_accelerations, name="joint_accelerations", length=6
+            )
+            # mj_forward above already populated data.qM via its mj_crb pass, so
+            # this is just a sparse->dense unpack, not an extra dynamics solve.
+            self.mujoco.mj_fullM(self.model, self._full_mass_matrix, self.data.qM)
+            # _validate_joint_map asserts _qvel_indices == [0..5], so this is
+            # exactly the arm's 6x6 block of the full nv x nv mass matrix.
+            mass_matrix_arm = self._full_mass_matrix[:6, :6]
+            inertia_torques = [
+                float(inertia_scale) * float(row @ np.array(accelerations))
+                for row in mass_matrix_arm
+            ]
+        else:
+            inertia_torques = [0.0] * 6
+
         combined = [
-            gravity + damping_torque + friction_torque
-            for gravity, damping_torque, friction_torque in zip(
-                gravity_torques, damping_torques, friction_comp_torques
+            gravity + damping_torque + friction_torque + inertia_torque
+            for gravity, damping_torque, friction_torque, inertia_torque in zip(
+                gravity_torques, damping_torques, friction_comp_torques, inertia_torques
             )
         ]
         command_torques = [
@@ -308,6 +339,7 @@ class MujocoGravityCompensator:
             gravity_torques=gravity_torques,
             damping_torques=damping_torques,
             friction_comp_torques=friction_comp_torques,
+            inertia_torques=inertia_torques,
             output_scales=list(self.output_scales),
             joint_torque_scales=per_joint_scales,
             command_torques=command_torques,

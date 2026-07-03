@@ -25,7 +25,7 @@ class SharedState:
         self._curobo_enabled: bool = False
         self._backdrive_mode: bool = False
         self._home_requested: bool = False
-        self._logitech_finger_mode: bool = False
+        self._logitech_finger_mode: bool = True
         self._logitech_display_bgr: np.ndarray | None = None
         self.calibrate_neutral = threading.Event()
         self.shutdown = threading.Event()

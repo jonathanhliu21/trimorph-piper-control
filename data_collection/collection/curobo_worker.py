@@ -433,9 +433,10 @@ def _create_remote_planner(config: CollectionConfig):
         return s
 
     sock = _connect()
+    _rtt_diag_next_print = 0.0
 
     def plan(q_current: list[float], target_eef: list[float], reset: bool = False):
-        nonlocal sock
+        nonlocal sock, _rtt_diag_next_print
         _rtt_start = time.monotonic()
         try:
             protocol.send_plan_request(sock, q_current, target_eef, reset)
@@ -456,7 +457,10 @@ def _create_remote_planner(config: CollectionConfig):
                 print(f"[curobo_worker] remote solver reconnect failed: {reconnect_exc}")
             return None
         rtt_ms = (time.monotonic() - _rtt_start) * 1000
-        print(f"[diag/remote_rtt] {rtt_ms:.1f}ms  ok={result is not None}")
+        _now_rtt_diag = time.monotonic()
+        if result is None or _now_rtt_diag >= _rtt_diag_next_print:
+            _rtt_diag_next_print = _now_rtt_diag + 0.2  # 5 Hz (always print failures)
+            print(f"[diag/remote_rtt] {rtt_ms:.1f}ms  ok={result is not None}")
         if result is None:
             return None
         return result

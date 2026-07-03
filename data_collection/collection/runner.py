@@ -279,8 +279,7 @@ def main_loop(
             backdrive_enabled = shared.toggle_backdrive_mode()
             if backdrive_enabled and not shared.teleop_enabled():
                 shared.set_teleop_enabled(True)
-            logitech_enabled = shared.toggle_logitech_finger_mode()
-            print(f"Arm MIT backdrive: {backdrive_enabled}, Logitech finger cam: {logitech_enabled}")
+            print(f"Arm MIT backdrive: {backdrive_enabled}")
         if key == ord("r"):
             if shared.teleop_enabled() and not shared.backdrive_mode():
                 enabled = shared.toggle_home_requested()

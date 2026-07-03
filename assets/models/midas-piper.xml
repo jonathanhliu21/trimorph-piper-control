@@ -97,7 +97,8 @@
                   <inertial pos="0 0 0" mass="0.15" diaginertia="0.0001 0.0001 0.0001"/>
                   <joint name="joint6" pos="0 0 0" axis="0 0 1" range="-1.75 1.75" actuatorfrcrange="-100 100"/>
 
-                  <body name="gripper_link" pos="0 0 0" quat="1 0 0 0">
+                  <!-- Midas hand mount is rotated +90deg about joint6's Z axis relative to the arm flange. -->
+                  <body name="gripper_link" pos="0 0 0" quat="0.7071068 0 0 0.7071068">
                     
                     <body name="palm_base" pos="0 0 0" quat="1 0 0 0">
                       <inertial pos="-0.00237079 0.045 0.00566891" mass="0.506" fullinertia="0.00040 0.00042 0.00055 2.35003e-06 1.91386e-06 1.1821e-06" />

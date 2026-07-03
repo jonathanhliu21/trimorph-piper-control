@@ -18,7 +18,7 @@ SHOW_TASK_VIEW = True
 SHOW_TELEOP_VIEW = True
 TASK_VIEW_WINDOW_NAME = "task_view"  # shows the task camera frame (RealSense frame as fallback)
 TELEOP_WINDOW_NAME = "midas_hand_teleop"
-LOGITECH_WINDOW_NAME = "logitech_finger_cam"  # z-key close-up view of the Logitech teleop camera
+LOGITECH_WINDOW_NAME = "logitech_finger_cam"  # close-up view of the Logitech teleop camera (default hand-tracking source)
 
 # Task camera (OAK-1, via depthai) — the sole source of camera.mp4.
 TASK_CAMERA_WIDTH = 1280
@@ -120,10 +120,12 @@ FOOT_PEDAL_DEBOUNCE_SECONDS = 0.5
 #               a DroidCam via v4l2loopback; see git
 #               history if that ever needs to come back.)
 #   teleop      Logitech UVC webcam (TELEOP_CAMERA).        teleop_camera.mp4
-#               MediaPipe hand-tracking input; primary        (only if
-#               source when TELEOP_SOURCE="opencv", or a      RECORD_TELEOP_
-#               toggleable close-up "finger cam" (press z)     CAMERA=True)
-#               when TELEOP_SOURCE="realsense".
+#               MediaPipe hand-tracking input; the default    (only if
+#               source whether TELEOP_SOURCE is "opencv" or   RECORD_TELEOP_
+#               "realsense" — RealSense only supplies depth/  CAMERA=True)
+#               wrist-pose when TELEOP_SOURCE="realsense".
+#               Press z to toggle Piper MIT backdrive mode
+#               (unrelated to camera source).
 #   aux         Unused by default. A genuinely separate      wrist_camera.mp4
 #               camera device, distinct from the task and      (legacy file
 #               teleop cameras above — NOT "the camera on       name, kept for
