@@ -286,6 +286,16 @@ def run_piper_worker(
                 should_run_arm_teleop = (not teacher_active) and shared.teleop_enabled() and not backdrive_active
                 if should_run_arm_teleop and not arm_teleop_active:
                     delta_controller.reset_calibration()
+                    # shared.target_eef is never cleared on disable, so without
+                    # this it still holds whatever target was last active
+                    # (possibly far from the arm's current position by now).
+                    # curobo_worker would immediately replan toward that stale
+                    # target on its next tick -- well before the ~50-frame
+                    # recalibration below produces a fresh, current-position-
+                    # anchored one -- and the MIT loop would snap the arm
+                    # toward it. Clearing it here makes curobo_worker idle
+                    # until recalibration catches up.
+                    shared.set_target_eef(None)
                     reported_calibrated = False
                     last_calibration_report = -1
                     next_curobo_publish_ns = now_ns
@@ -322,6 +332,7 @@ def run_piper_worker(
                     if was_home_requested and not home_req:
                         # Home mode just cancelled: recalibrate wrist reference from new position
                         delta_controller.reset_calibration()
+                        shared.set_target_eef(None)  # see comment above; same stale-target risk
                         reported_calibrated = False
                         last_calibration_report = -1
                         print("Home mode cancelled; recalibrating wrist reference.")

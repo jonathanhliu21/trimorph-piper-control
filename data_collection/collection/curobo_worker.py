@@ -123,6 +123,42 @@ def _joint_state_to_arrays(joint_state) -> tuple[np.ndarray, np.ndarray]:
     return position.cpu().numpy(), velocity.cpu().numpy()
 
 
+def _clamp_joint_trajectory(
+    pos: np.ndarray,
+    vel: np.ndarray,
+    q_current: list[float],
+    max_vel_rad_s: float,
+    output_hz: float,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Hard per-joint velocity ceiling, applied to every plan() output.
+
+    Safety backstop against MPC/IK solution-branch-flip spikes: observed on
+    hardware right after mpc.reset_robot() (wrist-calibration completion),
+    where the EEF target barely moved but consecutive replans picked wildly
+    different joint solutions -- one clean case measured a transient J4
+    velocity of ~10 rad/s, a real felt jolt. Walks the position trajectory
+    cumulatively from q_current so a bad solve can't sneak through as a
+    single large position jump even if only one waypoint gets sampled from
+    it; velocity is clipped to the same magnitude so v_des stays consistent
+    with the clamped positions. Not a tuning knob -- CUROBO_MAX_JOINT_VEL_RAD_S
+    should stay well above normal ~0.2-0.4 rad/s operation and only ever bite
+    on outliers.
+    """
+    max_step = max_vel_rad_s / output_hz
+    clamped_pos = pos.copy()
+    prev = np.asarray(q_current, dtype=pos.dtype)
+    triggered = False
+    for i in range(len(clamped_pos)):
+        delta = clamped_pos[i] - prev
+        clipped = np.clip(delta, -max_step, max_step)
+        if np.any(clipped != delta):
+            triggered = True
+        clamped_pos[i] = prev + clipped
+        prev = clamped_pos[i]
+    clamped_vel = np.clip(vel, -max_vel_rad_s, max_vel_rad_s)
+    return clamped_pos, clamped_vel, triggered
+
+
 def _create_v1_planner(config: CollectionConfig):
     import torch
     from curobo.geom.sdf.world import WorldConfig
@@ -483,7 +519,16 @@ def run_curobo_worker(
     while not shared.shutdown.is_set():
         loop_start = time.monotonic()
 
-        if not shared.teleop_enabled():
+        if not shared.teleop_enabled() or shared.backdrive_mode():
+            # backdrive_mode also keeps teleop_enabled True (see runner.py's
+            # 'z' handler), but target_eef is frozen at whatever it was right
+            # before backdrive started while the operator moves the arm by
+            # hand -- if we kept replanning here, the buffer would stay full
+            # of fresh (non-stale) waypoints aimed at that stale target, and
+            # exiting backdrive would skip the "hold current position"
+            # fallback in piper_worker._run_mit_step() and snap the arm back
+            # toward it. Pausing here lets the buffer go stale during
+            # backdrive so that fallback engages instead.
             trajectory_buffer.reset()
             needs_reseed = True
             elapsed = time.monotonic() - loop_start
@@ -514,6 +559,15 @@ def run_curobo_worker(
             needs_reseed = False
             if planned is not None:
                 pos, vel = planned
+                pos, vel, clamp_triggered = _clamp_joint_trajectory(
+                    pos, vel, q_current, config.curobo_max_joint_vel_rad_s, config.curobo_output_hz
+                )
+                if clamp_triggered:
+                    print(
+                        "[curobo_worker] WARNING: joint velocity clamp engaged "
+                        f"(cap={config.curobo_max_joint_vel_rad_s} rad/s) -- plan output "
+                        "exceeded the safety ceiling and was capped."
+                    )
                 # pos[0] was computed for q_current as sampled at the top of
                 # this iteration, but the GPU solve above takes real wall-clock
                 # time, and push_trajectory() always resets the consumer's

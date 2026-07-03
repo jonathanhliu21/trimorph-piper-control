@@ -184,6 +184,14 @@ CUROBO_VEL_FILTER_ALPHA = 0.3
 CUROBO_GRAV_COMP_DAMPING = 0.018
 CUROBO_GRAV_COMP_TORQUE_SCALE = 1.2   # Global gravity torque multiplier (calibrated)
 CUROBO_STALE_TIMEOUT_S = 0.5
+# Hard per-joint velocity ceiling applied to every MPC plan output before it
+# reaches the MIT loop. Normal steady-state operation measures ~0.2-0.4 rad/s
+# peak-to-peak (JointJitterDiag); this is a safety backstop, not a tuning
+# knob -- it should stay well above normal motion and only bite when the
+# solver briefly picks an inconsistent IK/MPC solution (observed: cold-start
+# right after mpc.reset_robot() on wrist-calibration completion produced a
+# transient J4 spike of ~10 rad/s -- a real, felt "thud").
+CUROBO_MAX_JOINT_VEL_RAD_S = 2.0
 CUROBO_WORLD_CUBOIDS: list[dict] = []   # Extra obstacles beyond the default table
 
 # Remote cuRobo MPC solve: offload the MPC solve to a second machine's GPU
@@ -295,6 +303,7 @@ class CollectionConfig:
     curobo_grav_comp_damping: float
     curobo_grav_comp_torque_scale: float
     curobo_stale_timeout_s: float
+    curobo_max_joint_vel_rad_s: float
     curobo_world_cuboids: list
     curobo_remote_enabled: bool
     curobo_remote_host: str
@@ -387,6 +396,7 @@ def build_config() -> CollectionConfig:
         curobo_grav_comp_damping=CUROBO_GRAV_COMP_DAMPING,
         curobo_grav_comp_torque_scale=CUROBO_GRAV_COMP_TORQUE_SCALE,
         curobo_stale_timeout_s=CUROBO_STALE_TIMEOUT_S,
+        curobo_max_joint_vel_rad_s=CUROBO_MAX_JOINT_VEL_RAD_S,
         curobo_world_cuboids=list(CUROBO_WORLD_CUBOIDS),
         curobo_remote_enabled=CUROBO_REMOTE_ENABLED,
         curobo_remote_host=CUROBO_REMOTE_HOST,
@@ -537,6 +547,8 @@ def validate_config(config: CollectionConfig) -> None:
             )
         if not (0.0 < config.curobo_vel_filter_alpha <= 1.0):
             raise ValueError("CUROBO_VEL_FILTER_ALPHA must be in (0, 1]")
+        if config.curobo_max_joint_vel_rad_s <= 0:
+            raise ValueError("CUROBO_MAX_JOINT_VEL_RAD_S must be > 0")
         if config.curobo_remote_enabled:
             if not config.curobo_remote_host:
                 raise ValueError("CUROBO_REMOTE_HOST must be set when CUROBO_REMOTE_ENABLED")
