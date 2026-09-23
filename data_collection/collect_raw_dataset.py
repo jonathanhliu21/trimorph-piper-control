@@ -17,7 +17,7 @@ from collection.realsense_worker import format_realsense_devices
 from collection.runner import run_collection
 from scripts.piper_api.foot_pedal import format_input_devices, list_input_devices
 
-DATASET_ROOT = "data_midas7                           "  # e.g. "data_midas1" — overrides config.py; overridden by --dataset-root flag
+DATASET_ROOT = "data_midas7"  # e.g. "data_midas1" — overrides config.py; overridden by --dataset-root flag
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(

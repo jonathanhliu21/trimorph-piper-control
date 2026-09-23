@@ -13,7 +13,7 @@ from collection.config import apply_device_overrides, build_config, validate_con
 from collection.runner_basic import run_collection_basic
 from scripts.piper_api.foot_pedal import format_input_devices, list_input_devices
 
-DATASET_ROOT = "data_midas7                           "  # e.g. "data_midas7" — overrides config.py; overridden by --dataset-root flag
+DATASET_ROOT = "data_midas7"  # e.g. "data_midas7" — overrides config.py; overridden by --dataset-root flag
 
 
 def parse_args() -> argparse.Namespace:
