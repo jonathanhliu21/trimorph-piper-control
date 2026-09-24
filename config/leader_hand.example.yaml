@@ -1,0 +1,14 @@
+motor_model: xl330-m077-t
+motor_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+port: null
+baudrate: 57600
+operating_mode: 5
+position_p_gain: 400
+position_i_gain: 0
+position_d_gain: 400
+goal_current_limit_ma: 150
+# Replace every placeholder below with measured leader-hand calibration.
+home_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+joint_signs: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+joint_lower_limits: [-0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25]
+joint_upper_limits: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]

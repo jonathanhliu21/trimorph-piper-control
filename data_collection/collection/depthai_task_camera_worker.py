@@ -5,11 +5,20 @@ import time
 from .config import CollectionConfig
 from .depthai_utils import import_depthai, require_depthai_device, warmup_color_queue
 from .episode import EpisodeBuffer, RecordingManager
-from .realsense_worker import flip_frame
 from .shared_state import SharedState
 from .utils import import_cv2
 
 _WARMUP_ATTEMPTS = 60
+
+
+def flip_frame(cv2, frame, mode: str):
+    if mode == "horizontal":
+        return cv2.flip(frame, 1)
+    if mode == "vertical":
+        return cv2.flip(frame, 0)
+    if mode == "both":
+        return cv2.flip(frame, -1)
+    return frame
 
 
 def run_depthai_task_camera_worker(

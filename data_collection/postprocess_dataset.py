@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert raw Midas/Piper collection episodes into diffusion-policy files."""
+"""Convert raw TRIMORPH/Piper collection episodes into diffusion-policy files."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import numpy as np
 
 # Operator settings. Adjust these values, then run:
 #   python3 data_collection/postprocess_dataset.py
-DATASET_ROOT = Path("data_midas6")
+DATASET_ROOT = Path("data_trimorph6")
 RAW_DIR = DATASET_ROOT / "raw"
 OVERWRITE_PROCESSED_FILES = True
 PROCESS_ONLY_RAW_STATUSES = {"complete"}
@@ -26,7 +26,7 @@ MAX_SYNC_ERROR_S = 0.010
 TRIM_CAMERA_FRAMES = 1  # drop this many frames from each end before syncing
 
 
-CANONICAL_MIDAS_MOTOR_IDS = tuple(range(13))
+CANONICAL_TRIMORPH_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 
 
@@ -47,7 +47,7 @@ class RawEpisode:
     path: Path
     camera_path: Path
     camera_timestamps_path: Path
-    midas_path: Path
+    trimorph_path: Path
     piper_path: Path
     metadata_path: Path
 
@@ -62,7 +62,7 @@ class ProcessedPaths:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Convert raw Midas/Piper episodes into diffusion-policy files."
+        description="Convert raw TRIMORPH/Piper episodes into diffusion-policy files."
     )
     parser.add_argument(
         "dataset_root",
@@ -133,7 +133,7 @@ def discover_raw_episodes(config: PostprocessConfig) -> list[RawEpisode]:
             path=episode_dir,
             camera_path=episode_dir / "camera.mp4",
             camera_timestamps_path=episode_dir / "camera_timestamps.csv",
-            midas_path=episode_dir / "midas.csv",
+            trimorph_path=episode_dir / "trimorph.csv",
             piper_path=episode_dir / "piper.csv",
             metadata_path=episode_dir / "metadata.json",
         )
@@ -170,21 +170,21 @@ def load_camera_timestamps(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]
     return frame_idx, timestamps_ns
 
 
-def load_midas(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]:
-    rows = read_csv_rows(episode.midas_path)
+def load_trimorph(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]:
+    rows = read_csv_rows(episode.trimorph_path)
     if not rows:
-        raise ValueError(f"No Midas samples in {episode.midas_path}")
-    timestamps_ns = int_column(rows, "monotonic_ns", episode.midas_path)
-    require_monotonic_ns("Midas", timestamps_ns, episode.midas_path)
+        raise ValueError(f"No TRIMORPH samples in {episode.trimorph_path}")
+    timestamps_ns = int_column(rows, "monotonic_ns", episode.trimorph_path)
+    require_monotonic_ns("TRIMORPH", timestamps_ns, episode.trimorph_path)
 
     positions = []
     for row in rows:
-        positions.append([float(row[f"pos_{motor_id}"]) for motor_id in CANONICAL_MIDAS_MOTOR_IDS])
+        positions.append([float(row[f"pos_{motor_id}"]) for motor_id in CANONICAL_TRIMORPH_MOTOR_IDS])
     hand = np.asarray(positions, dtype=np.float32)
     if hand.ndim != 2 or hand.shape[1] != 13:
-        raise ValueError(f"Midas array has invalid shape {hand.shape} for {episode.name}")
+        raise ValueError(f"TRIMORPH array has invalid shape {hand.shape} for {episode.name}")
     if not np.isfinite(hand).all():
-        raise ValueError(f"Midas array contains NaN or Inf for {episode.name}")
+        raise ValueError(f"TRIMORPH array contains NaN or Inf for {episode.name}")
     return hand, timestamps_ns
 
 
@@ -339,7 +339,7 @@ def process_episode(config: PostprocessConfig, episode: RawEpisode) -> dict[str,
     required_paths = (
         episode.camera_path,
         episode.camera_timestamps_path,
-        episode.midas_path,
+        episode.trimorph_path,
         episode.piper_path,
         episode.metadata_path,
     )
@@ -357,7 +357,7 @@ def process_episode(config: PostprocessConfig, episode: RawEpisode) -> dict[str,
     check_output_paths(out, config.overwrite_processed_files)
 
     frame_idx, camera_ns = load_camera_timestamps(episode)
-    hand, hand_ns = load_midas(episode)
+    hand, hand_ns = load_trimorph(episode)
     eef, eef_ns = load_piper(episode)
     if config.trim_camera_frames > 0:
         t = config.trim_camera_frames

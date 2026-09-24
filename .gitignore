@@ -4,4 +4,7 @@ recorded_motion.csv
 scripts/recordings/*.csv
 __pycache__
 data_midas*/
+data_trimorph*/
+config/leader_hand.yaml
+config/follower_hand.yaml
 hand_recording.csv

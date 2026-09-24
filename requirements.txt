@@ -1,0 +1,5 @@
+numpy
+opencv-python
+depthai
+# Install ../trimorph_hand_api in editable mode separately.
+# Install the PiperX pyAgxArm package supplied with the robot separately.
