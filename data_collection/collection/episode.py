@@ -44,8 +44,8 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
         episode_dir=episode_dir,
         camera_path=episode_dir / "camera.mp4",
         camera_timestamps_path=episode_dir / "camera_timestamps.csv",
-        leader_path=episode_dir / "trimorph_leader.csv",
-        follower_path=episode_dir / "trimorph.csv",
+        leader_path=episode_dir / "leader.csv",
+        follower_path=episode_dir / "follower.csv",
         piper_path=episode_dir / "piper.csv",
         metadata_path=episode_dir / "metadata.json",
     )
@@ -53,7 +53,6 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
 
 def _hand_metadata(path: Path, port: str) -> dict[str, Any]:
     from midas_hand_api import HandConfig
@@ -154,8 +153,8 @@ class EpisodeBuffer:
             "paths": {
                 "camera_mp4": self.paths.camera_path.name,
                 "camera_timestamps_csv": self.paths.camera_timestamps_path.name,
-                "trimorph_leader_csv": self.paths.leader_path.name,
-                "trimorph_follower_csv": self.paths.follower_path.name,
+                "leader_csv": self.paths.leader_path.name,
+                "follower_csv": self.paths.follower_path.name,
                 "piper_csv": self.paths.piper_path.name,
             },
             "counts": {

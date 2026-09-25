@@ -33,8 +33,8 @@ def start_workers(
     specs = [
         ("task_camera", run_depthai_task_camera_worker),
         ("piper", run_piper_worker),
-        ("trimorph_leader", run_leader_hand_worker),
-        ("trimorph_follower", run_follower_hand_worker),
+        ("leader", run_leader_hand_worker),
+        ("follower", run_follower_hand_worker),
     ]
     threads: list[threading.Thread] = []
     try:
