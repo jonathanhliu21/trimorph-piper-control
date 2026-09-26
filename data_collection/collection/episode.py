@@ -5,10 +5,17 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from .config import RAW_EEF_FIELDS, TRIMORPH_MOTOR_IDS, CollectionConfig
+from .config import RAW_EEF_FIELDS, TRIMORPH_MOTOR_IDS
 from .utils import WorkerError, utc_stamp, write_csv, write_json
+
+
+class EpisodeConfig(Protocol):
+    hand_config: Path
+    hand_port: str
+    hand_measure_rate_hz: float
+    active_motors: list[int]
 
 
 @dataclass(frozen=True)
@@ -72,7 +79,7 @@ def _hand_metadata(path: Path, port: str) -> dict[str, Any]:
 
 
 class EpisodeBuffer:
-    def __init__(self, paths: EpisodePaths, config: CollectionConfig) -> None:
+    def __init__(self, paths: EpisodePaths, config: EpisodeConfig) -> None:
         self.paths = paths
         self.config = config
         self.start_ns = time.monotonic_ns()
@@ -126,7 +133,7 @@ class EpisodeBuffer:
             piper_rows = list(self.piper_rows)
         write_csv(self.paths.camera_timestamps_path, camera_rows)
         write_csv(self.paths.proprioception_path, proprioception_rows)
-        if self.config.follower_hand_config is not None:
+        if getattr(self.config, "follower_hand_config", None) is not None:
             write_csv(self.paths.follower_path, follower_rows)
         write_csv(self.paths.piper_path, piper_rows)
         write_json(
@@ -142,6 +149,10 @@ class EpisodeBuffer:
         piper_rows: list[dict[str, object]],
     ) -> dict[str, Any]:
         stop_ns = self.stop_ns or time.monotonic_ns()
+        follower_config = getattr(self.config, "follower_hand_config", None)
+        follower_port = getattr(self.config, "follower_hand_port", None)
+        has_camera = hasattr(self.config, "task_camera_width")
+        has_piper = hasattr(self.config, "piper_rate_hz")
         return {
             "episode_index": self.paths.episode_index,
             "status": "complete" if not self.errors else "error",
@@ -158,7 +169,7 @@ class EpisodeBuffer:
                 "proprioception_csv": self.paths.proprioception_path.name,
                 "follower_csv": (
                     self.paths.follower_path.name
-                    if self.config.follower_hand_config is not None
+                    if follower_config is not None
                     else None
                 ),
                 "piper_csv": self.paths.piper_path.name,
@@ -170,38 +181,37 @@ class EpisodeBuffer:
                 "piper_samples": len(piper_rows),
             },
             "camera": {
-                "device": "oak1_depthai",
-                "width": self.config.task_camera_width,
-                "height": self.config.task_camera_height,
-                "fps": self.config.task_camera_fps,
-                "flip": self.config.task_camera_flip,
+                "device": "oak1_depthai" if has_camera else None,
+                "width": getattr(self.config, "task_camera_width", None),
+                "height": getattr(self.config, "task_camera_height", None),
+                "fps": getattr(self.config, "task_camera_fps", None),
+                "flip": getattr(self.config, "task_camera_flip", None),
             },
             "trimorph": {
                 "motor_ids": list(TRIMORPH_MOTOR_IDS),
+                "active_motors": list(self.config.active_motors),
                 "hand": _hand_metadata(self.config.hand_config, self.config.hand_port),
                 "measure_rate_hz": self.config.hand_measure_rate_hz,
                 "training_uses": "measured positions from proprioception.csv",
             },
             "follower": {
-                "enabled": self.config.follower_hand_config is not None,
+                "enabled": follower_config is not None,
                 "hand": (
-                    _hand_metadata(
-                        self.config.follower_hand_config,
-                        self.config.follower_hand_port,
-                    )
-                    if self.config.follower_hand_config is not None
-                    and self.config.follower_hand_port is not None
+                    _hand_metadata(follower_config, follower_port)
+                    if follower_config is not None and follower_port is not None
                     else None
                 ),
-                "measure_rate_hz": self.config.follower_measure_rate_hz,
-                "command_rate_hz": self.config.follower_command_rate_hz,
-                "command_scale": self.config.follower_command_scale,
-                "interpolation_alpha": self.config.follower_interpolation_alpha,
-                "max_step_rad": self.config.follower_max_step_rad,
+                "measure_rate_hz": getattr(self.config, "follower_measure_rate_hz", None),
+                "command_rate_hz": getattr(self.config, "follower_command_rate_hz", None),
+                "command_scale": getattr(self.config, "follower_command_scale", None),
+                "interpolation_alpha": getattr(
+                    self.config, "follower_interpolation_alpha", None
+                ),
+                "max_step_rad": getattr(self.config, "follower_max_step_rad", None),
             },
             "piper": {
-                "mode": "passive_drag_teach_logging",
-                "target_rate_hz": self.config.piper_rate_hz,
+                "mode": "passive_drag_teach_logging" if has_piper else None,
+                "target_rate_hz": getattr(self.config, "piper_rate_hz", None),
                 "raw_eef_fields": list(RAW_EEF_FIELDS),
             },
             "errors": self.errors,

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Sequence
 
 from .config import TRIMORPH_MOTOR_IDS
 
 
-def load_hand_config(path: Path, port: str):
+def load_hand_config(
+    path: Path, port: str, active_motors: Sequence[int] | None = None
+):
     from midas_hand_api import HandConfig
 
     if not path.is_file():
@@ -17,9 +20,15 @@ def load_hand_config(path: Path, port: str):
         raise RuntimeError(
             f"Expected motor_model 'xl330-m077-t' in {path}, got {config.motor_model!r}"
         )
-    if tuple(config.motor_ids) != TRIMORPH_MOTOR_IDS:
+    expected_motor_ids = (
+        tuple(int(motor_id) for motor_id in active_motors)
+        if active_motors is not None
+        else TRIMORPH_MOTOR_IDS
+    )
+    if tuple(config.motor_ids) != expected_motor_ids:
         raise RuntimeError(
-            f"Expected motor IDs {TRIMORPH_MOTOR_IDS} in {path}, got {config.motor_ids}"
+            f"Expected active motor IDs {expected_motor_ids} in {path}, "
+            f"got {config.motor_ids}"
         )
     return config
 

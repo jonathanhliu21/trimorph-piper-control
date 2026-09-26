@@ -13,7 +13,6 @@ import numpy as np
 
 from collection.config import (
     RAW_EEF_FIELDS,
-    TRIMORPH_MOTOR_IDS,
     apply_overrides,
     build_config,
 )
@@ -49,7 +48,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--settle-seconds", type=float, default=SETTLE_SECONDS)
     parser.add_argument("--hand-only", action="store_true")
     parser.add_argument("--arm-only", action="store_true")
-    parser.add_argument("--no-piper-enable", action="store_true")
+    parser.add_argument(
+        "--no-piper-enable",
+        action="store_true",
+        help="Do not enable Piper; also permits replay of episodes with an empty piper.csv.",
+    )
     return parser.parse_args()
 
 
@@ -80,9 +83,29 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(csv_file))
 
 
-def load_stream(path: Path, fields: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
+def hand_motor_ids(path: Path) -> tuple[int, ...]:
+    with path.open("r", newline="") as csv_file:
+        fieldnames = csv.DictReader(csv_file).fieldnames or []
+    motor_ids = tuple(
+        int(field.removeprefix("pos_"))
+        for field in fieldnames
+        if field.startswith("pos_")
+    )
+    if not motor_ids:
+        raise ValueError(f"No motor position columns in {path}")
+    return motor_ids
+
+
+def load_stream(
+    path: Path,
+    fields: tuple[str, ...],
+    *,
+    allow_empty: bool = False,
+) -> tuple[np.ndarray, np.ndarray] | None:
     rows = read_csv_rows(path)
     if not rows:
+        if allow_empty:
+            return None
         raise ValueError(f"No samples in {path}")
     times = np.asarray([float(row["elapsed_s"]) for row in rows], dtype=np.float64)
     values = np.asarray(
@@ -99,11 +122,17 @@ def load_stream(path: Path, fields: tuple[str, ...]) -> tuple[np.ndarray, np.nda
 
 
 def load_hand_stream(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    return load_stream(path, tuple(f"pos_{motor_id}" for motor_id in TRIMORPH_MOTOR_IDS))
+    stream = load_stream(
+        path, tuple(f"pos_{motor_id}" for motor_id in hand_motor_ids(path))
+    )
+    assert stream is not None
+    return stream
 
 
-def load_piper_stream(path: Path) -> tuple[np.ndarray, np.ndarray]:
-    return load_stream(path, RAW_EEF_FIELDS)
+def load_piper_stream(
+    path: Path, *, allow_empty: bool = False
+) -> tuple[np.ndarray, np.ndarray] | None:
+    return load_stream(path, RAW_EEF_FIELDS, allow_empty=allow_empty)
 
 
 def sample_stream(times: np.ndarray, values: np.ndarray, query_t: float) -> np.ndarray:
@@ -155,8 +184,19 @@ def main() -> int:
     replay_hand = not args.arm_only
     replay_arm = not args.hand_only
     episode_dir = resolve_episode(Path(args.dataset_root).expanduser(), args.episode)
-    hand_stream = load_hand_stream(episode_dir / "proprioception.csv") if replay_hand else None
-    piper_stream = load_piper_stream(episode_dir / "piper.csv") if replay_arm else None
+    hand_path = episode_dir / "proprioception.csv"
+    active_motors = hand_motor_ids(hand_path) if replay_hand else None
+    hand_stream = load_hand_stream(hand_path) if replay_hand else None
+    piper_stream = (
+        load_piper_stream(
+            episode_dir / "piper.csv", allow_empty=args.no_piper_enable
+        )
+        if replay_arm
+        else None
+    )
+    if replay_arm and piper_stream is None:
+        replay_arm = False
+        print("piper.csv is empty; replaying hand only.")
     start_s, end_s = replay_interval(hand_stream, piper_stream)
     config = apply_overrides(
         build_config(), hand_config=args.hand_config, hand_port=args.hand_port
@@ -169,7 +209,10 @@ def main() -> int:
             from midas_hand_api import MidasHand
 
             hand = MidasHand(
-                config=load_hand_config(config.hand_config, config.hand_port), autoconnect=True
+                config=load_hand_config(
+                    config.hand_config, config.hand_port, active_motors
+                ),
+                autoconnect=True,
             )
             verify_connected_hand(hand, role="replay")
             hand.configure(enable_torque=False)

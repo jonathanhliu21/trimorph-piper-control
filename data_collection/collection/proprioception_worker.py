@@ -4,7 +4,7 @@ import time
 
 import numpy as np
 
-from .config import TRIMORPH_MOTOR_IDS, CollectionConfig
+from .config import CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .hand_common import load_hand_config, verify_connected_hand
 from .shared_state import SharedState
@@ -19,7 +19,9 @@ def run_proprioception_worker(
 ) -> None:
     from midas_hand_api import MidasHand
 
-    hand_config = load_hand_config(config.hand_config, config.hand_port)
+    hand_config = load_hand_config(
+        config.hand_config, config.hand_port, config.active_motors
+    )
     hand = MidasHand(config=hand_config, autoconnect=True)
     verify_connected_hand(hand, role="primary")
     hand.disable_torque()
@@ -42,8 +44,11 @@ def run_proprioception_worker(
 
             positions = np.asarray(hand.read_pos(), dtype=np.float64)
             sample_ns = time.monotonic_ns()
-            if positions.shape != (len(TRIMORPH_MOTOR_IDS),):
-                raise RuntimeError(f"Hand read returned shape {positions.shape}, expected (13,)")
+            if positions.shape != (len(hand.motor_ids),):
+                raise RuntimeError(
+                    f"Hand read returned shape {positions.shape}, "
+                    f"expected ({len(hand.motor_ids)},)"
+                )
             if not np.isfinite(positions).all():
                 raise RuntimeError("Hand read returned NaN or Inf")
             shared.set_hand_target(positions)

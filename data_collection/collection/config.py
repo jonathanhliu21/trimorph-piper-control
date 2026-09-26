@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
@@ -41,6 +41,9 @@ class CollectionConfig:
     foot_pedal_device: str | None
     foot_pedal_key_code: int | None
     foot_pedal_debounce_seconds: float
+    active_motors: list[int] = field(
+        default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
+    )
 
 
 def _module_available(name: str) -> bool:
