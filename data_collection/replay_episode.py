@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+"""Replay synchronized PiperX EEF and TRIMORPH proprioception streams."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+from collection.config import (
+    RAW_EEF_FIELDS,
+    TRIMORPH_MOTOR_IDS,
+    apply_overrides,
+    build_config,
+)
+from collection.episode import raw_root
+from collection.hand_common import load_hand_config, verify_connected_hand
+
+
+DATASET_ROOT = Path("data_trimorph")
+REPLAY_HZ = 30.0
+PREPOSITION_SECONDS = 3.0
+SETTLE_SECONDS = 1.0
+PROFILE_MOVE_VELOCITY_RAD_S = 3.0
+PROFILE_MOVE_ACCELERATION_RAD_S2 = 50.0
+PIPER_PREPOSITION_SPEED_PERCENT = 20
+PIPER_REPLAY_SPEED_PERCENT = 100
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Replay one raw PiperX/TRIMORPH episode (latest by default)."
+    )
+    parser.add_argument(
+        "episode",
+        nargs="?",
+        help="Episode directory, numeric index, or episode_XXXXXX name.",
+    )
+    parser.add_argument("--dataset-root", default=str(DATASET_ROOT))
+    parser.add_argument("--hand-config", "--leader-config", dest="hand_config")
+    parser.add_argument("--hand-port", "--leader-port", dest="hand_port")
+    parser.add_argument("--rate-hz", type=float, default=REPLAY_HZ)
+    parser.add_argument("--no-preposition", action="store_true")
+    parser.add_argument("--preposition-seconds", type=float, default=PREPOSITION_SECONDS)
+    parser.add_argument("--settle-seconds", type=float, default=SETTLE_SECONDS)
+    parser.add_argument("--hand-only", action="store_true")
+    parser.add_argument("--arm-only", action="store_true")
+    parser.add_argument("--no-piper-enable", action="store_true")
+    return parser.parse_args()
+
+
+def resolve_episode(dataset_root: Path, episode: str | None) -> Path:
+    root = raw_root(dataset_root)
+    if episode is None:
+        episodes = sorted(path for path in root.glob("episode_*") if path.is_dir())
+        if not episodes:
+            raise FileNotFoundError(f"No raw episodes found under {root}")
+        return episodes[-1]
+
+    candidate = Path(episode).expanduser()
+    if candidate.is_dir():
+        return candidate
+    if episode.isdigit():
+        candidate = root / f"episode_{int(episode):06d}"
+    elif episode.startswith("episode_"):
+        candidate = root / episode
+    else:
+        candidate = root / f"episode_{episode}"
+    if not candidate.is_dir():
+        raise FileNotFoundError(f"Episode not found: {candidate}")
+    return candidate
+
+
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="") as csv_file:
+        return list(csv.DictReader(csv_file))
+
+
+def load_stream(path: Path, fields: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
+    rows = read_csv_rows(path)
+    if not rows:
+        raise ValueError(f"No samples in {path}")
+    times = np.asarray([float(row["elapsed_s"]) for row in rows], dtype=np.float64)
+    values = np.asarray(
+        [[float(row[field]) for field in fields] for row in rows], dtype=np.float64
+    )
+    if not np.isfinite(times).all() or not np.isfinite(values).all():
+        raise ValueError(f"NaN or Inf in {path}")
+    order = np.argsort(times, kind="stable")
+    times = times[order]
+    values = values[order]
+    if np.any(np.diff(times) < 0):
+        raise ValueError(f"Non-monotonic timestamps in {path}")
+    return times, values
+
+
+def load_hand_stream(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    return load_stream(path, tuple(f"pos_{motor_id}" for motor_id in TRIMORPH_MOTOR_IDS))
+
+
+def load_piper_stream(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    return load_stream(path, RAW_EEF_FIELDS)
+
+
+def sample_stream(times: np.ndarray, values: np.ndarray, query_t: float) -> np.ndarray:
+    return np.asarray(
+        [np.interp(query_t, times, values[:, column]) for column in range(values.shape[1])],
+        dtype=np.float64,
+    )
+
+
+def replay_interval(*streams: tuple[np.ndarray, np.ndarray] | None) -> tuple[float, float]:
+    active = [stream for stream in streams if stream is not None]
+    if not active:
+        raise ValueError("Nothing selected for replay")
+    start_s = max(float(stream[0][0]) for stream in active)
+    end_s = min(float(stream[0][-1]) for stream in active)
+    if end_s < start_s:
+        raise ValueError("Selected streams do not overlap in episode time")
+    return start_s, end_s
+
+
+def move_to_first_pose(hand, api, hand_stream, piper_stream, start_s: float, args) -> None:
+    if args.no_preposition:
+        return
+    print("Moving to first synchronized pose...")
+    if api is not None:
+        api.set_speed_percent(PIPER_PREPOSITION_SPEED_PERCENT)
+    first_hand = sample_stream(*hand_stream, start_s) if hand_stream is not None else None
+    first_eef = sample_stream(*piper_stream, start_s) if piper_stream is not None else None
+    end_t = time.monotonic() + args.preposition_seconds
+    while time.monotonic() < end_t:
+        if hand is not None and first_hand is not None:
+            hand.set_positions(first_hand, clip=True)
+        if api is not None and first_eef is not None:
+            api.move_eef(first_eef)
+        time.sleep(0.05)
+    if args.settle_seconds > 0:
+        time.sleep(args.settle_seconds)
+
+
+def main() -> int:
+    args = parse_args()
+    if args.rate_hz <= 0:
+        raise ValueError("--rate-hz must be greater than 0")
+    if args.preposition_seconds < 0 or args.settle_seconds < 0:
+        raise ValueError("Preposition and settle durations must be non-negative")
+    if args.hand_only and args.arm_only:
+        raise ValueError("--hand-only and --arm-only are mutually exclusive")
+
+    replay_hand = not args.arm_only
+    replay_arm = not args.hand_only
+    episode_dir = resolve_episode(Path(args.dataset_root).expanduser(), args.episode)
+    hand_stream = load_hand_stream(episode_dir / "proprioception.csv") if replay_hand else None
+    piper_stream = load_piper_stream(episode_dir / "piper.csv") if replay_arm else None
+    start_s, end_s = replay_interval(hand_stream, piper_stream)
+    config = apply_overrides(
+        build_config(), hand_config=args.hand_config, hand_port=args.hand_port
+    )
+
+    hand = None
+    api = None
+    try:
+        if replay_hand:
+            from midas_hand_api import MidasHand
+
+            hand = MidasHand(
+                config=load_hand_config(config.hand_config, config.hand_port), autoconnect=True
+            )
+            verify_connected_hand(hand, role="replay")
+            hand.configure(enable_torque=False)
+            hand.set_motion_profile(
+                profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
+                profile_acceleration_rad_s2=PROFILE_MOVE_ACCELERATION_RAD_S2,
+            )
+            hand.set_positions(hand.read_pos(), clip=True)
+            hand.enable_torque()
+            print(f"TRIMORPH hand connected on {hand.port}")
+
+        if replay_arm:
+            from scripts.piper_api.piper_api import PiperAPI
+
+            api = PiperAPI(
+                firmware=config.piper_firmware,
+                interface=config.piper_interface,
+                channel=config.piper_channel,
+                installation_pos=config.piper_installation_pos,
+                payload=config.piper_payload,
+            )
+            api.connect()
+            print("Piper connected:", api.is_ok(), "receive FPS:", api.get_fps())
+            if not args.no_piper_enable and not api.enable():
+                raise RuntimeError("Timed out while enabling Piper")
+
+        move_to_first_pose(hand, api, hand_stream, piper_stream, start_s, args)
+        if api is not None:
+            api.set_speed_percent(PIPER_REPLAY_SPEED_PERCENT)
+
+        period_s = 1.0 / args.rate_hz
+        wall_start = time.monotonic()
+        tick = 0
+        print(
+            f"Replaying {episode_dir} from {start_s:.3f}s to {end_s:.3f}s "
+            f"at {args.rate_hz:.1f} Hz."
+        )
+        while True:
+            episode_t = min(start_s + tick * period_s, end_s)
+            if hand is not None and hand_stream is not None:
+                hand.set_positions(sample_stream(*hand_stream, episode_t), clip=True)
+            if api is not None and piper_stream is not None:
+                api.move_eef(sample_stream(*piper_stream, episode_t))
+            if episode_t >= end_s:
+                break
+            tick += 1
+            sleep_s = wall_start + tick * period_s - time.monotonic()
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+        print("Replay complete.")
+        return 0
+    except KeyboardInterrupt:
+        print("\nReplay interrupted.")
+        return 130
+    finally:
+        if api is not None:
+            api.disconnect()
+        if hand is not None:
+            hand.shutdown()
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
