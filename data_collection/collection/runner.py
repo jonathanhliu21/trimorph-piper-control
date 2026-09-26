@@ -11,8 +11,8 @@ from .config import CollectionConfig
 from .depthai_task_camera_worker import run_depthai_task_camera_worker
 from .episode import EpisodeBuffer, RecordingManager, episode_paths, next_episode_index, raw_root
 from .follower_hand_worker import run_follower_hand_worker
-from .leader_hand_worker import run_leader_hand_worker
 from .piper_worker import run_piper_worker
+from .proprioception_worker import run_proprioception_worker
 from .shared_state import SharedState
 from .utils import WorkerError, import_cv2, worker_wrapper
 
@@ -24,21 +24,24 @@ _ORANGE = "\033[38;5;214m"
 _RESET = "\033[0m"
 
 
+def worker_specs(config: CollectionConfig):
+    specs = [("piper", run_piper_worker), ("proprioception", run_proprioception_worker)]
+    if config.task_camera_enabled:
+        specs.insert(0, ("task_camera", run_depthai_task_camera_worker))
+    if config.follower_hand_config is not None:
+        specs.append(("follower", run_follower_hand_worker))
+    return specs
+
+
 def start_workers(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
     errors: queue.Queue[WorkerError],
 ) -> list[threading.Thread]:
-    specs = [
-        ("task_camera", run_depthai_task_camera_worker),
-        ("piper", run_piper_worker),
-        ("leader", run_leader_hand_worker),
-        ("follower", run_follower_hand_worker),
-    ]
     threads: list[threading.Thread] = []
     try:
-        for name, target in specs:
+        for name, target in worker_specs(config):
             init_done = threading.Event()
             thread = threading.Thread(
                 target=worker_wrapper,
@@ -72,12 +75,15 @@ def _rate_hz(rows: list[dict[str, object]]) -> float:
 def _print_episode_summary(session: EpisodeBuffer) -> None:
     duration_s = ((session.stop_ns or time.monotonic_ns()) - session.start_ns) / 1e9
     print(f"Saved episode {session.paths.episode_index:06d}: duration {duration_s:.3f}s")
-    for name, rows, unit in (
-        ("OAK camera", session.camera_rows, "frames"),
-        ("TRIMORPH leader", session.leader_rows, "samples"),
-        ("TRIMORPH follower", session.follower_rows, "samples"),
+    streams = [
+        ("TRIMORPH proprioception", session.proprioception_rows, "samples"),
         ("Piper", session.piper_rows, "samples"),
-    ):
+    ]
+    if session.config.task_camera_enabled:
+        streams.insert(0, ("OAK camera", session.camera_rows, "frames"))
+    if session.config.follower_hand_config is not None:
+        streams.insert(-1, ("Follower MIDAS", session.follower_rows, "samples"))
+    for name, rows, unit in streams:
         print(f"  {name}: {len(rows)} {unit}, active rate {_rate_hz(rows):.2f} Hz")
 
 
@@ -138,15 +144,15 @@ def main_loop(
     pedal: FootPedalTrigger,
     errors: queue.Queue[WorkerError],
 ) -> None:
-    cv2 = import_cv2()
+    cv2 = import_cv2() if config.task_camera_enabled else None
     pending_start_deadline: float | None = None
     recording_pedal_down = False
     while not shared.shutdown.is_set():
         raise_next_worker_error(errors, recorder)
         frame = shared.latest_task_frame()
-        if config.show_task_view and frame is not None:
+        if cv2 is not None and config.show_task_view and frame is not None:
             cv2.imshow(config.task_view_window_name, frame)
-        key = cv2.waitKey(1) & 0xFF
+        key = cv2.waitKey(1) & 0xFF if cv2 is not None else -1
         if key in (ord("q"), 27):
             shared.shutdown.set()
             break
@@ -164,6 +170,8 @@ def main_loop(
                 elif hold_s is None:
                     recording_pedal_down = False
                     stop_and_flush_episode(recorder, "foot_pedal", color=_GREEN)
+            if cv2 is None:
+                shared.shutdown.wait(0.01)
             continue
 
         if pending_start_deadline is None:
@@ -176,6 +184,8 @@ def main_loop(
         elif time.monotonic() >= pending_start_deadline:
             start_episode(config, recorder)
             pending_start_deadline = None
+        if cv2 is None:
+            shared.shutdown.wait(0.01)
 
 
 def run_collection(config: CollectionConfig) -> int:
@@ -191,7 +201,8 @@ def run_collection(config: CollectionConfig) -> int:
     )
     pedal.start()
     print(f"Foot pedal input: {pedal.active_device}")
-    print("Piper is passive: use its built-in drag-teach control. Press q to quit.")
+    quit_hint = "Press q to quit." if config.task_camera_enabled else "Press Ctrl-C to quit."
+    print(f"Piper is passive: use its built-in drag-teach control. {quit_hint}")
     threads: list[threading.Thread] = []
     try:
         threads = start_workers(config, shared, recorder, errors)
@@ -206,9 +217,10 @@ def run_collection(config: CollectionConfig) -> int:
         pedal.stop()
         for thread in threads:
             thread.join(timeout=3.0)
-        try:
-            import_cv2().destroyAllWindows()
-        except Exception:
-            pass
+        if config.task_camera_enabled:
+            try:
+                import_cv2().destroyAllWindows()
+            except Exception:
+                pass
     raise_next_worker_error(errors, recorder)
     return 0

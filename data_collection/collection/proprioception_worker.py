@@ -10,7 +10,7 @@ from .hand_common import load_hand_config, verify_connected_hand
 from .shared_state import SharedState
 
 
-def run_leader_hand_worker(
+def run_proprioception_worker(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
@@ -19,17 +19,17 @@ def run_leader_hand_worker(
 ) -> None:
     from midas_hand_api import MidasHand
 
-    hand_config = load_hand_config(config.leader_hand_config, config.leader_hand_port)
+    hand_config = load_hand_config(config.hand_config, config.hand_port)
     hand = MidasHand(config=hand_config, autoconnect=True)
-    verify_connected_hand(hand, role="leader")
+    verify_connected_hand(hand, role="primary")
     hand.disable_torque()
     print(
-        f"TRIMORPH leader connected on {hand.port}; model={hand.config.motor_model}; "
+        f"TRIMORPH hand connected on {hand.port}; model={hand.config.motor_model}; "
         f"baud={hand.config.baudrate}; motor_ids={hand.motor_ids}"
     )
     init_done.set()
 
-    period_ns = int(round(1_000_000_000 / config.leader_measure_rate_hz))
+    period_ns = int(round(1_000_000_000 / config.hand_measure_rate_hz))
     next_read_ns = time.monotonic_ns()
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
@@ -43,9 +43,9 @@ def run_leader_hand_worker(
             positions = np.asarray(hand.read_pos(), dtype=np.float64)
             sample_ns = time.monotonic_ns()
             if positions.shape != (len(TRIMORPH_MOTOR_IDS),):
-                raise RuntimeError(f"Leader read returned shape {positions.shape}, expected (13,)")
+                raise RuntimeError(f"Hand read returned shape {positions.shape}, expected (13,)")
             if not np.isfinite(positions).all():
-                raise RuntimeError("Leader read returned NaN or Inf")
+                raise RuntimeError("Hand read returned NaN or Inf")
             shared.set_hand_target(positions)
 
             session = recorder.current()
@@ -61,7 +61,7 @@ def run_leader_hand_worker(
                 }
                 for motor_id, value in zip(hand.motor_ids, positions):
                     row[f"pos_{int(motor_id)}"] = f"{float(value):.9f}"
-                session.append_leader(row)
+                session.append_proprioception(row)
                 sample_idx += 1
 
             next_read_ns += period_ns

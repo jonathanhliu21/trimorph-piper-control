@@ -4,9 +4,9 @@ import time
 
 import numpy as np
 
-from .config import TRIMORPH_MOTOR_IDS, CollectionConfig
+from .config import CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
-from .hand_common import load_hand_config, verify_connected_hand
+from .hand_common import load_follower_config, verify_connected_hand
 from .shared_state import SharedState
 
 
@@ -19,7 +19,9 @@ def run_follower_hand_worker(
 ) -> None:
     from midas_hand_api import MidasHand
 
-    hand_config = load_hand_config(config.follower_hand_config, config.follower_hand_port)
+    if config.follower_hand_config is None or config.follower_hand_port is None:
+        raise RuntimeError("Follower worker started without follower configuration")
+    hand_config = load_follower_config(config.follower_hand_config, config.follower_hand_port)
     hand = MidasHand(config=hand_config, autoconnect=True)
     verify_connected_hand(hand, role="follower")
     if config.follower_configure_hardware:
@@ -29,7 +31,7 @@ def run_follower_hand_worker(
     hand.set_positions(last_command, clip=True)
     hand.enable_torque()
     print(
-        f"TRIMORPH follower connected on {hand.port}; model={hand.config.motor_model}; "
+        f"Follower MIDAS connected on {hand.port}; model={hand.config.motor_model}; "
         f"baud={hand.config.baudrate}; motor_ids={hand.motor_ids}"
     )
     init_done.set()
@@ -46,8 +48,11 @@ def run_follower_hand_worker(
             if now_ns >= next_command_ns:
                 target = shared.latest_hand_target()
                 if target is not None:
-                    if target.shape != (len(TRIMORPH_MOTOR_IDS),) or not np.isfinite(target).all():
-                        raise RuntimeError("Invalid 13-motor target from leader")
+                    if target.shape != (len(hand.motor_ids),) or not np.isfinite(target).all():
+                        raise RuntimeError(
+                            f"Primary hand target has shape {target.shape}, but follower "
+                            f"expects ({len(hand.motor_ids)},)"
+                        )
                     target = hand.clip_positions(target * config.follower_command_scale)
                     delta = target - last_command
                     delta *= config.follower_interpolation_alpha
@@ -66,8 +71,8 @@ def run_follower_hand_worker(
             if now_ns >= next_read_ns:
                 positions = np.asarray(hand.read_pos(), dtype=np.float64)
                 sample_ns = time.monotonic_ns()
-                if positions.shape != (len(TRIMORPH_MOTOR_IDS),) or not np.isfinite(positions).all():
-                    raise RuntimeError("Follower read returned an invalid 13-motor vector")
+                if positions.shape != (len(hand.motor_ids),) or not np.isfinite(positions).all():
+                    raise RuntimeError("Follower read returned an invalid motor vector")
                 session = recorder.current()
                 if session is not None:
                     if session is not sample_session:

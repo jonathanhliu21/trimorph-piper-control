@@ -17,7 +17,7 @@ class EpisodePaths:
     episode_dir: Path
     camera_path: Path
     camera_timestamps_path: Path
-    leader_path: Path
+    proprioception_path: Path
     follower_path: Path
     piper_path: Path
     metadata_path: Path
@@ -44,7 +44,7 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
         episode_dir=episode_dir,
         camera_path=episode_dir / "camera.mp4",
         camera_timestamps_path=episode_dir / "camera_timestamps.csv",
-        leader_path=episode_dir / "leader.csv",
+        proprioception_path=episode_dir / "proprioception.csv",
         follower_path=episode_dir / "follower.csv",
         piper_path=episode_dir / "piper.csv",
         metadata_path=episode_dir / "metadata.json",
@@ -53,6 +53,7 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
 
 def _hand_metadata(path: Path, port: str) -> dict[str, Any]:
     from midas_hand_api import HandConfig
@@ -82,10 +83,12 @@ class EpisodeBuffer:
         self.errors: list[dict[str, str]] = []
         self.lock = threading.Lock()
         self.camera_rows: list[dict[str, object]] = []
-        self.leader_rows: list[dict[str, object]] = []
+        self.proprioception_rows: list[dict[str, object]] = []
         self.follower_rows: list[dict[str, object]] = []
         self.piper_rows: list[dict[str, object]] = []
         self.video_done = threading.Event()
+        if not config.task_camera_enabled:
+            self.video_done.set()
 
     def elapsed_s(self, sample_ns: int) -> float:
         return (sample_ns - self.start_ns) / 1e9
@@ -94,9 +97,9 @@ class EpisodeBuffer:
         with self.lock:
             self.camera_rows.append(row)
 
-    def append_leader(self, row: dict[str, object]) -> None:
+    def append_proprioception(self, row: dict[str, object]) -> None:
         with self.lock:
-            self.leader_rows.append(row)
+            self.proprioception_rows.append(row)
 
     def append_follower(self, row: dict[str, object]) -> None:
         with self.lock:
@@ -120,22 +123,24 @@ class EpisodeBuffer:
         self.paths.episode_dir.mkdir(parents=True, exist_ok=True)
         with self.lock:
             camera_rows = list(self.camera_rows)
-            leader_rows = list(self.leader_rows)
+            proprioception_rows = list(self.proprioception_rows)
             follower_rows = list(self.follower_rows)
             piper_rows = list(self.piper_rows)
-        write_csv(self.paths.camera_timestamps_path, camera_rows)
-        write_csv(self.paths.leader_path, leader_rows)
-        write_csv(self.paths.follower_path, follower_rows)
+        if self.config.task_camera_enabled:
+            write_csv(self.paths.camera_timestamps_path, camera_rows)
+        write_csv(self.paths.proprioception_path, proprioception_rows)
+        if self.config.follower_hand_config is not None:
+            write_csv(self.paths.follower_path, follower_rows)
         write_csv(self.paths.piper_path, piper_rows)
         write_json(
             self.paths.metadata_path,
-            self._metadata(camera_rows, leader_rows, follower_rows, piper_rows),
+            self._metadata(camera_rows, proprioception_rows, follower_rows, piper_rows),
         )
 
     def _metadata(
         self,
         camera_rows: list[dict[str, object]],
-        leader_rows: list[dict[str, object]],
+        proprioception_rows: list[dict[str, object]],
         follower_rows: list[dict[str, object]],
         piper_rows: list[dict[str, object]],
     ) -> dict[str, Any]:
@@ -151,36 +156,54 @@ class EpisodeBuffer:
             "duration_s": (stop_ns - self.start_ns) / 1e9,
             "sync_clock": "host monotonic_ns",
             "paths": {
-                "camera_mp4": self.paths.camera_path.name,
-                "camera_timestamps_csv": self.paths.camera_timestamps_path.name,
-                "leader_csv": self.paths.leader_path.name,
-                "follower_csv": self.paths.follower_path.name,
+                "camera_mp4": self.paths.camera_path.name if self.config.task_camera_enabled else None,
+                "camera_timestamps_csv": (
+                    self.paths.camera_timestamps_path.name if self.config.task_camera_enabled else None
+                ),
+                "proprioception_csv": self.paths.proprioception_path.name,
+                "follower_csv": (
+                    self.paths.follower_path.name
+                    if self.config.follower_hand_config is not None
+                    else None
+                ),
                 "piper_csv": self.paths.piper_path.name,
             },
             "counts": {
                 "camera_frames": len(camera_rows),
-                "leader_samples": len(leader_rows),
+                "proprioception_samples": len(proprioception_rows),
                 "follower_samples": len(follower_rows),
                 "piper_samples": len(piper_rows),
             },
             "camera": {
-                "device": "oak1_depthai",
-                "width": self.config.task_camera_width,
-                "height": self.config.task_camera_height,
-                "fps": self.config.task_camera_fps,
-                "flip": self.config.task_camera_flip,
+                "enabled": self.config.task_camera_enabled,
+                "device": "oak1_depthai" if self.config.task_camera_enabled else None,
+                "width": self.config.task_camera_width if self.config.task_camera_enabled else None,
+                "height": self.config.task_camera_height if self.config.task_camera_enabled else None,
+                "fps": self.config.task_camera_fps if self.config.task_camera_enabled else None,
+                "flip": self.config.task_camera_flip if self.config.task_camera_enabled else None,
             },
             "trimorph": {
                 "motor_ids": list(TRIMORPH_MOTOR_IDS),
-                "leader": _hand_metadata(self.config.leader_hand_config, self.config.leader_hand_port),
-                "follower": _hand_metadata(self.config.follower_hand_config, self.config.follower_hand_port),
-                "leader_measure_rate_hz": self.config.leader_measure_rate_hz,
-                "follower_measure_rate_hz": self.config.follower_measure_rate_hz,
-                "follower_command_rate_hz": self.config.follower_command_rate_hz,
+                "hand": _hand_metadata(self.config.hand_config, self.config.hand_port),
+                "measure_rate_hz": self.config.hand_measure_rate_hz,
+                "training_uses": "measured positions from proprioception.csv",
+            },
+            "follower": {
+                "enabled": self.config.follower_hand_config is not None,
+                "hand": (
+                    _hand_metadata(
+                        self.config.follower_hand_config,
+                        self.config.follower_hand_port,
+                    )
+                    if self.config.follower_hand_config is not None
+                    and self.config.follower_hand_port is not None
+                    else None
+                ),
+                "measure_rate_hz": self.config.follower_measure_rate_hz,
+                "command_rate_hz": self.config.follower_command_rate_hz,
                 "command_scale": self.config.follower_command_scale,
                 "interpolation_alpha": self.config.follower_interpolation_alpha,
                 "max_step_rad": self.config.follower_max_step_rad,
-                "training_uses": "measured follower positions from trimorph.csv",
             },
             "piper": {
                 "mode": "passive_drag_teach_logging",

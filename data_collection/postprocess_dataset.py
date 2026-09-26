@@ -133,7 +133,7 @@ def discover_raw_episodes(config: PostprocessConfig) -> list[RawEpisode]:
             path=episode_dir,
             camera_path=episode_dir / "camera.mp4",
             camera_timestamps_path=episode_dir / "camera_timestamps.csv",
-            trimorph_path=episode_dir / "trimorph.csv",
+            trimorph_path=episode_dir / "proprioception.csv",
             piper_path=episode_dir / "piper.csv",
             metadata_path=episode_dir / "metadata.json",
         )

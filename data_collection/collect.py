@@ -11,13 +11,19 @@ from scripts.piper_api.foot_pedal import format_input_devices, list_input_device
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Collect synchronized OAK, PiperX, and TRIMORPH leader/follower demonstrations."
+        description="Collect synchronized PiperX and hand proprioception, with optional camera/follower."
     )
     parser.add_argument("--dataset-root")
-    parser.add_argument("--leader-config")
-    parser.add_argument("--leader-port")
+    parser.add_argument("--hand-config", "--leader-config", dest="hand_config")
+    parser.add_argument("--hand-port", "--leader-port", dest="hand_port")
     parser.add_argument("--follower-config")
     parser.add_argument("--follower-port")
+    parser.add_argument(
+        "--camera",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable the OAK task camera (use --no-camera when it is unavailable).",
+    )
     parser.add_argument("--foot-pedal-device")
     parser.add_argument("--list-input-devices", action="store_true")
     return parser.parse_args()
@@ -31,10 +37,11 @@ def main() -> int:
     config = apply_overrides(
         build_config(),
         dataset_root=args.dataset_root,
-        leader_config=args.leader_config,
-        leader_port=args.leader_port,
+        hand_config=args.hand_config,
+        hand_port=args.hand_port,
         follower_config=args.follower_config,
         follower_port=args.follower_port,
+        task_camera_enabled=args.camera,
         foot_pedal_device=args.foot_pedal_device,
     )
     validate_config(config)

@@ -7,7 +7,7 @@ position_p_gain: 400
 position_i_gain: 0
 position_d_gain: 400
 goal_current_limit_ma: 150
-# Replace every placeholder below with measured leader-hand calibration.
+# Replace every placeholder below with measured hand calibration.
 home_offsets: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 joint_signs: [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 joint_lower_limits: [-0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25, -0.25]
