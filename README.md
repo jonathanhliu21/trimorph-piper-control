@@ -4,7 +4,7 @@ This repository is the TRIMORPH-specific successor to `midas-piper-control`.
 It intentionally supports one collection stack:
 
 ```text
-OAK-1 wrist camera  -> camera.mp4 (optional)
+OAK-1 wrist camera  -> camera.mp4
 PiperX drag-teach   -> piper.csv
 Backdriven TRIMORPH -> proprioception.csv
 Follower MIDAS      -> follower.csv (optional)
@@ -57,18 +57,17 @@ the device-specific values explicitly:
 python3 data_collection/collect.py \
   --hand-config config/hand.yaml \
   --hand-port /dev/serial/by-id/TRIMORPH \
-  --no-camera \
   --foot-pedal-device /dev/input/by-id/FOOT_PEDAL
 ```
 
-Omit `--no-camera` once the OAK camera is available. To mirror the primary
-hand onto a separate MIDAS-family device, add `--follower-config` and
+To mirror the primary hand onto a separate MIDAS-family device, add
+`--follower-config` and
 `--follower-port`; omitting `--follower-config` disables that worker.
 
 The Piper worker is passive. Move the arm with its built-in drag-teach mode.
 Press and release the pedal to start an episode, then press and release it to
 save. Hold it for two seconds while recording to discard the episode. Press
-`q` in the OAK preview to stop, or use Ctrl-C when collecting without a camera.
+`q` in the OAK preview to stop.
 
 Follower smoothing defaults to `alpha=0.4` and a `0.15 rad` maximum step. For
 literal one-sample forwarding set `follower_interpolation_alpha=1.0` and
@@ -78,7 +77,7 @@ literal one-sample forwarding set `follower_interpolation_alpha=1.0` and
 
 Each raw episode contains:
 
-- `camera.mp4` and `camera_timestamps.csv`: optional wrist-mounted OAK policy input;
+- `camera.mp4` and `camera_timestamps.csv`: wrist-mounted OAK policy input;
 - `proprioception.csv`: measured positions from the backdriven TRIMORPH;
 - `follower.csv`: optional follower measurements;
 - `piper.csv`: PiperX end-effector state;

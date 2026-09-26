@@ -87,8 +87,6 @@ class EpisodeBuffer:
         self.follower_rows: list[dict[str, object]] = []
         self.piper_rows: list[dict[str, object]] = []
         self.video_done = threading.Event()
-        if not config.task_camera_enabled:
-            self.video_done.set()
 
     def elapsed_s(self, sample_ns: int) -> float:
         return (sample_ns - self.start_ns) / 1e9
@@ -126,8 +124,7 @@ class EpisodeBuffer:
             proprioception_rows = list(self.proprioception_rows)
             follower_rows = list(self.follower_rows)
             piper_rows = list(self.piper_rows)
-        if self.config.task_camera_enabled:
-            write_csv(self.paths.camera_timestamps_path, camera_rows)
+        write_csv(self.paths.camera_timestamps_path, camera_rows)
         write_csv(self.paths.proprioception_path, proprioception_rows)
         if self.config.follower_hand_config is not None:
             write_csv(self.paths.follower_path, follower_rows)
@@ -156,10 +153,8 @@ class EpisodeBuffer:
             "duration_s": (stop_ns - self.start_ns) / 1e9,
             "sync_clock": "host monotonic_ns",
             "paths": {
-                "camera_mp4": self.paths.camera_path.name if self.config.task_camera_enabled else None,
-                "camera_timestamps_csv": (
-                    self.paths.camera_timestamps_path.name if self.config.task_camera_enabled else None
-                ),
+                "camera_mp4": self.paths.camera_path.name,
+                "camera_timestamps_csv": self.paths.camera_timestamps_path.name,
                 "proprioception_csv": self.paths.proprioception_path.name,
                 "follower_csv": (
                     self.paths.follower_path.name
@@ -175,12 +170,11 @@ class EpisodeBuffer:
                 "piper_samples": len(piper_rows),
             },
             "camera": {
-                "enabled": self.config.task_camera_enabled,
-                "device": "oak1_depthai" if self.config.task_camera_enabled else None,
-                "width": self.config.task_camera_width if self.config.task_camera_enabled else None,
-                "height": self.config.task_camera_height if self.config.task_camera_enabled else None,
-                "fps": self.config.task_camera_fps if self.config.task_camera_enabled else None,
-                "flip": self.config.task_camera_flip if self.config.task_camera_enabled else None,
+                "device": "oak1_depthai",
+                "width": self.config.task_camera_width,
+                "height": self.config.task_camera_height,
+                "fps": self.config.task_camera_fps,
+                "flip": self.config.task_camera_flip,
             },
             "trimorph": {
                 "motor_ids": list(TRIMORPH_MOTOR_IDS),

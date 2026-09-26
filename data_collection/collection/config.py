@@ -13,7 +13,6 @@ RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 class CollectionConfig:
     dataset_root: Path
     ready_seconds: float
-    task_camera_enabled: bool
     show_task_view: bool
     task_view_window_name: str
     task_camera_width: int
@@ -55,7 +54,6 @@ def build_config() -> CollectionConfig:
     return CollectionConfig(
         dataset_root=Path("data_trimorph"),
         ready_seconds=0.2,
-        task_camera_enabled=True,
         show_task_view=True,
         task_view_window_name="trimorph_task_view",
         task_camera_width=1280,
@@ -95,7 +93,6 @@ def apply_overrides(
     hand_port: str | None = None,
     follower_config: str | None = None,
     follower_port: str | None = None,
-    task_camera_enabled: bool | None = None,
     foot_pedal_device: str | None = None,
 ) -> CollectionConfig:
     updates: dict[str, object] = {}
@@ -109,10 +106,6 @@ def apply_overrides(
         updates["follower_hand_config"] = Path(follower_config).expanduser()
     if follower_port is not None:
         updates["follower_hand_port"] = follower_port
-    if task_camera_enabled is not None:
-        updates["task_camera_enabled"] = task_camera_enabled
-        if not task_camera_enabled:
-            updates["show_task_view"] = False
     if foot_pedal_device is not None:
         updates["foot_pedal_device"] = foot_pedal_device
     return replace(config, **updates) if updates else config
@@ -127,13 +120,12 @@ def validate_config(config: CollectionConfig, *, require_runtime_modules: bool =
     }.items():
         if value <= 0:
             raise ValueError(f"{name} must be greater than 0")
-    if config.task_camera_enabled:
-        if config.task_camera_width <= 0 or config.task_camera_height <= 0 or config.task_camera_fps <= 0:
-            raise ValueError("Task camera dimensions and FPS must be greater than 0")
-        if config.task_camera_flip not in {"none", "horizontal", "vertical", "both"}:
-            raise ValueError("TASK_CAMERA_FLIP must be one of: none, horizontal, vertical, both")
-        if len(config.video_codec) != 4:
-            raise ValueError("VIDEO_CODEC must be a 4-character fourcc")
+    if config.task_camera_width <= 0 or config.task_camera_height <= 0 or config.task_camera_fps <= 0:
+        raise ValueError("Task camera dimensions and FPS must be greater than 0")
+    if config.task_camera_flip not in {"none", "horizontal", "vertical", "both"}:
+        raise ValueError("TASK_CAMERA_FLIP must be one of: none, horizontal, vertical, both")
+    if len(config.video_codec) != 4:
+        raise ValueError("VIDEO_CODEC must be a 4-character fourcc")
     if config.piper_firmware not in {"default", "v183", "v188"}:
         raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
     if not config.hand_port or "REPLACE_WITH" in config.hand_port:
@@ -163,12 +155,12 @@ def validate_config(config: CollectionConfig, *, require_runtime_modules: bool =
     if config.foot_pedal_debounce_seconds < 0:
         raise ValueError("FOOT_PEDAL_DEBOUNCE_SECONDS must be non-negative")
     if require_runtime_modules:
-        modules = [
+        modules = (
+            ("depthai", "depthai"),
+            ("cv2", "opencv-python"),
             ("midas_hand_api", "an editable install of ../trimorph_hand_api"),
             ("pyAgxArm", "the PiperX vendor Python package"),
-        ]
-        if config.task_camera_enabled:
-            modules.extend((("depthai", "depthai"), ("cv2", "opencv-python")))
+        )
         for module, install_hint in modules:
             if not _module_available(module):
                 raise RuntimeError(f"Missing {module!r}; install {install_hint}")

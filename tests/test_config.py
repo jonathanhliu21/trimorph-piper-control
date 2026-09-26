@@ -3,7 +3,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from collection.config import apply_overrides, build_config, validate_config
+from collection.config import build_config, validate_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -52,12 +52,6 @@ class ConfigTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "requires --follower-config"):
                 validate_config(config, require_runtime_modules=False)
-
-    def test_no_camera_override_disables_preview(self):
-        config = apply_overrides(build_config(), task_camera_enabled=False)
-        self.assertFalse(config.task_camera_enabled)
-        self.assertFalse(config.show_task_view)
-
 
 if __name__ == "__main__":
     unittest.main()
