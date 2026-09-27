@@ -17,8 +17,8 @@ joint_signs:
   4: -1.0
   5: -1.0
 joint_lower_limits:
-  4: -1.4
-  5: -1.4
+  4: -1.95
+  5: -1.95
 joint_upper_limits:
   4: 0.05
   5: 0.05
