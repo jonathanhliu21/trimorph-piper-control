@@ -445,6 +445,15 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
         f"leg over {args.duration_s:.3f}s per leg at approximately "
         f"{args.rate_hz:.1f}Hz"
     )
+    print(
+        "Motion profile     = "
+        + (
+            f"enabled ({PROFILE_MOVE_VELOCITY_RAD_S:g} rad/s, "
+            f"{PROFILE_MOVE_ACCELERATION_RAD_S2:g} rad/s^2)"
+            if args.motion_profile
+            else "disabled"
+        )
+    )
     _confirm_motion("Stream move testing", args.yes)
 
     hand = MidasHand(config, autoconnect=False)
@@ -468,8 +477,14 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
         for trial in range(1, args.trials + 1):
             print(f"Trial {trial}/{args.trials}")
             hand.set_motion_profile(
-                profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
-                profile_acceleration_rad_s2=PROFILE_MOVE_ACCELERATION_RAD_S2,
+                profile_velocity_rad_s=(
+                    PROFILE_MOVE_VELOCITY_RAD_S if args.motion_profile else None
+                ),
+                profile_acceleration_rad_s2=(
+                    PROFILE_MOVE_ACCELERATION_RAD_S2
+                    if args.motion_profile
+                    else None
+                ),
                 motor_ids=test_motor_ids,
             )
             hand.set_positions(open_target)
@@ -484,10 +499,17 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
             if args.settle_s > 0:
                 time.sleep(args.settle_s)
 
-            # set motion profile before streaming
+            # Write the requested profile state again before streaming so the
+            # test never depends on register values inherited from prior runs.
             hand.set_motion_profile(
-                profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
-                profile_acceleration_rad_s2=PROFILE_MOVE_ACCELERATION_RAD_S2,
+                profile_velocity_rad_s=(
+                    PROFILE_MOVE_VELOCITY_RAD_S if args.motion_profile else None
+                ),
+                profile_acceleration_rad_s2=(
+                    PROFILE_MOVE_ACCELERATION_RAD_S2
+                    if args.motion_profile
+                    else None
+                ),
                 motor_ids=test_motor_ids,
             )
 
@@ -658,6 +680,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=STREAM_MOVE_SETTLE_S,
         help=f"Pause at the open pose before streaming (default: {STREAM_MOVE_SETTLE_S:g}s)",
+    )
+    stream_move.add_argument(
+        "--motion-profile",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable or disable the configured Dynamixel velocity/acceleration "
+            "profile (default: enabled; disable with --no-motion-profile)"
+        ),
     )
     stream_move.add_argument(
         "--yes",
