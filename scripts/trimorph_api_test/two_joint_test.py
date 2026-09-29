@@ -13,6 +13,8 @@ Run from the repository root, for example:
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py profile_move --motors 4
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py stream_move --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py home
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
+        home --joints 4
 
 Use ``--motor-ids`` before the command if the fixture uses different IDs:
 
@@ -46,7 +48,7 @@ DEFAULT_MOTOR_IDS = (4, 5)  # Append motor 6 when ABAD is ready.
 # Review these calibrated targets before moving hardware. The YAML joint signs
 # must make these calibrated targets move each joint in the intended direction.
 FLEXION_OPEN_ANGLE_RAD = 0.0
-FLEXION_CLOSE_ANGLE_RAD = -1.0
+FLEXION_CLOSE_ANGLE_RAD = -1.35
 AB_AD_OPEN_ANGLE_RAD = 0.2
 AB_AD_CLOSE_ANGLE_RAD = 0.0
 
@@ -241,7 +243,10 @@ def _confirm_motion(action: str, assume_yes: bool) -> None:
 def _run_home(args: argparse.Namespace, config: HandConfig) -> None:
     _require_reviewed_config(args.config)
     _require_homing_entries(config)
-    _confirm_motion("Homing", args.yes)
+    action = "Homing"
+    if args.joints is not None:
+        action = f"Homing joints {args.joints}"
+    _confirm_motion(action, args.yes)
     hand = MidasHand(config, autoconnect=False)
     try:
         hand.connect()
@@ -250,6 +255,7 @@ def _run_home(args: argparse.Namespace, config: HandConfig) -> None:
         calibrated = home_hand(
             hand,
             save=False,
+            joints=args.joints,
             current_threshold_ma=args.current_threshold_ma,
             homing_velocity_rad_s=args.velocity_rad_s,
         )
@@ -257,10 +263,11 @@ def _run_home(args: argparse.Namespace, config: HandConfig) -> None:
             range(calibrated.n_motors),
             args.config,
         )
-        print(
-            "Homing complete; measured offsets for motor IDs "
-            f"{list(calibrated.motor_ids)} merged into {args.config}"
-        )
+        if args.joints is None:
+            homed = f"motor IDs {list(calibrated.motor_ids)}"
+        else:
+            homed = f"joints {args.joints}"
+        print(f"Homing complete; measured offsets for {homed} merged into {args.config}")
     finally:
         if hand.is_connected:
             hand.shutdown()
@@ -623,7 +630,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    home = commands.add_parser("home", help="Home all configured joints")
+    home = commands.add_parser("home", help="Home all or selected configured joints")
+    home.add_argument(
+        "--joints",
+        nargs="+",
+        type=int,
+        metavar="INDEX",
+        help=(
+            "Configured joint indices to home (default: all configured joints)"
+        ),
+    )
     home.add_argument("--current-threshold-ma", type=float, default=200.0)
     home.add_argument("--velocity-rad-s", type=float, default=1.5)
     home.add_argument("--yes", action="store_true", help="Skip the MOVE prompt")
