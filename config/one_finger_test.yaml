@@ -3,7 +3,6 @@ motor_model: xl330-m077-t
 motor_ids:
 - 4
 - 5
-- 6
 port: null
 baudrate: 57600
 operating_mode: 5
@@ -14,19 +13,15 @@ goal_current_limit_ma: 1470
 home_offsets:
   4: 3.183864499892878
   5: 2.864854745770151
-  6: 1.0
 joint_signs:
   4: -1.0
   5: -1.0
-  6: 1.0
 joint_lower_limits:
   4: -1.95
   5: -1.95
-  6: -1.0
 joint_upper_limits:
   4: 0.05
   5: 0.05
-  6: 1.0
 homing:
   thumb:
   - - 0
