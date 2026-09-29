@@ -15,7 +15,7 @@ class WorkerSpecsTests(unittest.TestCase):
         )
         self.assertEqual(
             [name for name, _target in worker_specs(config)],
-            ["task_camera", "piper", "proprioception"],
+            ["task_camera", "piper", "leader_hand"],
         )
 
     def test_enabled_optional_workers_are_included(self):
@@ -26,7 +26,7 @@ class WorkerSpecsTests(unittest.TestCase):
         )
         self.assertEqual(
             [name for name, _target in worker_specs(config)],
-            ["task_camera", "piper", "proprioception", "follower"],
+            ["task_camera", "piper", "leader_hand", "follower"],
         )
 
 

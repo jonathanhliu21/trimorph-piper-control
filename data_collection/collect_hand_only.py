@@ -16,7 +16,7 @@ from collection.episode import (
     raw_root,
 )
 from collection.follower_hand_worker import run_follower_hand_worker
-from collection.proprioception_worker import run_proprioception_worker
+from collection.leader_hand_worker import run_leader_hand_worker
 from collection.shared_state import SharedState
 from collection.utils import WorkerError, worker_wrapper
 
@@ -49,7 +49,7 @@ class HandOnlyCollectionConfig:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Record one fixed-duration TRIMORPH proprioception episode."
+        description="Record one fixed-duration TRIMORPH leader-hand episode."
     )
     parser.add_argument("--dataset-root", type=Path, default=Path("data_trimorph"))
     parser.add_argument("--hand-config", type=Path, default=Path("config/hand.yaml"))
@@ -90,7 +90,7 @@ def initialize_worker(
     recorder: RecordingManager,
     errors: queue.Queue[WorkerError],
 ) -> list[threading.Thread]:
-    specs = [("proprioception", run_proprioception_worker)]
+    specs = [("leader_hand", run_leader_hand_worker)]
     if config.follower_hand_config is not None:
         specs.append(("follower", run_follower_hand_worker))
 
@@ -152,7 +152,7 @@ def stop_episode(recorder: RecordingManager, reason: str) -> EpisodeBuffer | Non
     session.flush()
     print(
         f"Saved episode {session.paths.episode_index:06d}: "
-        f"{len(session.proprioception_rows)} proprioception samples, "
+        f"{len(session.leader_hand_rows)} leader-hand samples, "
         f"{len(session.follower_rows)} follower samples"
     )
     return session

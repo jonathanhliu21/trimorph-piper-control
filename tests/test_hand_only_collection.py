@@ -26,7 +26,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
             )
             recorder = RecordingManager()
             session = start_episode(config, recorder)
-            session.append_proprioception(
+            session.append_leader_hand(
                 {"sample_idx": 0, "monotonic_ns": session.start_ns, "elapsed_s": "0.0"}
             )
 
@@ -36,10 +36,12 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertIs(saved, session)
             self.assertEqual(session.paths.camera_timestamps_path.read_text(), "")
             self.assertEqual(session.paths.piper_path.read_text(), "")
-            self.assertTrue(session.paths.proprioception_path.read_text())
+            self.assertTrue(session.paths.leader_hand_path.read_text())
             metadata = json.loads(session.paths.metadata_path.read_text())
             self.assertEqual(metadata["counts"]["camera_frames"], 0)
             self.assertEqual(metadata["counts"]["piper_samples"], 0)
+            self.assertEqual(metadata["counts"]["leader_hand_samples"], 1)
+            self.assertEqual(metadata["paths"]["leader_hand_csv"], "leader_hand.csv")
             self.assertIsNone(metadata["camera"]["device"])
             self.assertIsNone(metadata["piper"]["mode"])
 
@@ -64,7 +66,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
                 self.assertEqual(run_hand_only(config), 0)
 
             episode_dir = Path(temp_dir) / "raw" / "episode_000000"
-            self.assertTrue((episode_dir / "proprioception.csv").exists())
+            self.assertTrue((episode_dir / "leader_hand.csv").exists())
             self.assertEqual((episode_dir / "camera_timestamps.csv").read_text(), "")
             self.assertEqual((episode_dir / "piper.csv").read_text(), "")
 

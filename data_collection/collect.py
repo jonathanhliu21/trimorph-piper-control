@@ -11,7 +11,7 @@ from scripts.piper_api.foot_pedal import format_input_devices, list_input_device
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Collect synchronized OAK, PiperX, and hand proprioception, with optional follower."
+        description="Collect synchronized OAK, PiperX, and leader-hand data, with optional follower."
     )
     parser.add_argument("--dataset-root")
     parser.add_argument("--hand-config", "--leader-config", dest="hand_config")

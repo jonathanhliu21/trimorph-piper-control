@@ -10,7 +10,7 @@ from .hand_common import load_hand_config, verify_connected_hand
 from .shared_state import SharedState
 
 
-def run_proprioception_worker(
+def run_leader_hand_worker(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
@@ -66,7 +66,7 @@ def run_proprioception_worker(
                 }
                 for motor_id, value in zip(hand.motor_ids, positions):
                     row[f"pos_{int(motor_id)}"] = f"{float(value):.9f}"
-                session.append_proprioception(row)
+                session.append_leader_hand(row)
                 sample_idx += 1
 
             next_read_ns += period_ns

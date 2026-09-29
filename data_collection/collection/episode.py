@@ -24,7 +24,7 @@ class EpisodePaths:
     episode_dir: Path
     camera_path: Path
     camera_timestamps_path: Path
-    proprioception_path: Path
+    leader_hand_path: Path
     follower_path: Path
     piper_path: Path
     metadata_path: Path
@@ -51,7 +51,7 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
         episode_dir=episode_dir,
         camera_path=episode_dir / "camera.mp4",
         camera_timestamps_path=episode_dir / "camera_timestamps.csv",
-        proprioception_path=episode_dir / "proprioception.csv",
+        leader_hand_path=episode_dir / "leader_hand.csv",
         follower_path=episode_dir / "follower.csv",
         piper_path=episode_dir / "piper.csv",
         metadata_path=episode_dir / "metadata.json",
@@ -90,7 +90,7 @@ class EpisodeBuffer:
         self.errors: list[dict[str, str]] = []
         self.lock = threading.Lock()
         self.camera_rows: list[dict[str, object]] = []
-        self.proprioception_rows: list[dict[str, object]] = []
+        self.leader_hand_rows: list[dict[str, object]] = []
         self.follower_rows: list[dict[str, object]] = []
         self.piper_rows: list[dict[str, object]] = []
         self.video_done = threading.Event()
@@ -102,9 +102,9 @@ class EpisodeBuffer:
         with self.lock:
             self.camera_rows.append(row)
 
-    def append_proprioception(self, row: dict[str, object]) -> None:
+    def append_leader_hand(self, row: dict[str, object]) -> None:
         with self.lock:
-            self.proprioception_rows.append(row)
+            self.leader_hand_rows.append(row)
 
     def append_follower(self, row: dict[str, object]) -> None:
         with self.lock:
@@ -128,23 +128,23 @@ class EpisodeBuffer:
         self.paths.episode_dir.mkdir(parents=True, exist_ok=True)
         with self.lock:
             camera_rows = list(self.camera_rows)
-            proprioception_rows = list(self.proprioception_rows)
+            leader_hand_rows = list(self.leader_hand_rows)
             follower_rows = list(self.follower_rows)
             piper_rows = list(self.piper_rows)
         write_csv(self.paths.camera_timestamps_path, camera_rows)
-        write_csv(self.paths.proprioception_path, proprioception_rows)
+        write_csv(self.paths.leader_hand_path, leader_hand_rows)
         if getattr(self.config, "follower_hand_config", None) is not None:
             write_csv(self.paths.follower_path, follower_rows)
         write_csv(self.paths.piper_path, piper_rows)
         write_json(
             self.paths.metadata_path,
-            self._metadata(camera_rows, proprioception_rows, follower_rows, piper_rows),
+            self._metadata(camera_rows, leader_hand_rows, follower_rows, piper_rows),
         )
 
     def _metadata(
         self,
         camera_rows: list[dict[str, object]],
-        proprioception_rows: list[dict[str, object]],
+        leader_hand_rows: list[dict[str, object]],
         follower_rows: list[dict[str, object]],
         piper_rows: list[dict[str, object]],
     ) -> dict[str, Any]:
@@ -166,7 +166,7 @@ class EpisodeBuffer:
             "paths": {
                 "camera_mp4": self.paths.camera_path.name,
                 "camera_timestamps_csv": self.paths.camera_timestamps_path.name,
-                "proprioception_csv": self.paths.proprioception_path.name,
+                "leader_hand_csv": self.paths.leader_hand_path.name,
                 "follower_csv": (
                     self.paths.follower_path.name
                     if follower_config is not None
@@ -176,7 +176,7 @@ class EpisodeBuffer:
             },
             "counts": {
                 "camera_frames": len(camera_rows),
-                "proprioception_samples": len(proprioception_rows),
+                "leader_hand_samples": len(leader_hand_rows),
                 "follower_samples": len(follower_rows),
                 "piper_samples": len(piper_rows),
             },
@@ -192,7 +192,7 @@ class EpisodeBuffer:
                 "active_motors": list(self.config.active_motors),
                 "hand": _hand_metadata(self.config.hand_config, self.config.hand_port),
                 "measure_rate_hz": self.config.hand_measure_rate_hz,
-                "training_uses": "measured positions from proprioception.csv",
+                "training_uses": "measured positions from leader_hand.csv",
             },
             "follower": {
                 "enabled": follower_config is not None,

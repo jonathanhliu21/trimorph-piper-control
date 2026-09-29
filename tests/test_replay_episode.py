@@ -9,14 +9,22 @@ from replay_episode import (
     load_hand_stream,
     load_piper_stream,
     replay_interval,
+    resolve_leader_hand_path,
     sample_stream,
 )
 
 
 class ReplayEpisodeTests(unittest.TestCase):
+    def test_legacy_proprioception_filename_is_still_supported(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            episode_dir = Path(temp_dir)
+            legacy_path = episode_dir / "proprioception.csv"
+            legacy_path.touch()
+            self.assertEqual(resolve_leader_hand_path(episode_dir), legacy_path)
+
     def test_hand_stream_is_sorted_and_interpolated(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "proprioception.csv"
+            path = Path(temp_dir) / "leader_hand.csv"
             fields = ["elapsed_s", *(f"pos_{motor_id}" for motor_id in range(13))]
             with path.open("w", newline="") as output:
                 writer = csv.DictWriter(output, fieldnames=fields)
@@ -30,7 +38,7 @@ class ReplayEpisodeTests(unittest.TestCase):
 
     def test_hand_stream_uses_only_recorded_motor_columns(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "proprioception.csv"
+            path = Path(temp_dir) / "leader_hand.csv"
             with path.open("w", newline="") as output:
                 writer = csv.DictWriter(
                     output, fieldnames=["elapsed_s", "pos_4", "pos_5"]

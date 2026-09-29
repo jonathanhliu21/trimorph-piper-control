@@ -12,7 +12,7 @@ from .depthai_task_camera_worker import run_depthai_task_camera_worker
 from .episode import EpisodeBuffer, RecordingManager, episode_paths, next_episode_index, raw_root
 from .follower_hand_worker import run_follower_hand_worker
 from .piper_worker import run_piper_worker
-from .proprioception_worker import run_proprioception_worker
+from .leader_hand_worker import run_leader_hand_worker
 from .shared_state import SharedState
 from .utils import WorkerError, import_cv2, worker_wrapper
 
@@ -28,7 +28,7 @@ def worker_specs(config: CollectionConfig):
     specs = [
         ("task_camera", run_depthai_task_camera_worker),
         ("piper", run_piper_worker),
-        ("proprioception", run_proprioception_worker),
+        ("leader_hand", run_leader_hand_worker),
     ]
     if config.follower_hand_config is not None:
         specs.append(("follower", run_follower_hand_worker))
@@ -78,7 +78,7 @@ def _print_episode_summary(session: EpisodeBuffer) -> None:
     duration_s = ((session.stop_ns or time.monotonic_ns()) - session.start_ns) / 1e9
     print(f"Saved episode {session.paths.episode_index:06d}: duration {duration_s:.3f}s")
     streams = [
-        ("TRIMORPH proprioception", session.proprioception_rows, "samples"),
+        ("TRIMORPH leader hand", session.leader_hand_rows, "samples"),
         ("Piper", session.piper_rows, "samples"),
     ]
     streams.insert(0, ("OAK camera", session.camera_rows, "frames"))

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay synchronized PiperX EEF and TRIMORPH proprioception streams."""
+"""Replay synchronized PiperX EEF and TRIMORPH leader-hand streams."""
 
 from __future__ import annotations
 
@@ -76,6 +76,14 @@ def resolve_episode(dataset_root: Path, episode: str | None) -> Path:
     if not candidate.is_dir():
         raise FileNotFoundError(f"Episode not found: {candidate}")
     return candidate
+
+
+def resolve_leader_hand_path(episode_dir: Path) -> Path:
+    path = episode_dir / "leader_hand.csv"
+    legacy_path = episode_dir / "proprioception.csv"
+    if not path.exists() and legacy_path.exists():
+        return legacy_path
+    return path
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -184,7 +192,7 @@ def main() -> int:
     replay_hand = not args.arm_only
     replay_arm = not args.hand_only
     episode_dir = resolve_episode(Path(args.dataset_root).expanduser(), args.episode)
-    hand_path = episode_dir / "proprioception.csv"
+    hand_path = resolve_leader_hand_path(episode_dir)
     active_motors = hand_motor_ids(hand_path) if replay_hand else None
     hand_stream = load_hand_stream(hand_path) if replay_hand else None
     piper_stream = (
