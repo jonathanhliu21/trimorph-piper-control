@@ -714,6 +714,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("two_joint_angles.csv"),
     )
+    record.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Overwrite the output path if it already exists",
+    )
     record.add_argument("--rate-hz", type=float, default=20.0)
     record.add_argument(
         "--duration-s",
@@ -792,6 +798,11 @@ def main() -> None:
         if args.trials <= 0:
             parser.error("--trials must be positive")
     if args.command == "record":
+        if args.output.expanduser().exists() and not args.force:
+            parser.error(
+                f"output path already exists: {args.output}; "
+                "use -f or --force to overwrite it"
+            )
         if args.rate_hz <= 0:
             parser.error("--rate-hz must be positive")
         if args.duration_s is not None and args.duration_s <= 0:
