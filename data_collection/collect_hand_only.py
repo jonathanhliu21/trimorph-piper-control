@@ -15,6 +15,7 @@ from collection.episode import (
     next_episode_index,
     raw_root,
 )
+from collection.follower_hand_worker import run_follower_hand_worker
 from collection.proprioception_worker import run_proprioception_worker
 from collection.shared_state import SharedState
 from collection.utils import WorkerError, worker_wrapper
@@ -36,6 +37,14 @@ class HandOnlyCollectionConfig:
     active_motors: list[int] = field(
         default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
     )
+    follower_hand_config: Path | None = None
+    follower_hand_port: str | None = None
+    follower_measure_rate_hz: float = 200.0
+    follower_command_rate_hz: float = 50.0
+    follower_configure_hardware: bool = True
+    follower_command_scale: float = 1.0
+    follower_max_step_rad: float = 0.15
+    follower_interpolation_alpha: float = 0.4
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hand-port", default="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND"
     )
+    parser.add_argument("--follower-config", type=Path)
+    parser.add_argument("--follower-port")
     parser.add_argument(
         "--measure-hz",
         "--hand-measure-rate-hz",
@@ -78,40 +89,48 @@ def initialize_worker(
     shared: SharedState,
     recorder: RecordingManager,
     errors: queue.Queue[WorkerError],
-) -> threading.Thread:
-    try:
-        init_done = threading.Event()
-        thread = threading.Thread(
-            target=worker_wrapper,
-            name="proprioception-worker",
-            args=(
-                "proprioception",
-                errors,
-                shared,
-                init_done,
-                run_proprioception_worker,
-                config,
-                shared,
-                recorder,
-            ),
-            daemon=True,
-        )
-        print("Starting background worker...")
+) -> list[threading.Thread]:
+    specs = [("proprioception", run_proprioception_worker)]
+    if config.follower_hand_config is not None:
+        specs.append(("follower", run_follower_hand_worker))
 
-        thread.start()
-        if not init_done.wait(timeout=WORKER_INIT_TIMEOUT_S):
-            raise TimeoutError(
-                f"Proprioception worker did not initialize within {WORKER_INIT_TIMEOUT_S}s"
+    threads: list[threading.Thread] = []
+    try:
+        for name, target in specs:
+            init_done = threading.Event()
+            thread = threading.Thread(
+                target=worker_wrapper,
+                name=f"{name}-worker",
+                args=(
+                    name,
+                    errors,
+                    shared,
+                    init_done,
+                    target,
+                    config,
+                    shared,
+                    recorder,
+                ),
+                daemon=True,
             )
-        if not errors.empty():
-            error = errors.get_nowait()
-            raise RuntimeError(f"{error.name} worker failed: {error.message}")
+            print(f"Starting {name} worker...")
+            thread.start()
+            threads.append(thread)
+            if not init_done.wait(timeout=WORKER_INIT_TIMEOUT_S):
+                raise TimeoutError(
+                    f"{name.capitalize()} worker did not initialize within "
+                    f"{WORKER_INIT_TIMEOUT_S}s"
+                )
+            if not errors.empty():
+                error = errors.get_nowait()
+                raise RuntimeError(f"{error.name} worker failed: {error.message}")
     except Exception:
         shared.shutdown.set()
-        thread.join(timeout=3.0)
+        for thread in threads:
+            thread.join(timeout=3.0)
         raise
 
-    return thread
+    return threads
 
 
 def start_episode(
@@ -133,7 +152,8 @@ def stop_episode(recorder: RecordingManager, reason: str) -> EpisodeBuffer | Non
     session.flush()
     print(
         f"Saved episode {session.paths.episode_index:06d}: "
-        f"{len(session.proprioception_rows)} proprioception samples"
+        f"{len(session.proprioception_rows)} proprioception samples, "
+        f"{len(session.follower_rows)} follower samples"
     )
     return session
 
@@ -147,7 +167,10 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     time.sleep(config.warmup_time)
     print("Warmup done, starting data collection...")
 
-    thread = initialize_worker(config, shared, recorder, errors)
+    threads = initialize_worker(config, shared, recorder, errors)
+    # Retain compatibility with callers that replace the initializer in tests.
+    if isinstance(threads, threading.Thread) or hasattr(threads, "join"):
+        threads = [threads]
     reason = "duration_complete"
     try:
         start_episode(config, recorder)
@@ -157,14 +180,15 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
             session = recorder.current()
             if session is not None:
                 session.add_error(error)
-            reason = "proprioception_worker_error"
+            reason = f"{error.name}_worker_error"
             raise RuntimeError(f"{error.name} worker failed: {error.message}")
     except KeyboardInterrupt:
         reason = "keyboard_interrupt"
         print("\nCollection interrupted; saving recorded samples.")
     finally:
         shared.shutdown.set()
-        thread.join(timeout=3.0)
+        for thread in threads:
+            thread.join(timeout=3.0)
         stop_episode(recorder, reason)
     return 0
 
@@ -179,7 +203,17 @@ def main() -> int:
         episode_time=args.episode_time,
         warmup_time=args.warmup_time,
         active_motors=args.active_motors,
+        follower_hand_config=(
+            args.follower_config.expanduser()
+            if args.follower_config is not None
+            else None
+        ),
+        follower_hand_port=args.follower_port,
     )
+    if (config.follower_hand_config is None) != (config.follower_hand_port is None):
+        raise ValueError("--follower-config and --follower-port must be provided together")
+    if config.follower_hand_port == config.hand_port:
+        raise ValueError("Primary and follower hand ports must be different")
     return run_hand_only(config)
 
 
