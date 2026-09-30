@@ -7,6 +7,8 @@ from pathlib import Path
 
 TRIMORPH_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
+FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
+FOLLOWER_PROFILE_ACCELERATION_RAD_S2 = 50.0
 
 
 @dataclass(frozen=True)

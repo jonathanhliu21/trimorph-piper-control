@@ -12,6 +12,8 @@ from pathlib import Path
 import numpy as np
 
 from collection.config import (
+    FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
+    FOLLOWER_PROFILE_VELOCITY_RAD_S,
     RAW_EEF_FIELDS,
     apply_overrides,
     build_config,
@@ -28,8 +30,6 @@ DATASET_ROOT = Path("data_trimorph")
 REPLAY_HZ = 30.0
 PREPOSITION_SECONDS = 3.0
 SETTLE_SECONDS = 1.0
-PROFILE_MOVE_VELOCITY_RAD_S = 3.0
-PROFILE_MOVE_ACCELERATION_RAD_S2 = 50.0
 PIPER_PREPOSITION_SPEED_PERCENT = 20
 PIPER_REPLAY_SPEED_PERCENT = 100
 
@@ -251,8 +251,8 @@ def main() -> int:
             )
             hand.configure(enable_torque=False)
             hand.set_motion_profile(
-                profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
-                profile_acceleration_rad_s2=PROFILE_MOVE_ACCELERATION_RAD_S2,
+                profile_velocity_rad_s=FOLLOWER_PROFILE_VELOCITY_RAD_S,
+                profile_acceleration_rad_s2=FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
             )
             hand.set_positions(hand.read_pos(), clip=True)
             hand.enable_torque()

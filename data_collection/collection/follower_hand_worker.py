@@ -4,10 +4,23 @@ import time
 
 import numpy as np
 
-from .config import CollectionConfig
+from .config import (
+    FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
+    FOLLOWER_PROFILE_VELOCITY_RAD_S,
+    CollectionConfig,
+)
 from .episode import EpisodeBuffer, RecordingManager
 from .hand_common import load_follower_config, verify_connected_hand
 from .shared_state import SharedState
+
+
+def prepare_follower_hand(hand, *, configure_hardware: bool) -> None:
+    if configure_hardware:
+        hand.configure(enable_torque=False)
+    hand.set_motion_profile(
+        profile_velocity_rad_s=FOLLOWER_PROFILE_VELOCITY_RAD_S,
+        profile_acceleration_rad_s2=FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
+    )
 
 
 def run_follower_hand_worker(
@@ -24,8 +37,9 @@ def run_follower_hand_worker(
     hand_config = load_follower_config(config.follower_hand_config, config.follower_hand_port)
     hand = MidasHand(config=hand_config, autoconnect=True)
     verify_connected_hand(hand, role="follower")
-    if config.follower_configure_hardware:
-        hand.configure(enable_torque=False)
+    prepare_follower_hand(
+        hand, configure_hardware=config.follower_configure_hardware
+    )
 
     last_command = hand.clip_positions(hand.read_pos())
     hand.set_positions(last_command, clip=True)
