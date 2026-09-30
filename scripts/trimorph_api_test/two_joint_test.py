@@ -56,8 +56,8 @@ DEFAULT_MOTOR_IDS = (4, 5, 6)  # Append motor 6 when ABAD is ready.
 # must make these calibrated targets move each joint in the intended direction.
 FLEXION_OPEN_ANGLE_RAD = 0.0
 FLEXION_CLOSE_ANGLE_RAD = -1.35
-AB_AD_OPEN_ANGLE_RAD = 0.2
-AB_AD_CLOSE_ANGLE_RAD = 0.0
+AB_AD_OPEN_ANGLE_RAD = 0.35
+AB_AD_CLOSE_ANGLE_RAD = -0.35
 
 MOTOR_LABELS = {
     0: "Thumb IP",
