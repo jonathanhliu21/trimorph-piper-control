@@ -17,7 +17,11 @@ from collection.config import (
     build_config,
 )
 from collection.episode import raw_root
-from collection.hand_common import load_hand_config, verify_connected_hand
+from collection.hand_common import (
+    load_follower_config,
+    load_hand_config,
+    verify_connected_hand,
+)
 
 
 DATASET_ROOT = Path("data_trimorph")
@@ -42,6 +46,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-root", default=str(DATASET_ROOT))
     parser.add_argument("--hand-config", "--leader-config", dest="hand_config")
     parser.add_argument("--hand-port", "--leader-port", dest="hand_port")
+    parser.add_argument(
+        "--use-follower",
+        action="store_true",
+        help=(
+            "Treat --hand-config and --hand-port as a MIDAS follower and scale "
+            "leader_hand.csv targets by follower_command_scale."
+        ),
+    )
     parser.add_argument("--rate-hz", type=float, default=REPLAY_HZ)
     parser.add_argument("--no-preposition", action="store_true")
     parser.add_argument("--preposition-seconds", type=float, default=PREPOSITION_SECONDS)
@@ -137,6 +149,13 @@ def load_hand_stream(path: Path) -> tuple[np.ndarray, np.ndarray]:
     return stream
 
 
+def scale_hand_stream(
+    stream: tuple[np.ndarray, np.ndarray], scale: float
+) -> tuple[np.ndarray, np.ndarray]:
+    times, positions = stream
+    return times, positions * scale
+
+
 def load_piper_stream(
     path: Path, *, allow_empty: bool = False
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -209,6 +228,8 @@ def main() -> int:
     config = apply_overrides(
         build_config(), hand_config=args.hand_config, hand_port=args.hand_port
     )
+    if args.use_follower and hand_stream is not None:
+        hand_stream = scale_hand_stream(hand_stream, config.follower_command_scale)
 
     hand = None
     api = None
@@ -216,13 +237,18 @@ def main() -> int:
         if replay_hand:
             from midas_hand_api import MidasHand
 
-            hand = MidasHand(
-                config=load_hand_config(
+            if args.use_follower:
+                replay_hand_config = load_follower_config(
+                    config.hand_config, config.hand_port
+                )
+            else:
+                replay_hand_config = load_hand_config(
                     config.hand_config, config.hand_port, active_motors
-                ),
-                autoconnect=True,
+                )
+            hand = MidasHand(config=replay_hand_config, autoconnect=True)
+            verify_connected_hand(
+                hand, role="follower" if args.use_follower else "replay"
             )
-            verify_connected_hand(hand, role="replay")
             hand.configure(enable_torque=False)
             hand.set_motion_profile(
                 profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
@@ -230,7 +256,10 @@ def main() -> int:
             )
             hand.set_positions(hand.read_pos(), clip=True)
             hand.enable_torque()
-            print(f"TRIMORPH hand connected on {hand.port}")
+            if args.use_follower:
+                print(f"MIDAS hand connected on {hand.port}")
+            else:
+                print(f"TRIMORPH hand connected on {hand.port}")
 
         if replay_arm:
             from scripts.piper_api.piper_api import PiperAPI

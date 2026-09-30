@@ -2,6 +2,7 @@ import csv
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -11,10 +12,28 @@ from replay_episode import (
     replay_interval,
     resolve_leader_hand_path,
     sample_stream,
+    scale_hand_stream,
+    parse_args,
 )
 
 
 class ReplayEpisodeTests(unittest.TestCase):
+    def test_use_follower_cli_option(self):
+        with patch("sys.argv", ["replay_episode.py", "--use-follower"]):
+            self.assertTrue(parse_args().use_follower)
+
+    def test_follower_scale_is_applied_to_all_hand_positions(self):
+        times = np.asarray([0.0, 1.0])
+        positions = np.asarray([[1.0, -2.0], [3.0, -4.0]])
+        scaled_times, scaled_positions = scale_hand_stream(
+            (times, positions), 0.25
+        )
+        np.testing.assert_array_equal(scaled_times, times)
+        np.testing.assert_allclose(
+            scaled_positions, [[0.25, -0.5], [0.75, -1.0]]
+        )
+        np.testing.assert_array_equal(positions, [[1.0, -2.0], [3.0, -4.0]])
+
     def test_legacy_proprioception_filename_is_still_supported(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             episode_dir = Path(temp_dir)
