@@ -113,6 +113,10 @@ def parse_args() -> argparse.Namespace:
         nargs="+",
         type=int,
         default=list(TRIMORPH_MOTOR_IDS),
+        help=(
+            "Motor IDs to read, command, and record. The hand and follower YAML "
+            "files may contain additional motor IDs."
+        ),
     )
     return parser.parse_args()
 

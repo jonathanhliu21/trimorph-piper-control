@@ -35,7 +35,11 @@ def run_follower_hand_worker(
 
     if config.follower_hand_config is None or config.follower_hand_port is None:
         raise RuntimeError("Follower worker started without follower configuration")
-    hand_config = load_follower_config(config.follower_hand_config, config.follower_hand_port)
+    hand_config = load_follower_config(
+        config.follower_hand_config,
+        config.follower_hand_port,
+        config.active_motors,
+    )
     joint_command_scales = np.asarray(
         joint_command_scales_for_motor_ids(
             config.follower_joint_command_scales, hand_config.motor_ids

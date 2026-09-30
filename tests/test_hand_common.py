@@ -6,7 +6,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from collection.hand_common import load_hand_config, verify_connected_hand
+from collection.hand_common import (
+    load_follower_config,
+    load_hand_config,
+    verify_connected_hand,
+)
 
 
 class _Config:
@@ -42,8 +46,18 @@ class VerifyConnectedHandTests(unittest.TestCase):
 @dataclass(frozen=True)
 class _LoadedConfig:
     motor_model: str = "xl330-m077-t"
-    motor_ids: tuple[int, ...] = (4, 5)
+    motor_ids: tuple[int, ...] = tuple(range(13))
     port: str | None = None
+
+    def subset(self, motor_ids):
+        selected = set(motor_ids)
+        return _LoadedConfig(
+            motor_model=self.motor_model,
+            motor_ids=tuple(
+                motor_id for motor_id in self.motor_ids if motor_id in selected
+            ),
+            port=self.port,
+        )
 
 
 class _HandConfig:
@@ -53,16 +67,45 @@ class _HandConfig:
 
 
 class LoadHandConfigTests(unittest.TestCase):
-    def test_safety_check_uses_active_motor_ids(self):
+    def test_full_config_is_subset_to_active_motor_ids(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "hand.yaml"
-            path.write_text("motor_ids: [4, 5]\n", encoding="utf-8")
+            path.write_text("motor_ids: [0, 1, 2, 3, 4, 5]\n", encoding="utf-8")
             fake_module = SimpleNamespace(HandConfig=_HandConfig)
             with patch.dict(sys.modules, {"midas_hand_api": fake_module}):
-                config = load_hand_config(path, "/dev/hand", [4, 5])
-                self.assertEqual(config.motor_ids, (4, 5))
-                with self.assertRaisesRegex(RuntimeError, "active motor IDs"):
-                    load_hand_config(path, "/dev/hand", list(range(13)))
+                config = load_hand_config(path, "/dev/hand", [5, 4])
+
+            self.assertEqual(config.motor_ids, (4, 5))
+            self.assertEqual(config.port, "/dev/hand")
+
+    def test_follower_config_is_subset_to_active_motor_ids(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "follower.yaml"
+            path.write_text("motor_ids: [0, 1, 2, 3, 4, 5]\n", encoding="utf-8")
+            fake_module = SimpleNamespace(HandConfig=_HandConfig)
+            with patch.dict(sys.modules, {"midas_hand_api": fake_module}):
+                config = load_follower_config(path, "/dev/follower", [4, 5])
+
+            self.assertEqual(config.motor_ids, (4, 5))
+            self.assertEqual(config.port, "/dev/follower")
+
+    def test_rejects_active_motor_missing_from_yaml(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hand.yaml"
+            path.write_text("motor_ids: [0, 1, 2, 3, 4, 5]\n", encoding="utf-8")
+            fake_module = SimpleNamespace(HandConfig=_HandConfig)
+            with patch.dict(sys.modules, {"midas_hand_api": fake_module}):
+                with self.assertRaisesRegex(RuntimeError, "not present"):
+                    load_hand_config(path, "/dev/hand", [13])
+
+    def test_rejects_duplicate_active_motors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "hand.yaml"
+            path.write_text("motor_ids: [0, 1, 2, 3, 4, 5]\n", encoding="utf-8")
+            fake_module = SimpleNamespace(HandConfig=_HandConfig)
+            with patch.dict(sys.modules, {"midas_hand_api": fake_module}):
+                with self.assertRaisesRegex(ValueError, "must be unique"):
+                    load_hand_config(path, "/dev/hand", [4, 4])
 
 
 if __name__ == "__main__":
