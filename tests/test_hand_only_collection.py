@@ -5,7 +5,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from collect_hand_only import (
+    DATA_COLLECTION_MODE,
+    RETARGET_ONLY_MODE,
     HandOnlyCollectionConfig,
+    parse_args,
     run_hand_only,
     start_episode,
     stop_episode,
@@ -14,6 +17,14 @@ from collection.episode import RecordingManager
 
 
 class HandOnlyCollectionTests(unittest.TestCase):
+    def test_cli_modes_default_to_data_collection(self):
+        with patch("sys.argv", ["collect_hand_only.py"]):
+            self.assertEqual(parse_args().mode, DATA_COLLECTION_MODE)
+        with patch("sys.argv", ["collect_hand_only.py", "--retarget-only"]):
+            self.assertEqual(parse_args().mode, RETARGET_ONLY_MODE)
+        with patch("sys.argv", ["collect_hand_only.py", "--data-collection"]):
+            self.assertEqual(parse_args().mode, DATA_COLLECTION_MODE)
+
     def test_episode_flushes_empty_camera_and_piper_csvs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config = HandOnlyCollectionConfig(
@@ -69,6 +80,32 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertTrue((episode_dir / "leader_hand.csv").exists())
             self.assertEqual((episode_dir / "camera_timestamps.csv").read_text(), "")
             self.assertEqual((episode_dir / "piper.csv").read_text(), "")
+
+    def test_retarget_only_does_not_create_an_episode(self):
+        class FinishedThread:
+            def join(self, timeout=None):
+                return None
+
+        def initialize_and_stop(config, shared, recorder, errors):
+            shared.shutdown.set()
+            return [FinishedThread()]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = HandOnlyCollectionConfig(
+                dataset_root=Path(temp_dir),
+                hand_config=Path("config/hand.yaml"),
+                hand_port="/dev/hand",
+                hand_measure_rate_hz=100.0,
+                warmup_time=0.0,
+                episode_time=30.0,
+                mode=RETARGET_ONLY_MODE,
+            )
+            with patch(
+                "collect_hand_only.initialize_worker", side_effect=initialize_and_stop
+            ):
+                self.assertEqual(run_hand_only(config), 0)
+
+            self.assertFalse((Path(temp_dir) / "raw").exists())
 
 
 if __name__ == "__main__":

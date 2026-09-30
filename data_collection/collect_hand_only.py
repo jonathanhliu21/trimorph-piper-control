@@ -23,6 +23,9 @@ from collection.utils import WorkerError, worker_wrapper
 WORKER_INIT_TIMEOUT_S = 60.0
 DEFAULT_DEMONSTRATION_DURATION_S = 30.0
 DEFAULT_WARMUP_TIME_S = 5.0
+DEFAULT_HAND_MEASURE_RATE_HZ = 100.0
+DATA_COLLECTION_MODE = "data_collection"
+RETARGET_ONLY_MODE = "retarget_only"
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,7 @@ class HandOnlyCollectionConfig:
 
     warmup_time: float
     episode_time: float
+    mode: str = DATA_COLLECTION_MODE
     active_motors: list[int] = field(
         default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
     )
@@ -49,8 +53,27 @@ class HandOnlyCollectionConfig:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Record one fixed-duration TRIMORPH leader-hand episode."
+        description=(
+            "Retarget a follower from the TRIMORPH leader hand, optionally recording "
+            "a fixed-duration episode."
+        )
     )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--retarget-only",
+        dest="mode",
+        action="store_const",
+        const=RETARGET_ONLY_MODE,
+        help="Retarget indefinitely without recording; stop with Ctrl-C.",
+    )
+    mode_group.add_argument(
+        "--data-collection",
+        dest="mode",
+        action="store_const",
+        const=DATA_COLLECTION_MODE,
+        help="Record one fixed-duration episode (the default).",
+    )
+    parser.set_defaults(mode=DATA_COLLECTION_MODE)
     parser.add_argument("--dataset-root", type=Path, default=Path("data_trimorph"))
     parser.add_argument("--hand-config", type=Path, default=Path("config/hand.yaml"))
     parser.add_argument(
@@ -58,13 +81,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--follower-config", type=Path)
     parser.add_argument("--follower-port")
-    parser.add_argument(
-        "--measure-hz",
-        "--hand-measure-rate-hz",
-        dest="hand_measure_rate_hz",
-        type=float,
-        default=100.0,
-    )
     parser.add_argument(
         "--episode-time",
         type=float,
@@ -163,9 +179,12 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     recorder = RecordingManager()
     errors: queue.Queue[WorkerError] = queue.Queue()
 
-    print(f"Warming up for {config.warmup_time}s")
-    time.sleep(config.warmup_time)
-    print("Warmup done, starting data collection...")
+    if config.mode == DATA_COLLECTION_MODE:
+        print(f"Warming up for {config.warmup_time}s")
+        time.sleep(config.warmup_time)
+        print("Warmup done, starting data collection...")
+    elif config.mode != RETARGET_ONLY_MODE:
+        raise ValueError(f"Unknown hand-only mode: {config.mode!r}")
 
     threads = initialize_worker(config, shared, recorder, errors)
     # Retain compatibility with callers that replace the initializer in tests.
@@ -173,8 +192,12 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
         threads = [threads]
     reason = "duration_complete"
     try:
-        start_episode(config, recorder)
-        shared.shutdown.wait(config.episode_time)
+        if config.mode == RETARGET_ONLY_MODE:
+            print("Retarget-only mode active. Press Ctrl-C to stop.")
+            shared.shutdown.wait()
+        else:
+            start_episode(config, recorder)
+            shared.shutdown.wait(config.episode_time)
         if not errors.empty():
             error = errors.get_nowait()
             session = recorder.current()
@@ -184,12 +207,16 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
             raise RuntimeError(f"{error.name} worker failed: {error.message}")
     except KeyboardInterrupt:
         reason = "keyboard_interrupt"
-        print("\nCollection interrupted; saving recorded samples.")
+        if config.mode == RETARGET_ONLY_MODE:
+            print("\nRetargeting stopped.")
+        else:
+            print("\nCollection interrupted; saving recorded samples.")
     finally:
         shared.shutdown.set()
         for thread in threads:
             thread.join(timeout=3.0)
-        stop_episode(recorder, reason)
+        if config.mode == DATA_COLLECTION_MODE:
+            stop_episode(recorder, reason)
     return 0
 
 
@@ -199,9 +226,10 @@ def main() -> int:
         dataset_root=args.dataset_root.expanduser(),
         hand_config=args.hand_config.expanduser(),
         hand_port=args.hand_port,
-        hand_measure_rate_hz=args.hand_measure_rate_hz,
+        hand_measure_rate_hz=DEFAULT_HAND_MEASURE_RATE_HZ,
         episode_time=args.episode_time,
         warmup_time=args.warmup_time,
+        mode=args.mode,
         active_motors=args.active_motors,
         follower_hand_config=(
             args.follower_config.expanduser()
