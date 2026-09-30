@@ -1,14 +1,34 @@
 from __future__ import annotations
 
 import importlib.util
+import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Mapping, Sequence
 
 
 TRIMORPH_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
 FOLLOWER_PROFILE_ACCELERATION_RAD_S2 = 50.0
+
+
+def default_follower_joint_command_scales() -> dict[int, float]:
+    """Return unity command scales keyed by TRIMORPH motor ID."""
+
+    return {motor_id: 1.0 for motor_id in TRIMORPH_MOTOR_IDS}
+
+
+def joint_command_scales_for_motor_ids(
+    scales: Mapping[int, float], motor_ids: Sequence[int]
+) -> tuple[float, ...]:
+    """Resolve motor-ID keyed scales in command-vector order.
+
+    Unspecified motor IDs retain unity scaling, which keeps custom or partial
+    follower configurations backward compatible.
+    """
+
+    return tuple(float(scales.get(int(motor_id), 1.0)) for motor_id in motor_ids)
 
 
 @dataclass(frozen=True)
@@ -45,6 +65,9 @@ class CollectionConfig:
     foot_pedal_debounce_seconds: float
     active_motors: list[int] = field(
         default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
+    )
+    follower_joint_command_scales: dict[int, float] = field(
+        default_factory=default_follower_joint_command_scales
     )
 
 
@@ -87,6 +110,7 @@ def build_config() -> CollectionConfig:
         foot_pedal_device=None,
         foot_pedal_key_code=None,
         foot_pedal_debounce_seconds=0.5,
+        follower_joint_command_scales=default_follower_joint_command_scales(),
     )
 
 
@@ -153,6 +177,13 @@ def validate_config(config: CollectionConfig, *, require_runtime_modules: bool =
             raise ValueError("FOLLOWER_MEASURE_RATE_HZ must be greater than 0")
         if config.follower_command_rate_hz <= 0:
             raise ValueError("FOLLOWER_COMMAND_RATE_HZ must be greater than 0")
+        if not math.isfinite(config.follower_command_scale):
+            raise ValueError("FOLLOWER_COMMAND_SCALE must be finite")
+        if not all(
+            math.isfinite(float(scale))
+            for scale in config.follower_joint_command_scales.values()
+        ):
+            raise ValueError("FOLLOWER_JOINT_COMMAND_SCALES must contain finite values")
         if not 0.0 < config.follower_interpolation_alpha <= 1.0:
             raise ValueError("FOLLOWER_INTERPOLATION_ALPHA must be in (0, 1]")
         if config.follower_max_step_rad < 0:

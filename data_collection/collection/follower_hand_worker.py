@@ -8,6 +8,7 @@ from .config import (
     FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
     FOLLOWER_PROFILE_VELOCITY_RAD_S,
     CollectionConfig,
+    joint_command_scales_for_motor_ids,
 )
 from .episode import EpisodeBuffer, RecordingManager
 from .hand_common import load_follower_config, verify_connected_hand
@@ -35,12 +36,21 @@ def run_follower_hand_worker(
     if config.follower_hand_config is None or config.follower_hand_port is None:
         raise RuntimeError("Follower worker started without follower configuration")
     hand_config = load_follower_config(config.follower_hand_config, config.follower_hand_port)
+    joint_command_scales = np.asarray(
+        joint_command_scales_for_motor_ids(
+            config.follower_joint_command_scales, hand_config.motor_ids
+        ),
+        dtype=np.float64,
+    )
+    if not np.isfinite(config.follower_command_scale) or not np.isfinite(
+        joint_command_scales
+    ).all():
+        raise ValueError("Follower command scales must be finite")
     hand = MidasHand(config=hand_config, autoconnect=True)
     verify_connected_hand(hand, role="follower")
     prepare_follower_hand(
         hand, configure_hardware=config.follower_configure_hardware
     )
-
     last_command = hand.clip_positions(hand.read_pos())
     hand.set_positions(last_command, clip=True)
     hand.enable_torque()
@@ -67,7 +77,11 @@ def run_follower_hand_worker(
                             f"Primary hand target has shape {target.shape}, but follower "
                             f"expects ({len(hand.motor_ids)},)"
                         )
-                    target = hand.clip_positions(target * config.follower_command_scale)
+                    target = hand.clip_positions(
+                        target
+                        * config.follower_command_scale
+                        * joint_command_scales
+                    )
                     delta = target - last_command
                     delta *= config.follower_interpolation_alpha
                     if config.follower_max_step_rad > 0:

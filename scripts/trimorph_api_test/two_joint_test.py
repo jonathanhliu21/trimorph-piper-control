@@ -1,4 +1,4 @@
-"""Hardware bring-up CLI for an XL330 finger test fixture.
+"""Hardware bring-up CLI for an XL330 or XM335 finger test fixture.
 
 The commands mirror ``xl330_hand_test.py``, but every bus operation is limited
 to the selected motor IDs. By default those are the index-finger PIP and
@@ -21,6 +21,12 @@ Use ``--motor-ids`` before the command if the fixture uses different IDs:
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
         --motor-ids 7,8 record
 
+The ``motor_model`` in the selected YAML determines whether the fixture uses
+XL330-M077-T or XM335-T323-T motors. Use a model-specific configuration so the
+baud rate, gains, current limit, calibration, and joint limits match the
+physical fixture. A single invocation expects all selected motors to be the
+same configured model.
+
 Review the YAML and the motion constants below before running ``home`` or a
 motion command. Every command attempts to disable torque before closing the
 serial port.
@@ -42,8 +48,9 @@ from midas_hand_api import HandConfig, MidasHand, home_hand
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("xl330_test_config.yaml")
+SUPPORTED_MOTOR_MODELS = ("xl330-m077-t", "xm335-t323-t")
 # Joint order is significant: PIP, MCP flexion, then optionally one ABAD motor.
-DEFAULT_MOTOR_IDS = (4, 5, 6)  # Append motor 6 when ABAD is ready.
+DEFAULT_MOTOR_IDS = (4, 5)  # Append motor 6 when ABAD is ready.
 
 # Review these calibrated targets before moving hardware. The YAML joint signs
 # must make these calibrated targets move each joint in the intended direction.
@@ -184,10 +191,10 @@ def _motion_angles(motor_id: int) -> tuple[float, float]:
 
 def _load_config(path: Path, motor_ids: Sequence[int]) -> HandConfig:
     full_config = HandConfig.load(path)
-    if full_config.motor_model != "xl330-m077-t":
+    if full_config.motor_model not in SUPPORTED_MOTOR_MODELS:
         raise ValueError(
-            f"This script requires XL330-M077-T, but {path} selects "
-            f"{full_config.motor_model}"
+            f"This script supports only XL330-M077-T and XM335-T323-T, but "
+            f"{path} selects {full_config.motor_model}"
         )
     return full_config.subset(motor_ids)
 
@@ -617,7 +624,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
-        help=f"XL330 YAML configuration (default: {DEFAULT_CONFIG_PATH})",
+        help=(
+            "XL330-M077-T or XM335-T323-T YAML configuration "
+            f"(default: {DEFAULT_CONFIG_PATH})"
+        ),
     )
     parser.add_argument(
         "--motor-ids",

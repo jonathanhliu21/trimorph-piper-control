@@ -3,10 +3,28 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from collection.config import build_config, validate_config
+from collection.config import (
+    TRIMORPH_MOTOR_IDS,
+    build_config,
+    joint_command_scales_for_motor_ids,
+    validate_config,
+)
 
 
 class ConfigTests(unittest.TestCase):
+    def test_joint_command_scales_default_to_unity(self):
+        config = build_config()
+
+        self.assertEqual(
+            config.follower_joint_command_scales,
+            {motor_id: 1.0 for motor_id in TRIMORPH_MOTOR_IDS},
+        )
+
+    def test_joint_command_scales_follow_motor_id_order(self):
+        scales = joint_command_scales_for_motor_ids({4: 0.5, 6: 1.5}, (6, 5, 4))
+
+        self.assertEqual(scales, (1.5, 1.0, 0.5))
+
     def _config(self, directory: Path, *, follower: bool, same_port: bool = False):
         hand = directory / "hand.yaml"
         follower_path = directory / "follower.yaml"

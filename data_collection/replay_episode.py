@@ -17,6 +17,7 @@ from collection.config import (
     RAW_EEF_FIELDS,
     apply_overrides,
     build_config,
+    joint_command_scales_for_motor_ids,
 )
 from collection.episode import raw_root
 from collection.hand_common import (
@@ -150,7 +151,7 @@ def load_hand_stream(path: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def scale_hand_stream(
-    stream: tuple[np.ndarray, np.ndarray], scale: float
+    stream: tuple[np.ndarray, np.ndarray], scale: float | np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     times, positions = stream
     return times, positions * scale
@@ -229,7 +230,15 @@ def main() -> int:
         build_config(), hand_config=args.hand_config, hand_port=args.hand_port
     )
     if args.use_follower and hand_stream is not None:
-        hand_stream = scale_hand_stream(hand_stream, config.follower_command_scale)
+        joint_scales = np.asarray(
+            joint_command_scales_for_motor_ids(
+                config.follower_joint_command_scales, active_motors or ()
+            ),
+            dtype=np.float64,
+        )
+        hand_stream = scale_hand_stream(
+            hand_stream, config.follower_command_scale * joint_scales
+        )
 
     hand = None
     api = None

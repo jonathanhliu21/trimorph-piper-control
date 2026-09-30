@@ -49,6 +49,23 @@ class HandOnlyCollectionConfig:
     follower_command_scale: float = 1.0
     follower_max_step_rad: float = 0.15
     follower_interpolation_alpha: float = 0.4
+    follower_joint_command_scales: dict[int, float] = field(
+        default_factory=lambda: {
+            0: 1.0,
+            1: 1.0,
+            2: 1.0,
+            3: 1.0,
+            4: 0.5,
+            5: 0.5,
+            6: 1.0,
+            7: 1.0,
+            8: 1.0,
+            9: 1.0,
+            10: 1.0,
+            11: 1.0,
+            12: 1.0,
+        }
+    )
 
 
 def parse_args() -> argparse.Namespace:

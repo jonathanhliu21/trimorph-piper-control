@@ -72,6 +72,8 @@ save. Hold it for two seconds while recording to discard the episode. Press
 Follower smoothing defaults to `alpha=0.4` and a `0.15 rad` maximum step. For
 literal one-sample forwarding set `follower_interpolation_alpha=1.0` and
 `follower_max_step_rad=0.0` after confirming calibration and limits.
+`follower_joint_command_scales` provides an additional motor-ID keyed scale;
+all motor scales default to `1.0` and multiply `follower_command_scale`.
 
 ## Dataset
 

@@ -34,6 +34,16 @@ class ReplayEpisodeTests(unittest.TestCase):
         )
         np.testing.assert_array_equal(positions, [[1.0, -2.0], [3.0, -4.0]])
 
+    def test_joint_specific_scales_are_applied_by_column(self):
+        times = np.asarray([0.0, 1.0])
+        positions = np.asarray([[1.0, -2.0], [3.0, -4.0]])
+
+        _, scaled_positions = scale_hand_stream(
+            (times, positions), np.asarray([0.5, 2.0])
+        )
+
+        np.testing.assert_allclose(scaled_positions, [[0.5, -4.0], [1.5, -8.0]])
+
     def test_legacy_proprioception_filename_is_still_supported(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             episode_dir = Path(temp_dir)

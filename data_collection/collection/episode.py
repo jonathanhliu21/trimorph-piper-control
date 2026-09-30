@@ -204,6 +204,9 @@ class EpisodeBuffer:
                 "measure_rate_hz": getattr(self.config, "follower_measure_rate_hz", None),
                 "command_rate_hz": getattr(self.config, "follower_command_rate_hz", None),
                 "command_scale": getattr(self.config, "follower_command_scale", None),
+                "joint_command_scales": getattr(
+                    self.config, "follower_joint_command_scales", None
+                ),
                 "interpolation_alpha": getattr(
                     self.config, "follower_interpolation_alpha", None
                 ),
