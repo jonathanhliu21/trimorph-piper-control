@@ -4,10 +4,24 @@ import time
 
 import numpy as np
 
-from .config import TRIMORPH_MOTOR_IDS, CollectionConfig
+from .config import (
+    FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
+    FOLLOWER_PROFILE_VELOCITY_RAD_S,
+    CollectionConfig,
+    joint_command_scales_for_motor_ids,
+)
 from .episode import EpisodeBuffer, RecordingManager
-from .hand_common import load_hand_config, verify_connected_hand
+from .hand_common import load_follower_config, verify_connected_hand
 from .shared_state import SharedState
+
+
+def prepare_follower_hand(hand, *, configure_hardware: bool) -> None:
+    if configure_hardware:
+        hand.configure(enable_torque=False)
+    hand.set_motion_profile(
+        profile_velocity_rad_s=FOLLOWER_PROFILE_VELOCITY_RAD_S,
+        profile_acceleration_rad_s2=FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
+    )
 
 
 def run_follower_hand_worker(
@@ -19,17 +33,33 @@ def run_follower_hand_worker(
 ) -> None:
     from midas_hand_api import MidasHand
 
-    hand_config = load_hand_config(config.follower_hand_config, config.follower_hand_port)
+    if config.follower_hand_config is None or config.follower_hand_port is None:
+        raise RuntimeError("Follower worker started without follower configuration")
+    hand_config = load_follower_config(
+        config.follower_hand_config,
+        config.follower_hand_port,
+        config.active_motors,
+    )
+    joint_command_scales = np.asarray(
+        joint_command_scales_for_motor_ids(
+            config.follower_joint_command_scales, hand_config.motor_ids
+        ),
+        dtype=np.float64,
+    )
+    if not np.isfinite(config.follower_command_scale) or not np.isfinite(
+        joint_command_scales
+    ).all():
+        raise ValueError("Follower command scales must be finite")
     hand = MidasHand(config=hand_config, autoconnect=True)
     verify_connected_hand(hand, role="follower")
-    if config.follower_configure_hardware:
-        hand.configure(enable_torque=False)
-
+    prepare_follower_hand(
+        hand, configure_hardware=config.follower_configure_hardware
+    )
     last_command = hand.clip_positions(hand.read_pos())
     hand.set_positions(last_command, clip=True)
     hand.enable_torque()
     print(
-        f"TRIMORPH follower connected on {hand.port}; model={hand.config.motor_model}; "
+        f"Follower MIDAS connected on {hand.port}; model={hand.config.motor_model}; "
         f"baud={hand.config.baudrate}; motor_ids={hand.motor_ids}"
     )
     init_done.set()
@@ -46,9 +76,16 @@ def run_follower_hand_worker(
             if now_ns >= next_command_ns:
                 target = shared.latest_hand_target()
                 if target is not None:
-                    if target.shape != (len(TRIMORPH_MOTOR_IDS),) or not np.isfinite(target).all():
-                        raise RuntimeError("Invalid 13-motor target from leader")
-                    target = hand.clip_positions(target * config.follower_command_scale)
+                    if target.shape != (len(hand.motor_ids),) or not np.isfinite(target).all():
+                        raise RuntimeError(
+                            f"Primary hand target has shape {target.shape}, but follower "
+                            f"expects ({len(hand.motor_ids)},)"
+                        )
+                    target = hand.clip_positions(
+                        target
+                        * config.follower_command_scale
+                        * joint_command_scales
+                    )
                     delta = target - last_command
                     delta *= config.follower_interpolation_alpha
                     if config.follower_max_step_rad > 0:
@@ -66,8 +103,8 @@ def run_follower_hand_worker(
             if now_ns >= next_read_ns:
                 positions = np.asarray(hand.read_pos(), dtype=np.float64)
                 sample_ns = time.monotonic_ns()
-                if positions.shape != (len(TRIMORPH_MOTOR_IDS),) or not np.isfinite(positions).all():
-                    raise RuntimeError("Follower read returned an invalid 13-motor vector")
+                if positions.shape != (len(hand.motor_ids),) or not np.isfinite(positions).all():
+                    raise RuntimeError("Follower read returned an invalid motor vector")
                 session = recorder.current()
                 if session is not None:
                     if session is not sample_session:

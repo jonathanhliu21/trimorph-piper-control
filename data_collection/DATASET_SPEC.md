@@ -319,7 +319,7 @@ It is fine to keep richer raw recordings elsewhere, for example:
   episode_000000/
     camera_original.mp4
     piper.csv
-    trimorph.csv
+    leader_hand.csv
     timestamps.json
     metadata.json
 ```

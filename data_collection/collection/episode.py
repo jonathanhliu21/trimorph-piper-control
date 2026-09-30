@@ -5,10 +5,17 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from .config import RAW_EEF_FIELDS, TRIMORPH_MOTOR_IDS, CollectionConfig
+from .config import RAW_EEF_FIELDS, TRIMORPH_MOTOR_IDS
 from .utils import WorkerError, utc_stamp, write_csv, write_json
+
+
+class EpisodeConfig(Protocol):
+    hand_config: Path
+    hand_port: str
+    hand_measure_rate_hz: float
+    active_motors: list[int]
 
 
 @dataclass(frozen=True)
@@ -17,7 +24,7 @@ class EpisodePaths:
     episode_dir: Path
     camera_path: Path
     camera_timestamps_path: Path
-    leader_path: Path
+    leader_hand_path: Path
     follower_path: Path
     piper_path: Path
     metadata_path: Path
@@ -44,8 +51,8 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
         episode_dir=episode_dir,
         camera_path=episode_dir / "camera.mp4",
         camera_timestamps_path=episode_dir / "camera_timestamps.csv",
-        leader_path=episode_dir / "trimorph_leader.csv",
-        follower_path=episode_dir / "trimorph.csv",
+        leader_hand_path=episode_dir / "leader_hand.csv",
+        follower_path=episode_dir / "follower.csv",
         piper_path=episode_dir / "piper.csv",
         metadata_path=episode_dir / "metadata.json",
     )
@@ -72,7 +79,7 @@ def _hand_metadata(path: Path, port: str) -> dict[str, Any]:
 
 
 class EpisodeBuffer:
-    def __init__(self, paths: EpisodePaths, config: CollectionConfig) -> None:
+    def __init__(self, paths: EpisodePaths, config: EpisodeConfig) -> None:
         self.paths = paths
         self.config = config
         self.start_ns = time.monotonic_ns()
@@ -83,7 +90,7 @@ class EpisodeBuffer:
         self.errors: list[dict[str, str]] = []
         self.lock = threading.Lock()
         self.camera_rows: list[dict[str, object]] = []
-        self.leader_rows: list[dict[str, object]] = []
+        self.leader_hand_rows: list[dict[str, object]] = []
         self.follower_rows: list[dict[str, object]] = []
         self.piper_rows: list[dict[str, object]] = []
         self.video_done = threading.Event()
@@ -95,9 +102,9 @@ class EpisodeBuffer:
         with self.lock:
             self.camera_rows.append(row)
 
-    def append_leader(self, row: dict[str, object]) -> None:
+    def append_leader_hand(self, row: dict[str, object]) -> None:
         with self.lock:
-            self.leader_rows.append(row)
+            self.leader_hand_rows.append(row)
 
     def append_follower(self, row: dict[str, object]) -> None:
         with self.lock:
@@ -121,26 +128,31 @@ class EpisodeBuffer:
         self.paths.episode_dir.mkdir(parents=True, exist_ok=True)
         with self.lock:
             camera_rows = list(self.camera_rows)
-            leader_rows = list(self.leader_rows)
+            leader_hand_rows = list(self.leader_hand_rows)
             follower_rows = list(self.follower_rows)
             piper_rows = list(self.piper_rows)
         write_csv(self.paths.camera_timestamps_path, camera_rows)
-        write_csv(self.paths.leader_path, leader_rows)
-        write_csv(self.paths.follower_path, follower_rows)
+        write_csv(self.paths.leader_hand_path, leader_hand_rows)
+        if getattr(self.config, "follower_hand_config", None) is not None:
+            write_csv(self.paths.follower_path, follower_rows)
         write_csv(self.paths.piper_path, piper_rows)
         write_json(
             self.paths.metadata_path,
-            self._metadata(camera_rows, leader_rows, follower_rows, piper_rows),
+            self._metadata(camera_rows, leader_hand_rows, follower_rows, piper_rows),
         )
 
     def _metadata(
         self,
         camera_rows: list[dict[str, object]],
-        leader_rows: list[dict[str, object]],
+        leader_hand_rows: list[dict[str, object]],
         follower_rows: list[dict[str, object]],
         piper_rows: list[dict[str, object]],
     ) -> dict[str, Any]:
         stop_ns = self.stop_ns or time.monotonic_ns()
+        follower_config = getattr(self.config, "follower_hand_config", None)
+        follower_port = getattr(self.config, "follower_hand_port", None)
+        has_camera = hasattr(self.config, "task_camera_width")
+        has_piper = hasattr(self.config, "piper_rate_hz")
         return {
             "episode_index": self.paths.episode_index,
             "status": "complete" if not self.errors else "error",
@@ -154,38 +166,55 @@ class EpisodeBuffer:
             "paths": {
                 "camera_mp4": self.paths.camera_path.name,
                 "camera_timestamps_csv": self.paths.camera_timestamps_path.name,
-                "trimorph_leader_csv": self.paths.leader_path.name,
-                "trimorph_follower_csv": self.paths.follower_path.name,
+                "leader_hand_csv": self.paths.leader_hand_path.name,
+                "follower_csv": (
+                    self.paths.follower_path.name
+                    if follower_config is not None
+                    else None
+                ),
                 "piper_csv": self.paths.piper_path.name,
             },
             "counts": {
                 "camera_frames": len(camera_rows),
-                "leader_samples": len(leader_rows),
+                "leader_hand_samples": len(leader_hand_rows),
                 "follower_samples": len(follower_rows),
                 "piper_samples": len(piper_rows),
             },
             "camera": {
-                "device": "oak1_depthai",
-                "width": self.config.task_camera_width,
-                "height": self.config.task_camera_height,
-                "fps": self.config.task_camera_fps,
-                "flip": self.config.task_camera_flip,
+                "device": "oak1_depthai" if has_camera else None,
+                "width": getattr(self.config, "task_camera_width", None),
+                "height": getattr(self.config, "task_camera_height", None),
+                "fps": getattr(self.config, "task_camera_fps", None),
+                "flip": getattr(self.config, "task_camera_flip", None),
             },
             "trimorph": {
                 "motor_ids": list(TRIMORPH_MOTOR_IDS),
-                "leader": _hand_metadata(self.config.leader_hand_config, self.config.leader_hand_port),
-                "follower": _hand_metadata(self.config.follower_hand_config, self.config.follower_hand_port),
-                "leader_measure_rate_hz": self.config.leader_measure_rate_hz,
-                "follower_measure_rate_hz": self.config.follower_measure_rate_hz,
-                "follower_command_rate_hz": self.config.follower_command_rate_hz,
-                "command_scale": self.config.follower_command_scale,
-                "interpolation_alpha": self.config.follower_interpolation_alpha,
-                "max_step_rad": self.config.follower_max_step_rad,
-                "training_uses": "measured follower positions from trimorph.csv",
+                "active_motors": list(self.config.active_motors),
+                "hand": _hand_metadata(self.config.hand_config, self.config.hand_port),
+                "measure_rate_hz": self.config.hand_measure_rate_hz,
+                "training_uses": "measured positions from leader_hand.csv",
+            },
+            "follower": {
+                "enabled": follower_config is not None,
+                "hand": (
+                    _hand_metadata(follower_config, follower_port)
+                    if follower_config is not None and follower_port is not None
+                    else None
+                ),
+                "measure_rate_hz": getattr(self.config, "follower_measure_rate_hz", None),
+                "command_rate_hz": getattr(self.config, "follower_command_rate_hz", None),
+                "command_scale": getattr(self.config, "follower_command_scale", None),
+                "joint_command_scales": getattr(
+                    self.config, "follower_joint_command_scales", None
+                ),
+                "interpolation_alpha": getattr(
+                    self.config, "follower_interpolation_alpha", None
+                ),
+                "max_step_rad": getattr(self.config, "follower_max_step_rad", None),
             },
             "piper": {
-                "mode": "passive_drag_teach_logging",
-                "target_rate_hz": self.config.piper_rate_hz,
+                "mode": "passive_drag_teach_logging" if has_piper else None,
+                "target_rate_hz": getattr(self.config, "piper_rate_hz", None),
                 "raw_eef_fields": list(RAW_EEF_FIELDS),
             },
             "errors": self.errors,

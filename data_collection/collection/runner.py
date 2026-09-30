@@ -11,8 +11,8 @@ from .config import CollectionConfig
 from .depthai_task_camera_worker import run_depthai_task_camera_worker
 from .episode import EpisodeBuffer, RecordingManager, episode_paths, next_episode_index, raw_root
 from .follower_hand_worker import run_follower_hand_worker
-from .leader_hand_worker import run_leader_hand_worker
 from .piper_worker import run_piper_worker
+from .leader_hand_worker import run_leader_hand_worker
 from .shared_state import SharedState
 from .utils import WorkerError, import_cv2, worker_wrapper
 
@@ -24,21 +24,26 @@ _ORANGE = "\033[38;5;214m"
 _RESET = "\033[0m"
 
 
+def worker_specs(config: CollectionConfig):
+    specs = [
+        ("task_camera", run_depthai_task_camera_worker),
+        ("piper", run_piper_worker),
+        ("leader_hand", run_leader_hand_worker),
+    ]
+    if config.follower_hand_config is not None:
+        specs.append(("follower", run_follower_hand_worker))
+    return specs
+
+
 def start_workers(
     config: CollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
     errors: queue.Queue[WorkerError],
 ) -> list[threading.Thread]:
-    specs = [
-        ("task_camera", run_depthai_task_camera_worker),
-        ("piper", run_piper_worker),
-        ("trimorph_leader", run_leader_hand_worker),
-        ("trimorph_follower", run_follower_hand_worker),
-    ]
     threads: list[threading.Thread] = []
     try:
-        for name, target in specs:
+        for name, target in worker_specs(config):
             init_done = threading.Event()
             thread = threading.Thread(
                 target=worker_wrapper,
@@ -72,12 +77,14 @@ def _rate_hz(rows: list[dict[str, object]]) -> float:
 def _print_episode_summary(session: EpisodeBuffer) -> None:
     duration_s = ((session.stop_ns or time.monotonic_ns()) - session.start_ns) / 1e9
     print(f"Saved episode {session.paths.episode_index:06d}: duration {duration_s:.3f}s")
-    for name, rows, unit in (
-        ("OAK camera", session.camera_rows, "frames"),
-        ("TRIMORPH leader", session.leader_rows, "samples"),
-        ("TRIMORPH follower", session.follower_rows, "samples"),
+    streams = [
+        ("TRIMORPH leader hand", session.leader_hand_rows, "samples"),
         ("Piper", session.piper_rows, "samples"),
-    ):
+    ]
+    streams.insert(0, ("OAK camera", session.camera_rows, "frames"))
+    if session.config.follower_hand_config is not None:
+        streams.insert(-1, ("Follower MIDAS", session.follower_rows, "samples"))
+    for name, rows, unit in streams:
         print(f"  {name}: {len(rows)} {unit}, active rate {_rate_hz(rows):.2f} Hz")
 
 

@@ -8,3 +8,5 @@ data_trimorph*/
 config/leader_hand.yaml
 config/follower_hand.yaml
 hand_recording.csv
+output/
+*.csv

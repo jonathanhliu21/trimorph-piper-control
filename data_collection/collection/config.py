@@ -1,12 +1,34 @@
 from __future__ import annotations
 
 import importlib.util
-from dataclasses import dataclass, replace
+import math
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Mapping, Sequence
 
 
 TRIMORPH_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
+FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
+FOLLOWER_PROFILE_ACCELERATION_RAD_S2 = 50.0
+
+
+def default_follower_joint_command_scales() -> dict[int, float]:
+    """Return unity command scales keyed by TRIMORPH motor ID."""
+
+    return {motor_id: 1.0 for motor_id in TRIMORPH_MOTOR_IDS}
+
+
+def joint_command_scales_for_motor_ids(
+    scales: Mapping[int, float], motor_ids: Sequence[int]
+) -> tuple[float, ...]:
+    """Resolve motor-ID keyed scales in command-vector order.
+
+    Unspecified motor IDs retain unity scaling, which keeps custom or partial
+    follower configurations backward compatible.
+    """
+
+    return tuple(float(scales.get(int(motor_id), 1.0)) for motor_id in motor_ids)
 
 
 @dataclass(frozen=True)
@@ -20,11 +42,11 @@ class CollectionConfig:
     task_camera_fps: int
     task_camera_flip: str
     video_codec: str
-    leader_hand_config: Path
-    leader_hand_port: str
-    leader_measure_rate_hz: float
-    follower_hand_config: Path
-    follower_hand_port: str
+    hand_config: Path
+    hand_port: str
+    hand_measure_rate_hz: float
+    follower_hand_config: Path | None
+    follower_hand_port: str | None
     follower_measure_rate_hz: float
     follower_command_rate_hz: float
     follower_configure_hardware: bool
@@ -41,6 +63,12 @@ class CollectionConfig:
     foot_pedal_device: str | None
     foot_pedal_key_code: int | None
     foot_pedal_debounce_seconds: float
+    active_motors: list[int] = field(
+        default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
+    )
+    follower_joint_command_scales: dict[int, float] = field(
+        default_factory=default_follower_joint_command_scales
+    )
 
 
 def _module_available(name: str) -> bool:
@@ -61,11 +89,11 @@ def build_config() -> CollectionConfig:
         task_camera_fps=30,
         task_camera_flip="none",
         video_codec="mp4v",
-        leader_hand_config=Path("config/leader_hand.yaml"),
-        leader_hand_port="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_LEADER",
-        leader_measure_rate_hz=100.0,
-        follower_hand_config=Path("config/follower_hand.yaml"),
-        follower_hand_port="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_FOLLOWER",
+        hand_config=Path("config/hand.yaml"),
+        hand_port="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND",
+        hand_measure_rate_hz=100.0,
+        follower_hand_config=None,
+        follower_hand_port=None,
         follower_measure_rate_hz=200.0,
         follower_command_rate_hz=50.0,
         follower_configure_hardware=True,
@@ -82,6 +110,7 @@ def build_config() -> CollectionConfig:
         foot_pedal_device=None,
         foot_pedal_key_code=None,
         foot_pedal_debounce_seconds=0.5,
+        follower_joint_command_scales=default_follower_joint_command_scales(),
     )
 
 
@@ -89,8 +118,8 @@ def apply_overrides(
     config: CollectionConfig,
     *,
     dataset_root: str | None = None,
-    leader_config: str | None = None,
-    leader_port: str | None = None,
+    hand_config: str | None = None,
+    hand_port: str | None = None,
     follower_config: str | None = None,
     follower_port: str | None = None,
     foot_pedal_device: str | None = None,
@@ -98,10 +127,10 @@ def apply_overrides(
     updates: dict[str, object] = {}
     if dataset_root is not None:
         updates["dataset_root"] = Path(dataset_root).expanduser()
-    if leader_config is not None:
-        updates["leader_hand_config"] = Path(leader_config).expanduser()
-    if leader_port is not None:
-        updates["leader_hand_port"] = leader_port
+    if hand_config is not None:
+        updates["hand_config"] = Path(hand_config).expanduser()
+    if hand_port is not None:
+        updates["hand_port"] = hand_port
     if follower_config is not None:
         updates["follower_hand_config"] = Path(follower_config).expanduser()
     if follower_port is not None:
@@ -114,9 +143,7 @@ def apply_overrides(
 def validate_config(config: CollectionConfig, *, require_runtime_modules: bool = True) -> None:
     for name, value in {
         "READY_SECONDS": config.ready_seconds,
-        "LEADER_MEASURE_RATE_HZ": config.leader_measure_rate_hz,
-        "FOLLOWER_MEASURE_RATE_HZ": config.follower_measure_rate_hz,
-        "FOLLOWER_COMMAND_RATE_HZ": config.follower_command_rate_hz,
+        "HAND_MEASURE_RATE_HZ": config.hand_measure_rate_hz,
         "PIPER_RATE_HZ": config.piper_rate_hz,
         "TEACHER_MODE_POLL_HZ": config.teacher_mode_poll_hz,
     }.items():
@@ -130,26 +157,46 @@ def validate_config(config: CollectionConfig, *, require_runtime_modules: bool =
         raise ValueError("VIDEO_CODEC must be a 4-character fourcc")
     if config.piper_firmware not in {"default", "v183", "v188"}:
         raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
-    for label, port in (("leader", config.leader_hand_port), ("follower", config.follower_hand_port)):
-        if not port or "REPLACE_WITH" in port:
-            raise ValueError(f"Set an explicit TRIMORPH {label} hand serial port")
-    if config.leader_hand_port == config.follower_hand_port:
-        raise ValueError("Leader and follower hand ports must be different")
-    for label, path in (("leader", config.leader_hand_config), ("follower", config.follower_hand_config)):
-        if not path.is_file():
-            raise FileNotFoundError(f"TRIMORPH {label} hand config not found: {path}")
-    if not 0.0 < config.follower_interpolation_alpha <= 1.0:
-        raise ValueError("FOLLOWER_INTERPOLATION_ALPHA must be in (0, 1]")
-    if config.follower_max_step_rad < 0:
-        raise ValueError("FOLLOWER_MAX_STEP_RAD must be non-negative")
+    if not config.hand_port or "REPLACE_WITH" in config.hand_port:
+        raise ValueError("Set an explicit TRIMORPH hand serial port")
+    if not config.hand_config.is_file():
+        raise FileNotFoundError(f"TRIMORPH hand config not found: {config.hand_config}")
+    if config.follower_hand_config is None:
+        if config.follower_hand_port is not None:
+            raise ValueError("--follower-port requires --follower-config")
+    else:
+        if not config.follower_hand_port or "REPLACE_WITH" in config.follower_hand_port:
+            raise ValueError("Set an explicit follower hand serial port")
+        if config.hand_port == config.follower_hand_port:
+            raise ValueError("Primary and follower hand ports must be different")
+        if not config.follower_hand_config.is_file():
+            raise FileNotFoundError(
+                f"Follower hand config not found: {config.follower_hand_config}"
+            )
+        if config.follower_measure_rate_hz <= 0:
+            raise ValueError("FOLLOWER_MEASURE_RATE_HZ must be greater than 0")
+        if config.follower_command_rate_hz <= 0:
+            raise ValueError("FOLLOWER_COMMAND_RATE_HZ must be greater than 0")
+        if not math.isfinite(config.follower_command_scale):
+            raise ValueError("FOLLOWER_COMMAND_SCALE must be finite")
+        if not all(
+            math.isfinite(float(scale))
+            for scale in config.follower_joint_command_scales.values()
+        ):
+            raise ValueError("FOLLOWER_JOINT_COMMAND_SCALES must contain finite values")
+        if not 0.0 < config.follower_interpolation_alpha <= 1.0:
+            raise ValueError("FOLLOWER_INTERPOLATION_ALPHA must be in (0, 1]")
+        if config.follower_max_step_rad < 0:
+            raise ValueError("FOLLOWER_MAX_STEP_RAD must be non-negative")
     if config.foot_pedal_debounce_seconds < 0:
         raise ValueError("FOOT_PEDAL_DEBOUNCE_SECONDS must be non-negative")
     if require_runtime_modules:
-        for module, install_hint in (
+        modules = (
             ("depthai", "depthai"),
             ("cv2", "opencv-python"),
             ("midas_hand_api", "an editable install of ../trimorph_hand_api"),
             ("pyAgxArm", "the PiperX vendor Python package"),
-        ):
+        )
+        for module, install_hint in modules:
             if not _module_available(module):
                 raise RuntimeError(f"Missing {module!r}; install {install_hint}")

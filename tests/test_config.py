@@ -3,38 +3,73 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from collection.config import build_config, validate_config
+from collection.config import (
+    TRIMORPH_MOTOR_IDS,
+    build_config,
+    joint_command_scales_for_motor_ids,
+    validate_config,
+)
 
 
 class ConfigTests(unittest.TestCase):
-    def _config(self, directory: Path, *, same_port: bool):
-        leader = directory / "leader.yaml"
-        follower = directory / "follower.yaml"
-        leader.write_text("motor_model: xl330-m077-t\n", encoding="utf-8")
-        follower.write_text("motor_model: xl330-m077-t\n", encoding="utf-8")
+    def test_joint_command_scales_default_to_unity(self):
+        config = build_config()
+
+        self.assertEqual(
+            config.follower_joint_command_scales,
+            {motor_id: 1.0 for motor_id in TRIMORPH_MOTOR_IDS},
+        )
+
+    def test_joint_command_scales_follow_motor_id_order(self):
+        scales = joint_command_scales_for_motor_ids({4: 0.5, 6: 1.5}, (6, 5, 4))
+
+        self.assertEqual(scales, (1.5, 1.0, 0.5))
+
+    def _config(self, directory: Path, *, follower: bool, same_port: bool = False):
+        hand = directory / "hand.yaml"
+        follower_path = directory / "follower.yaml"
+        hand.write_text("motor_model: xl330-m077-t\n", encoding="utf-8")
+        follower_path.write_text("motor_model: xl330-m077-t\n", encoding="utf-8")
         return replace(
             build_config(),
-            leader_hand_config=leader,
-            follower_hand_config=follower,
-            leader_hand_port="/dev/leader",
-            follower_hand_port="/dev/leader" if same_port else "/dev/follower",
+            hand_config=hand,
+            hand_port="/dev/hand",
+            follower_hand_config=follower_path if follower else None,
+            follower_hand_port=(
+                ("/dev/hand" if same_port else "/dev/follower") if follower else None
+            ),
         )
 
     def test_rejects_same_serial_port(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             with self.assertRaisesRegex(ValueError, "must be different"):
                 validate_config(
-                    self._config(Path(temp_dir), same_port=True),
+                    self._config(Path(temp_dir), follower=True, same_port=True),
                     require_runtime_modules=False,
                 )
 
     def test_accepts_distinct_explicit_hand_configs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             validate_config(
-                self._config(Path(temp_dir), same_port=False),
+                self._config(Path(temp_dir), follower=True),
                 require_runtime_modules=False,
             )
 
+    def test_accepts_omitted_follower(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            validate_config(
+                self._config(Path(temp_dir), follower=False),
+                require_runtime_modules=False,
+            )
+
+    def test_follower_port_alone_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = replace(
+                self._config(Path(temp_dir), follower=False),
+                follower_hand_port="/dev/follower",
+            )
+            with self.assertRaisesRegex(ValueError, "requires --follower-config"):
+                validate_config(config, require_runtime_modules=False)
 
 if __name__ == "__main__":
     unittest.main()

@@ -47,7 +47,7 @@ class RawEpisode:
     path: Path
     camera_path: Path
     camera_timestamps_path: Path
-    trimorph_path: Path
+    leader_hand_path: Path
     piper_path: Path
     metadata_path: Path
 
@@ -127,13 +127,17 @@ def discover_raw_episodes(config: PostprocessConfig) -> list[RawEpisode]:
         suffix = episode_dir.name.removeprefix("episode_")
         if not suffix.isdigit():
             continue
+        leader_hand_path = episode_dir / "leader_hand.csv"
+        legacy_path = episode_dir / "proprioception.csv"
+        if not leader_hand_path.exists() and legacy_path.exists():
+            leader_hand_path = legacy_path
         episode = RawEpisode(
             name=episode_dir.name,
             index=int(suffix),
             path=episode_dir,
             camera_path=episode_dir / "camera.mp4",
             camera_timestamps_path=episode_dir / "camera_timestamps.csv",
-            trimorph_path=episode_dir / "trimorph.csv",
+            leader_hand_path=leader_hand_path,
             piper_path=episode_dir / "piper.csv",
             metadata_path=episode_dir / "metadata.json",
         )
@@ -170,12 +174,12 @@ def load_camera_timestamps(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]
     return frame_idx, timestamps_ns
 
 
-def load_trimorph(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]:
-    rows = read_csv_rows(episode.trimorph_path)
+def load_leader_hand(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]:
+    rows = read_csv_rows(episode.leader_hand_path)
     if not rows:
-        raise ValueError(f"No TRIMORPH samples in {episode.trimorph_path}")
-    timestamps_ns = int_column(rows, "monotonic_ns", episode.trimorph_path)
-    require_monotonic_ns("TRIMORPH", timestamps_ns, episode.trimorph_path)
+        raise ValueError(f"No TRIMORPH leader-hand samples in {episode.leader_hand_path}")
+    timestamps_ns = int_column(rows, "monotonic_ns", episode.leader_hand_path)
+    require_monotonic_ns("TRIMORPH leader hand", timestamps_ns, episode.leader_hand_path)
 
     positions = []
     for row in rows:
@@ -339,7 +343,7 @@ def process_episode(config: PostprocessConfig, episode: RawEpisode) -> dict[str,
     required_paths = (
         episode.camera_path,
         episode.camera_timestamps_path,
-        episode.trimorph_path,
+        episode.leader_hand_path,
         episode.piper_path,
         episode.metadata_path,
     )
@@ -357,7 +361,7 @@ def process_episode(config: PostprocessConfig, episode: RawEpisode) -> dict[str,
     check_output_paths(out, config.overwrite_processed_files)
 
     frame_idx, camera_ns = load_camera_timestamps(episode)
-    hand, hand_ns = load_trimorph(episode)
+    hand, hand_ns = load_leader_hand(episode)
     eef, eef_ns = load_piper(episode)
     if config.trim_camera_frames > 0:
         t = config.trim_camera_frames
