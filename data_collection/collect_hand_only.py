@@ -55,7 +55,7 @@ class HandOnlyCollectionConfig:
             1: 1.0,
             2: 1.0,
             3: 1.0,
-            4: 0.5,
+            4: 0.20,
             5: 0.5,
             6: 1.0,
             7: 1.0,
