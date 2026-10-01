@@ -7,6 +7,7 @@ import numpy as np
 from .contact_detection import (
     CONTACT_MOTOR_IDS,
     CONTACT_THRESHOLD,
+    ContactStateMachine,
     contact_feedback,
     dynamic_contact_threshold,
 )
@@ -147,6 +148,9 @@ def run_follower_hand_worker(
         for index, motor_id in enumerate(hand.motor_ids)
         if int(motor_id) in CONTACT_MOTOR_IDS
     ]
+    contact_detectors = {
+        index: ContactStateMachine() for index in contact_indices
+    }
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
     try:
@@ -189,12 +193,23 @@ def run_follower_hand_worker(
                     next_command_ns += command_period_ns
 
             if now_ns >= next_read_ns:
-                positions = np.asarray(hand.read_pos(), dtype=np.float64)
+                positions, measured_velocities, _ = hand.read_pos_vel_cur()
+                positions = np.asarray(positions, dtype=np.float64)
+                measured_velocities = np.asarray(
+                    measured_velocities,
+                    dtype=np.float64,
+                )
                 sample_ns = time.monotonic_ns()
                 if positions.shape != (len(hand.motor_ids),) or not np.isfinite(
                     positions
                 ).all():
                     raise RuntimeError("Follower read returned an invalid motor vector")
+                if measured_velocities.shape != (
+                    len(hand.motor_ids),
+                ) or not np.isfinite(measured_velocities).all():
+                    raise RuntimeError(
+                        "Follower velocity read returned an invalid motor vector"
+                    )
                 if (
                     not contact_detection_armed
                     and latest_desired_target is not None
@@ -208,7 +223,7 @@ def run_follower_hand_worker(
                     print(
                         "Follower reached its initial target; contact detection armed"
                     )
-                adjusted_error = (
+                candidate_error = (
                     adjusted_follower_position_error(
                         hand.motor_ids,
                         last_command,
@@ -218,6 +233,20 @@ def run_follower_hand_worker(
                     if contact_detection_armed
                     else np.zeros_like(positions)
                 )
+                adjusted_error = np.zeros_like(candidate_error)
+                if contact_detection_armed:
+                    sample_time_s = sample_ns / 1e9
+                    for index, detector in contact_detectors.items():
+                        adjusted_error[index] = detector.update(
+                            commanded_velocity_rad_s=float(
+                                commanded_velocities[index]
+                            ),
+                            measured_velocity_rad_s=float(
+                                measured_velocities[index]
+                            ),
+                            candidate_feedback=float(candidate_error[index]),
+                            now_s=sample_time_s,
+                        )
                 shared.set_follower_position_error(adjusted_error)
                 if contact_indices and np.any(
                     adjusted_error[contact_indices] != 0.0
