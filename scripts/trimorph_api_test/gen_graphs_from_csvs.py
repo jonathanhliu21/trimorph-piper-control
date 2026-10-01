@@ -37,6 +37,25 @@ MOTOR_LABELS = {
 CURRENT_COLUMN = re.compile(r"^motor_(\d+)_current_ma$")
 
 
+def _differentiate_trials(
+    values: np.ndarray,
+    times: np.ndarray,
+    trials: np.ndarray,
+) -> np.ndarray:
+    """Numerically differentiate legacy telemetry independently per trial."""
+
+    velocities = np.zeros_like(values)
+    for trial in np.unique(trials):
+        indices = np.flatnonzero(trials == trial)
+        if len(indices) < 2:
+            continue
+        trial_times = times[indices]
+        if np.any(np.diff(trial_times) <= 0.0):
+            raise ValueError("elapsed_s must increase within each trial")
+        velocities[indices] = np.gradient(values[indices], trial_times)
+    return velocities
+
+
 def _load_telemetry(
     path: Path,
 ) -> tuple[np.ndarray, np.ndarray, dict[int, dict[str, np.ndarray]]]:
@@ -77,26 +96,43 @@ def _load_telemetry(
             else [1] * len(rows)
         )
         times = np.asarray([float(row["elapsed_s"]) for row in rows])
-        motors = {
-            motor_id: {
+        motors = {}
+        for motor_id in motor_ids:
+            target = np.asarray(
+                [
+                    float(row[f"motor_{motor_id}_target_position_rad"])
+                    for row in rows
+                ]
+            )
+            actual = np.asarray(
+                [
+                    float(row[f"motor_{motor_id}_actual_position_rad"])
+                    for row in rows
+                ]
+            )
+            target_velocity_column = f"motor_{motor_id}_target_velocity_rad_s"
+            actual_velocity_column = f"motor_{motor_id}_actual_velocity_rad_s"
+            motors[motor_id] = {
                 "current": np.asarray(
                     [float(row[f"motor_{motor_id}_current_ma"]) for row in rows]
                 ),
-                "target": np.asarray(
-                    [
-                        float(row[f"motor_{motor_id}_target_position_rad"])
-                        for row in rows
-                    ]
+                "target": target,
+                "actual": actual,
+                "target_velocity": (
+                    np.asarray(
+                        [float(row[target_velocity_column]) for row in rows]
+                    )
+                    if target_velocity_column in reader.fieldnames
+                    else _differentiate_trials(target, times, trials)
                 ),
-                "actual": np.asarray(
-                    [
-                        float(row[f"motor_{motor_id}_actual_position_rad"])
-                        for row in rows
-                    ]
+                "actual_velocity": (
+                    np.asarray(
+                        [float(row[actual_velocity_column]) for row in rows]
+                    )
+                    if actual_velocity_column in reader.fieldnames
+                    else _differentiate_trials(actual, times, trials)
                 ),
             }
-            for motor_id in motor_ids
-        }
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path}: contains a non-numeric telemetry value") from exc
     if np.any(trials <= 0):
@@ -185,16 +221,17 @@ def _generate_graph(
 
     telemetry = [_load_telemetry(path) for path in csv_paths]
     figure, axes = plt.subplots(
-        2,
+        3,
         len(csv_paths),
         squeeze=False,
-        figsize=(8 * len(csv_paths), 7),
+        figsize=(8 * len(csv_paths), 10),
         sharex="col",
     )
 
     for column, (trials, times, motors) in enumerate(telemetry):
         current_axis = axes[0, column]
         position_axis = axes[1, column]
+        velocity_axis = axes[2, column]
         if combine_mode == "sequential":
             plot_times, plot_motors = _sequential_trials(trials, times, motors)
             for motor_id, values in plot_motors.items():
@@ -215,6 +252,21 @@ def _generate_graph(
                 position_axis.plot(
                     plot_times,
                     values["actual"],
+                    color=line.get_color(),
+                    linewidth=1.8,
+                    label=f"{label} (ID {motor_id}) actual",
+                )
+                velocity_axis.plot(
+                    plot_times,
+                    values["target_velocity"],
+                    color=line.get_color(),
+                    linestyle="--",
+                    alpha=0.45,
+                    label=f"{label} (ID {motor_id}) target",
+                )
+                velocity_axis.plot(
+                    plot_times,
+                    values["actual_velocity"],
                     color=line.get_color(),
                     linewidth=1.8,
                     label=f"{label} (ID {motor_id}) actual",
@@ -262,6 +314,33 @@ def _generate_graph(
                     alpha=0.2,
                     label=f"{label} actual ±1 SD",
                 )
+                target_velocity_mean, _ = values["target_velocity"]
+                actual_velocity_mean, actual_velocity_std = values[
+                    "actual_velocity"
+                ]
+                velocity_axis.plot(
+                    plot_times,
+                    target_velocity_mean,
+                    color=line.get_color(),
+                    linestyle="--",
+                    alpha=0.45,
+                    label=f"{label} (ID {motor_id}) target mean",
+                )
+                velocity_axis.plot(
+                    plot_times,
+                    actual_velocity_mean,
+                    color=line.get_color(),
+                    linewidth=1.8,
+                    label=f"{label} (ID {motor_id}) actual mean",
+                )
+                velocity_axis.fill_between(
+                    plot_times,
+                    actual_velocity_mean - actual_velocity_std,
+                    actual_velocity_mean + actual_velocity_std,
+                    color=line.get_color(),
+                    alpha=0.2,
+                    label=f"{label} actual ±1 SD",
+                )
 
         current_axis.set_title(
             f"{titles[column]}\nMotor current during movement",
@@ -271,10 +350,14 @@ def _generate_graph(
         current_axis.grid(True, alpha=0.3)
         current_axis.legend()
         position_axis.set_title("Commanded and actual position")
-        position_axis.set_xlabel("Time since movement began (s)")
         position_axis.set_ylabel("Position (rad)")
         position_axis.grid(True, alpha=0.3)
         position_axis.legend()
+        velocity_axis.set_title("Commanded and actual velocity")
+        velocity_axis.set_xlabel("Time since movement began (s)")
+        velocity_axis.set_ylabel("Velocity (rad/s)")
+        velocity_axis.grid(True, alpha=0.3)
+        velocity_axis.legend()
 
     output = output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -90,7 +90,8 @@ MEASUREMENT_POSITIONS_RAD = {
     5: -0.5,  # Index MCP flex
     6: -0.5,  # Index MCP abduct
 }
-CONTACT_THRESHOLD = 0.07  # rad
+CONTACT_THRESHOLD = 0.05  # rad
+CONTACT_VELOCITY_ERROR_GAIN_S = 0.035  # rad threshold / (rad/s)
 CONTACT_VIRTUAL_SPRING_STIFFNESS = 1.0  # feedback units / rad
 
 
@@ -108,29 +109,55 @@ class _CurrentRecorder:
         self.currents_ma: list[list[float]] = []
         self.target_positions_rad: list[list[float]] = []
         self.actual_positions_rad: list[list[float]] = []
+        self.target_velocities_rad_s: list[list[float]] = []
+        self.actual_velocities_rad_s: list[list[float]] = []
+        self._previous_time_s: Optional[float] = None
+        self._previous_targets: Optional[np.ndarray] = None
 
     def start_trial(self, trial: int) -> None:
         self._trial = trial
         self._start_time = None
+        self._previous_time_s = None
+        self._previous_targets = None
 
     def sample(
         self,
         target_positions_rad: Sequence[float],
         elapsed_s: Optional[float] = None,
+        target_velocities_rad_s: Optional[Sequence[float]] = None,
     ) -> np.ndarray:
         now = time.monotonic()
         if self._start_time is None:
             self._start_time = now
-        actual_positions, _, currents = self._hand.read_pos_vel_cur()
+        sample_time_s = now - self._start_time if elapsed_s is None else elapsed_s
+        targets = np.asarray(target_positions_rad, dtype=float)
+        if target_velocities_rad_s is None:
+            if self._previous_time_s is None or self._previous_targets is None:
+                target_velocities = np.zeros_like(targets)
+            else:
+                delta_t = sample_time_s - self._previous_time_s
+                target_velocities = (targets - self._previous_targets) / delta_t
+        else:
+            target_velocities = np.asarray(target_velocities_rad_s, dtype=float)
+
+        actual_positions, actual_velocities, currents = self._hand.read_pos_vel_cur()
         self.trials.append(self._trial)
-        self.times_s.append(now - self._start_time if elapsed_s is None else elapsed_s)
+        self.times_s.append(sample_time_s)
         self.currents_ma.append([float(currents[index]) for index in self._indices])
         self.target_positions_rad.append(
-            [float(target_positions_rad[index]) for index in self._indices]
+            [float(targets[index]) for index in self._indices]
         )
         self.actual_positions_rad.append(
             [float(actual_positions[index]) for index in self._indices]
         )
+        self.target_velocities_rad_s.append(
+            [float(target_velocities[index]) for index in self._indices]
+        )
+        self.actual_velocities_rad_s.append(
+            [float(actual_velocities[index]) for index in self._indices]
+        )
+        self._previous_time_s = sample_time_s
+        self._previous_targets = np.array(targets, copy=True)
         return actual_positions
 
 
@@ -147,6 +174,8 @@ def _output_current_csv(recorder: _CurrentRecorder, output: Path) -> None:
                 f"motor_{motor_id}_current_ma",
                 f"motor_{motor_id}_target_position_rad",
                 f"motor_{motor_id}_actual_position_rad",
+                f"motor_{motor_id}_target_velocity_rad_s",
+                f"motor_{motor_id}_actual_velocity_rad_s",
             )
         )
 
@@ -161,6 +190,8 @@ def _output_current_csv(recorder: _CurrentRecorder, output: Path) -> None:
                         recorder.currents_ma[sample_index][motor_index],
                         recorder.target_positions_rad[sample_index][motor_index],
                         recorder.actual_positions_rad[sample_index][motor_index],
+                        recorder.target_velocities_rad_s[sample_index][motor_index],
+                        recorder.actual_velocities_rad_s[sample_index][motor_index],
                     )
                 )
             writer.writerow(row)
@@ -342,11 +373,23 @@ def _selected_motor_ids(
     return tuple(selected)
 
 
-def _contact_feedback(position_errors: Sequence[float]) -> np.ndarray:
+def _dynamic_contact_threshold(
+    commanded_velocities_rad_s: Sequence[float],
+) -> np.ndarray:
+    """Increase the contact threshold by expected velocity tracking lag."""
+
+    velocities = np.asarray(commanded_velocities_rad_s, dtype=float)
+    return CONTACT_THRESHOLD + CONTACT_VELOCITY_ERROR_GAIN_S * np.abs(velocities)
+
+
+def _contact_feedback(
+    position_errors: Sequence[float],
+    thresholds: float | Sequence[float] = CONTACT_THRESHOLD,
+) -> np.ndarray:
     """Return signed virtual-spring feedback beyond the contact deadband."""
 
     errors = np.asarray(position_errors, dtype=float)
-    contact_excess = np.maximum(np.abs(errors) - CONTACT_THRESHOLD, 0.0)
+    contact_excess = np.maximum(np.abs(errors) - thresholds, 0.0)
     return CONTACT_VIRTUAL_SPRING_STIFFNESS * np.sign(errors) * contact_excess
 
 
@@ -418,6 +461,11 @@ def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
 
                     target = np.array(hold_position, copy=True)
                     target[motor_index] = close_angle
+                    target_velocity = np.zeros_like(target)
+                    target_velocity[motor_index] = (
+                        np.sign(close_angle - hold_position[motor_index])
+                        * args.profile_velocity_rad_s
+                    )
                     hand.set_positions(target)
                     _wait_for_motor(
                         hand,
@@ -426,12 +474,19 @@ def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
                         args.timeout_s,
                         None
                         if current_recorder is None
-                        else lambda: current_recorder.sample(target),
+                        else lambda: current_recorder.sample(
+                            target,
+                            target_velocities_rad_s=target_velocity,
+                        ),
                         args.skip_target_safety,
                     )
                     time.sleep(args.pause_s)
 
                     target[motor_index] = open_angle
+                    target_velocity[motor_index] = (
+                        np.sign(open_angle - close_angle)
+                        * args.profile_velocity_rad_s
+                    )
                     hand.set_positions(target)
                     _wait_for_motor(
                         hand,
@@ -440,7 +495,10 @@ def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
                         args.timeout_s,
                         None
                         if current_recorder is None
-                        else lambda: current_recorder.sample(target),
+                        else lambda: current_recorder.sample(
+                            target,
+                            target_velocities_rad_s=target_velocity,
+                        ),
                         args.skip_target_safety,
                     )
                     time.sleep(args.pause_s)
@@ -498,8 +556,12 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
         )
     )
     print(
-        f"Contact feedback   = print when |target - measured| exceeds "
-        f"{CONTACT_THRESHOLD:g} rad; virtual spring stiffness = "
+        f"Contact threshold  = {CONTACT_THRESHOLD:g} rad + "
+        f"{CONTACT_VELOCITY_ERROR_GAIN_S:g}s * |commanded velocity|"
+    )
+    print(
+        "Contact feedback   = signed error beyond the dynamic threshold; "
+        "virtual spring stiffness = "
         f"{CONTACT_VIRTUAL_SPRING_STIFFNESS:g} feedback units/rad"
     )
     _confirm_motion("Stream move testing", args.yes)
@@ -564,25 +626,41 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
             if current_recorder is not None:
                 current_recorder.start_trial(trial)
             target = np.array(open_target, copy=True)
+            previous_target = np.array(target, copy=True)
+            previous_sample_t: Optional[float] = None
             start_t = time.monotonic()
             for tick, (sample_t, angles_rad) in enumerate(zip(sample_times, samples)):
                 target[selected_indices] = angles_rad
+                commanded_velocities = np.zeros_like(target)
+                if previous_sample_t is not None:
+                    sample_dt = float(sample_t) - previous_sample_t
+                    commanded_velocities = (target - previous_target) / sample_dt
                 hand.set_positions(target)
                 if current_recorder is not None:
                     actual_positions = current_recorder.sample(
                         target,
                         float(sample_t),
+                        target_velocities_rad_s=commanded_velocities,
                     )
                 else:
                     actual_positions = hand.read_pos()
 
-                feedback = _contact_feedback(target - actual_positions)
+                dynamic_thresholds = _dynamic_contact_threshold(
+                    commanded_velocities
+                )
+                feedback = _contact_feedback(
+                    target - actual_positions,
+                    dynamic_thresholds,
+                )
                 if np.any(feedback[selected_indices] != 0.0):
                     _print_selected_values(
                         time.monotonic() - start_t,
                         feedback,
                         selected_indices,
                     )
+
+                previous_target = np.array(target, copy=True)
+                previous_sample_t = float(sample_t)
 
                 if tick + 1 < len(samples):
                     next_tick_t = start_t + float(sample_times[tick + 1])
@@ -622,13 +700,17 @@ def _run_record(args: argparse.Namespace, config: HandConfig) -> None:
         _verify_bus(hand)
         hand.disable_torque()
         print("Torque is disabled. Move the joints manually; press Ctrl-C to stop.")
-        print(f"Recording calibrated actuator angles to {output}")
+        print(f"Recording calibrated actuator angles and velocities to {output}")
 
         with output.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
             writer.writerow(
                 ["elapsed_s", "unix_time_s"]
                 + [f"motor_{motor_id}_rad" for motor_id in record_motor_ids]
+                + [
+                    f"motor_{motor_id}_velocity_rad_s"
+                    for motor_id in record_motor_ids
+                ]
             )
             next_sample = time.monotonic()
             while (
@@ -639,10 +721,11 @@ def _run_record(args: argparse.Namespace, config: HandConfig) -> None:
                 if now < next_sample:
                     time.sleep(next_sample - now)
                 elapsed = time.monotonic() - start_monotonic
-                positions = hand.read_pos()
+                positions, velocities, _ = hand.read_pos_vel_cur()
                 writer.writerow(
                     [elapsed, time.time()]
                     + [float(positions[index]) for index in record_indices]
+                    + [float(velocities[index]) for index in record_indices]
                 )
                 stream.flush()
                 sample_count += 1
@@ -1037,6 +1120,12 @@ def _add_output_current_argument(parser: argparse.ArgumentParser) -> None:
             "optionally provide an output path (default: output/current.csv)"
         ),
     )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Overwrite the --output-current path if it already exists",
+    )
 
 
 def main() -> None:
@@ -1047,6 +1136,15 @@ def main() -> None:
     if args.command in ("profile_move", "profile_move_sequential", "stream_move"):
         if args.trials <= 0:
             parser.error("--trials must be positive")
+        if (
+            args.output_current is not None
+            and args.output_current.expanduser().exists()
+            and not args.force
+        ):
+            parser.error(
+                f"output current path already exists: {args.output_current}; "
+                "use -f or --force to overwrite it"
+            )
     if args.command == "record":
         if args.output.expanduser().exists() and not args.force:
             parser.error(
