@@ -1,5 +1,11 @@
 placeholders_unreviewed: false
 baudrate: 1000000
+position_p_gain: 800
+position_i_gain: 0
+position_d_gain: 500
+# position_p_gain: 500
+# position_i_gain: 0
+# position_d_gain: 300
 motor_ids:
 # - 0
 # - 1

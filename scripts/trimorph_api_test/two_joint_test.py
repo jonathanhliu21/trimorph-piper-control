@@ -12,6 +12,8 @@ Run from the repository root, for example:
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py profile_move_sequential
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py profile_move --motors 4
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py stream_move --motors 4,5
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_current --motors 4,5
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_position_error --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py home
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
         home --joints 4
@@ -82,6 +84,7 @@ PROFILE_MOVE_TIMEOUT_S = 4.0
 STREAM_MOVE_RATE_HZ = 30.0
 STREAM_MOVE_DURATION_S = 2.0
 STREAM_MOVE_SETTLE_S = 0.5
+MEASURE_CURRENT_POSITION = -0.5
 
 
 class _CurrentRecorder:
@@ -618,6 +621,94 @@ def _run_record(args: argparse.Namespace, config: HandConfig) -> None:
     print(f"Saved {sample_count} samples to {output}")
 
 
+def _run_continuous_measurement(
+    args: argparse.Namespace,
+    config: HandConfig,
+    *,
+    position_error: bool,
+) -> None:
+    """Move selected motors to the measurement pose and print samples until stopped."""
+
+    _require_reviewed_config(args.config)
+    measure_motor_ids = _selected_motor_ids(args, config)
+    for motor_id in measure_motor_ids:
+        _check_move_target(config, motor_id, MEASURE_CURRENT_POSITION)
+
+    print(f"Selected motor IDs = {list(measure_motor_ids)}")
+    print(f"Measurement position (rad) = {MEASURE_CURRENT_POSITION}")
+    measurement_name = "Position error" if position_error else "Current"
+    _confirm_motion(f"{measurement_name} measurement", args.yes)
+
+    hand = MidasHand(config, autoconnect=False)
+    try:
+        hand.connect()
+        _verify_bus(hand)
+        hand.configure(enable_torque=False)
+
+        # Establish a non-jumping goal for every configured motor before enabling
+        # only the motors selected for this measurement.
+        target = np.array(hand.read_pos(), copy=True)
+        measure_indices = [
+            hand.motor_ids.index(motor_id) for motor_id in measure_motor_ids
+        ]
+        target[measure_indices] = MEASURE_CURRENT_POSITION
+        hand.set_positions(target, clip=False)
+        hand.set_motion_profile(
+            profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
+            profile_acceleration_rad_s2=PROFILE_MOVE_ACCELERATION_RAD_S2,
+            motor_ids=measure_motor_ids,
+        )
+        hand.enable_torque(measure_motor_ids)
+        hand.set_positions(target)
+
+        for motor_id in measure_motor_ids:
+            _wait_for_motor(
+                hand,
+                motor_id,
+                MEASURE_CURRENT_POSITION,
+                args.timeout_s,
+            )
+
+        units = "rad" if position_error else "mA"
+        print(
+            f"{measurement_name} ({units}), motor IDs {list(measure_motor_ids)}. "
+            "Press Ctrl-C to stop."
+        )
+        sample_period = 1.0 / args.rate_hz
+        start_monotonic = time.monotonic()
+        next_sample = start_monotonic
+        while True:
+            now = time.monotonic()
+            if now < next_sample:
+                time.sleep(next_sample - now)
+            elapsed = time.monotonic() - start_monotonic
+            positions, _, currents = hand.read_pos_vel_cur()
+            values = target - positions if position_error else currents
+            formatted = "[{}]".format(
+                " ".join(
+                    f"{float(values[index]):8.3f}" for index in measure_indices
+                )
+            )
+            print(f"{elapsed:8.3f}s {formatted}")
+            next_sample += sample_period
+    except KeyboardInterrupt:
+        print(f"\n{measurement_name} measurement stopped by user.")
+    finally:
+        if hand.is_connected:
+            hand.shutdown()
+
+
+def _run_measure_current(args: argparse.Namespace, config: HandConfig) -> None:
+    _run_continuous_measurement(args, config, position_error=False)
+
+
+def _run_measure_position_error(
+    args: argparse.Namespace,
+    config: HandConfig,
+) -> None:
+    _run_continuous_measurement(args, config, position_error=True)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -759,7 +850,53 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Print every Nth sample; use 0 to disable",
     )
+
+    measure_current = commands.add_parser(
+        "measure_current",
+        help=(
+            "Move selected motors to MEASURE_CURRENT_POSITION and print currents"
+        ),
+    )
+    _add_measurement_arguments(measure_current, "Current")
+
+    measure_position_error = commands.add_parser(
+        "measure_position_error",
+        help=(
+            "Move selected motors to MEASURE_CURRENT_POSITION and print "
+            "target-minus-current position errors"
+        ),
+    )
+    _add_measurement_arguments(measure_position_error, "Position error")
     return parser
+
+
+def _add_measurement_arguments(
+    parser: argparse.ArgumentParser,
+    quantity: str,
+) -> None:
+    parser.add_argument(
+        "--motors",
+        type=_parse_motor_ids,
+        default=None,
+        help="Fixture motor IDs to measure (default: all configured motors)",
+    )
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=PROFILE_MOVE_TIMEOUT_S,
+        help="Timeout while moving each selected motor to the measurement position",
+    )
+    parser.add_argument(
+        "--rate-hz",
+        type=float,
+        default=20.0,
+        help=f"{quantity} sampling and print rate (default: 20 Hz)",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the MOVE prompt",
+    )
 
 
 def _add_profile_move_arguments(parser: argparse.ArgumentParser) -> None:
@@ -835,6 +972,11 @@ def main() -> None:
             parser.error("--duration-s must be positive")
         if args.print_every < 0:
             parser.error("--print-every must be non-negative")
+    elif args.command in ("measure_current", "measure_position_error"):
+        if args.timeout_s <= 0:
+            parser.error("--timeout-s must be positive")
+        if args.rate_hz <= 0:
+            parser.error("--rate-hz must be positive")
     elif args.command == "stream_move":
         if args.rate_hz <= 0:
             parser.error("--rate-hz must be positive")
@@ -858,8 +1000,12 @@ def main() -> None:
             _run_profile_move(args, config)
         elif args.command == "stream_move":
             _run_stream_move(args, config)
-        else:
+        elif args.command == "record":
             _run_record(args, config)
+        elif args.command == "measure_current":
+            _run_measure_current(args, config)
+        else:
+            _run_measure_position_error(args, config)
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         parser.exit(1, f"error: {exc}\n")
 
