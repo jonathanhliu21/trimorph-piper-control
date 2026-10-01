@@ -9,6 +9,7 @@ class SharedState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._latest_hand_target: np.ndarray | None = None
+        self._latest_follower_position_error: np.ndarray | None = None
         self._latest_task_bgr: np.ndarray | None = None
         self.shutdown = threading.Event()
 
@@ -22,6 +23,19 @@ class SharedState:
             if self._latest_hand_target is None:
                 return None
             return self._latest_hand_target.copy()
+
+    def set_follower_position_error(self, position_error: np.ndarray) -> None:
+        """Publish threshold-adjusted follower error in follower motor order."""
+
+        value = np.asarray(position_error, dtype=np.float64)
+        with self._lock:
+            self._latest_follower_position_error = value.copy()
+
+    def latest_follower_position_error(self) -> np.ndarray | None:
+        with self._lock:
+            if self._latest_follower_position_error is None:
+                return None
+            return self._latest_follower_position_error.copy()
 
     def set_task_frame(self, bgr: np.ndarray) -> None:
         with self._lock:

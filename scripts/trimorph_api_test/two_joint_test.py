@@ -46,7 +46,6 @@ from typing import Callable, Optional, Sequence
 import numpy as np
 import yaml
 
-
 from midas_hand_api import HandConfig, MidasHand, home_hand
 
 

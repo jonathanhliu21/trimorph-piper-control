@@ -4,6 +4,12 @@ import time
 
 import numpy as np
 
+from .contact_detection import (
+    CONTACT_MOTOR_IDS,
+    CONTACT_THRESHOLD,
+    contact_feedback,
+    dynamic_contact_threshold,
+)
 from .config import (
     FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
     FOLLOWER_PROFILE_VELOCITY_RAD_S,
@@ -13,6 +19,71 @@ from .config import (
 from .episode import EpisodeBuffer, RecordingManager
 from .hand_common import load_follower_config, verify_connected_hand
 from .shared_state import SharedState
+
+
+def adjusted_follower_position_error(
+    motor_ids,
+    target_positions,
+    measured_positions,
+    commanded_velocities_rad_s,
+) -> np.ndarray:
+    """Return contact-adjusted error for motors 4 and 5 in follower order."""
+
+    motor_ids = tuple(int(motor_id) for motor_id in motor_ids)
+    targets = np.asarray(target_positions, dtype=np.float64)
+    positions = np.asarray(measured_positions, dtype=np.float64)
+    commanded_velocities = np.asarray(
+        commanded_velocities_rad_s,
+        dtype=np.float64,
+    )
+    expected_shape = (len(motor_ids),)
+    if (
+        targets.shape != expected_shape
+        or positions.shape != expected_shape
+        or commanded_velocities.shape != expected_shape
+    ):
+        raise ValueError("Follower contact vectors must match the motor ID count")
+
+    adjusted_error = np.zeros(expected_shape, dtype=np.float64)
+    contact_indices = [
+        index
+        for index, motor_id in enumerate(motor_ids)
+        if motor_id in CONTACT_MOTOR_IDS
+    ]
+    if contact_indices:
+        thresholds = dynamic_contact_threshold(commanded_velocities)
+        position_errors = targets - positions
+        adjusted_error[contact_indices] = contact_feedback(
+            position_errors[contact_indices],
+            thresholds[contact_indices],
+        )
+    return adjusted_error
+
+
+def follower_contact_detection_ready(
+    motor_ids,
+    target_positions,
+    measured_positions,
+) -> bool:
+    """Return whether motors 4 and 5 have reached the initial target."""
+
+    motor_ids = tuple(int(motor_id) for motor_id in motor_ids)
+    targets = np.asarray(target_positions, dtype=np.float64)
+    positions = np.asarray(measured_positions, dtype=np.float64)
+    expected_shape = (len(motor_ids),)
+    if targets.shape != expected_shape or positions.shape != expected_shape:
+        raise ValueError("Follower target and position must match the motor ID count")
+    contact_indices = [
+        index
+        for index, motor_id in enumerate(motor_ids)
+        if motor_id in CONTACT_MOTOR_IDS
+    ]
+    return not contact_indices or bool(
+        np.all(
+            np.abs(targets[contact_indices] - positions[contact_indices])
+            <= CONTACT_THRESHOLD
+        )
+    )
 
 
 def prepare_follower_hand(hand, *, configure_hardware: bool) -> None:
@@ -68,6 +139,14 @@ def run_follower_hand_worker(
     command_period_ns = int(round(1_000_000_000 / config.follower_command_rate_hz))
     next_read_ns = time.monotonic_ns()
     next_command_ns = next_read_ns
+    commanded_velocities = np.zeros_like(last_command)
+    latest_desired_target: np.ndarray | None = None
+    contact_detection_armed = False
+    contact_indices = [
+        index
+        for index, motor_id in enumerate(hand.motor_ids)
+        if int(motor_id) in CONTACT_MOTOR_IDS
+    ]
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
     try:
@@ -75,10 +154,14 @@ def run_follower_hand_worker(
             now_ns = time.monotonic_ns()
             if now_ns >= next_command_ns:
                 target = shared.latest_hand_target()
+                commanded_velocities.fill(0.0)
                 if target is not None:
-                    if target.shape != (len(hand.motor_ids),) or not np.isfinite(target).all():
+                    if target.shape != (len(hand.motor_ids),) or not np.isfinite(
+                        target
+                    ).all():
                         raise RuntimeError(
-                            f"Primary hand target has shape {target.shape}, but follower "
+                            f"Primary hand target has shape {target.shape}, but "
+                            "follower "
                             f"expects ({len(hand.motor_ids)},)"
                         )
                     target = hand.clip_positions(
@@ -86,6 +169,7 @@ def run_follower_hand_worker(
                         * config.follower_command_scale
                         * joint_command_scales
                     )
+                    latest_desired_target = np.array(target, copy=True)
                     delta = target - last_command
                     delta *= config.follower_interpolation_alpha
                     if config.follower_max_step_rad > 0:
@@ -94,7 +178,11 @@ def run_follower_hand_worker(
                             -config.follower_max_step_rad,
                             config.follower_max_step_rad,
                         )
-                    last_command = hand.clip_positions(last_command + delta)
+                    next_command = hand.clip_positions(last_command + delta)
+                    commanded_velocities = (
+                        next_command - last_command
+                    ) / (command_period_ns / 1e9)
+                    last_command = next_command
                     hand.set_positions(last_command, clip=True)
                 next_command_ns += command_period_ns
                 while next_command_ns < now_ns:
@@ -103,8 +191,50 @@ def run_follower_hand_worker(
             if now_ns >= next_read_ns:
                 positions = np.asarray(hand.read_pos(), dtype=np.float64)
                 sample_ns = time.monotonic_ns()
-                if positions.shape != (len(hand.motor_ids),) or not np.isfinite(positions).all():
+                if positions.shape != (len(hand.motor_ids),) or not np.isfinite(
+                    positions
+                ).all():
                     raise RuntimeError("Follower read returned an invalid motor vector")
+                if (
+                    not contact_detection_armed
+                    and latest_desired_target is not None
+                    and follower_contact_detection_ready(
+                        hand.motor_ids,
+                        latest_desired_target,
+                        positions,
+                    )
+                ):
+                    contact_detection_armed = True
+                    print(
+                        "Follower reached its initial target; contact detection armed"
+                    )
+                adjusted_error = (
+                    adjusted_follower_position_error(
+                        hand.motor_ids,
+                        last_command,
+                        positions,
+                        commanded_velocities,
+                    )
+                    if contact_detection_armed
+                    else np.zeros_like(positions)
+                )
+                shared.set_follower_position_error(adjusted_error)
+                if contact_indices and np.any(
+                    adjusted_error[contact_indices] != 0.0
+                ):
+                    formatted = "[{}]".format(
+                        " ".join(
+                            f"{float(adjusted_error[index]):8.3f}"
+                            for index in contact_indices
+                        )
+                    )
+                    contact_motor_ids = [
+                        int(hand.motor_ids[index]) for index in contact_indices
+                    ]
+                    print(
+                        "Follower contact detected; adjusted position error "
+                        f"for motor IDs {contact_motor_ids}: {formatted}"
+                    )
                 session = recorder.current()
                 if session is not None:
                     if session is not sample_session:
@@ -125,6 +255,7 @@ def run_follower_hand_worker(
                     next_read_ns += read_period_ns
 
             next_due_ns = min(next_read_ns, next_command_ns)
-            shared.shutdown.wait(max(0.0, min((next_due_ns - time.monotonic_ns()) / 1e9, 0.005)))
+            wait_s = (next_due_ns - time.monotonic_ns()) / 1e9
+            shared.shutdown.wait(max(0.0, min(wait_s, 0.005)))
     finally:
         hand.shutdown()
