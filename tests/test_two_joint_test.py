@@ -2,9 +2,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import yaml
 
-from scripts.trimorph_api_test.two_joint_test import _load_config
+from scripts.trimorph_api_test.two_joint_test import (
+    CONTACT_THRESHOLD,
+    _contact_feedback,
+    _load_config,
+)
 
 
 class TwoJointConfigTests(unittest.TestCase):
@@ -40,6 +45,20 @@ class TwoJointConfigTests(unittest.TestCase):
         config = self._load_model("XM335_T323")
 
         self.assertEqual(config.motor_model, "xm335-t323-t")
+
+    def test_contact_feedback_is_zero_inside_threshold(self):
+        feedback = _contact_feedback(
+            [-CONTACT_THRESHOLD, 0.0, CONTACT_THRESHOLD]
+        )
+
+        np.testing.assert_array_equal(feedback, [0.0, 0.0, 0.0])
+
+    def test_contact_feedback_is_signed_excess_error(self):
+        feedback = _contact_feedback(
+            [-CONTACT_THRESHOLD - 0.25, CONTACT_THRESHOLD + 0.5]
+        )
+
+        np.testing.assert_allclose(feedback, [-0.25, 0.5])
 
 
 if __name__ == "__main__":

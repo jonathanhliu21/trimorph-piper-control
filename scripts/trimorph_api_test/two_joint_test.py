@@ -14,6 +14,7 @@ Run from the repository root, for example:
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py stream_move --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_current --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_position_error --motors 4,5
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py detect_contact --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py home
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
         home --joints 4
@@ -84,7 +85,13 @@ PROFILE_MOVE_TIMEOUT_S = 4.0
 STREAM_MOVE_RATE_HZ = 30.0
 STREAM_MOVE_DURATION_S = 2.0
 STREAM_MOVE_SETTLE_S = 0.5
-MEASURE_CURRENT_POSITION = -0.5
+MEASUREMENT_POSITIONS_RAD = {
+    4: -0.1,  # Index PIP
+    5: -0.5,  # Index MCP flex
+    6: -0.5,  # Index MCP abduct
+}
+CONTACT_THRESHOLD = 0.07  # rad
+CONTACT_VIRTUAL_SPRING_STIFFNESS = 1.0  # feedback units / rad
 
 
 class _CurrentRecorder:
@@ -335,6 +342,25 @@ def _selected_motor_ids(
     return tuple(selected)
 
 
+def _contact_feedback(position_errors: Sequence[float]) -> np.ndarray:
+    """Return signed virtual-spring feedback beyond the contact deadband."""
+
+    errors = np.asarray(position_errors, dtype=float)
+    contact_excess = np.maximum(np.abs(errors) - CONTACT_THRESHOLD, 0.0)
+    return CONTACT_VIRTUAL_SPRING_STIFFNESS * np.sign(errors) * contact_excess
+
+
+def _print_selected_values(
+    elapsed_s: float,
+    values: Sequence[float],
+    selected_indices: Sequence[int],
+) -> None:
+    formatted = "[{}]".format(
+        " ".join(f"{float(values[index]):8.3f}" for index in selected_indices)
+    )
+    print(f"{elapsed_s:8.3f}s {formatted}")
+
+
 def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
     _require_reviewed_config(args.config)
     # if not any(abs(offset) > 1e-9 for offset in config.home_offsets):
@@ -471,6 +497,11 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
             else "disabled"
         )
     )
+    print(
+        f"Contact feedback   = print when |target - measured| exceeds "
+        f"{CONTACT_THRESHOLD:g} rad; virtual spring stiffness = "
+        f"{CONTACT_VIRTUAL_SPRING_STIFFNESS:g} feedback units/rad"
+    )
     _confirm_motion("Stream move testing", args.yes)
 
     hand = MidasHand(config, autoconnect=False)
@@ -538,7 +569,20 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
                 target[selected_indices] = angles_rad
                 hand.set_positions(target)
                 if current_recorder is not None:
-                    current_recorder.sample(target, float(sample_t))
+                    actual_positions = current_recorder.sample(
+                        target,
+                        float(sample_t),
+                    )
+                else:
+                    actual_positions = hand.read_pos()
+
+                feedback = _contact_feedback(target - actual_positions)
+                if np.any(feedback[selected_indices] != 0.0):
+                    _print_selected_values(
+                        time.monotonic() - start_t,
+                        feedback,
+                        selected_indices,
+                    )
 
                 if tick + 1 < len(samples):
                     next_tick_t = start_t + float(sample_times[tick + 1])
@@ -625,18 +669,34 @@ def _run_continuous_measurement(
     args: argparse.Namespace,
     config: HandConfig,
     *,
-    position_error: bool,
+    measurement: str,
 ) -> None:
     """Move selected motors to the measurement pose and print samples until stopped."""
 
     _require_reviewed_config(args.config)
     measure_motor_ids = _selected_motor_ids(args, config)
-    for motor_id in measure_motor_ids:
-        _check_move_target(config, motor_id, MEASURE_CURRENT_POSITION)
+    missing_target_ids = sorted(
+        set(measure_motor_ids) - MEASUREMENT_POSITIONS_RAD.keys()
+    )
+    if missing_target_ids:
+        raise ValueError(
+            "No measurement position is configured for motor IDs "
+            f"{missing_target_ids}; add them to MEASUREMENT_POSITIONS_RAD"
+        )
+    measure_positions = np.array(
+        [MEASUREMENT_POSITIONS_RAD[motor_id] for motor_id in measure_motor_ids]
+    )
+    for motor_id, position in zip(measure_motor_ids, measure_positions):
+        _check_move_target(config, motor_id, float(position))
 
     print(f"Selected motor IDs = {list(measure_motor_ids)}")
-    print(f"Measurement position (rad) = {MEASURE_CURRENT_POSITION}")
-    measurement_name = "Position error" if position_error else "Current"
+    print(f"Measurement positions (rad) = {measure_positions.tolist()}")
+    measurement_names = {
+        "current": "Current",
+        "position_error": "Position error",
+        "contact": "Contact feedback",
+    }
+    measurement_name = measurement_names[measurement]
     _confirm_motion(f"{measurement_name} measurement", args.yes)
 
     hand = MidasHand(config, autoconnect=False)
@@ -651,7 +711,7 @@ def _run_continuous_measurement(
         measure_indices = [
             hand.motor_ids.index(motor_id) for motor_id in measure_motor_ids
         ]
-        target[measure_indices] = MEASURE_CURRENT_POSITION
+        target[measure_indices] = measure_positions
         hand.set_positions(target, clip=False)
         hand.set_motion_profile(
             profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
@@ -661,19 +721,29 @@ def _run_continuous_measurement(
         hand.enable_torque(measure_motor_ids)
         hand.set_positions(target)
 
-        for motor_id in measure_motor_ids:
+        for motor_id, position in zip(measure_motor_ids, measure_positions):
             _wait_for_motor(
                 hand,
                 motor_id,
-                MEASURE_CURRENT_POSITION,
+                float(position),
                 args.timeout_s,
             )
 
-        units = "rad" if position_error else "mA"
+        units = {
+            "current": "mA",
+            "position_error": "rad",
+            "contact": "virtual spring units",
+        }[measurement]
         print(
             f"{measurement_name} ({units}), motor IDs {list(measure_motor_ids)}. "
             "Press Ctrl-C to stop."
         )
+        if measurement == "contact":
+            print(
+                f"CONTACT_THRESHOLD = {CONTACT_THRESHOLD:g} rad, "
+                "CONTACT_VIRTUAL_SPRING_STIFFNESS = "
+                f"{CONTACT_VIRTUAL_SPRING_STIFFNESS:g} feedback units/rad"
+            )
         sample_period = 1.0 / args.rate_hz
         start_monotonic = time.monotonic()
         next_sample = start_monotonic
@@ -683,13 +753,17 @@ def _run_continuous_measurement(
                 time.sleep(next_sample - now)
             elapsed = time.monotonic() - start_monotonic
             positions, _, currents = hand.read_pos_vel_cur()
-            values = target - positions if position_error else currents
-            formatted = "[{}]".format(
-                " ".join(
-                    f"{float(values[index]):8.3f}" for index in measure_indices
-                )
-            )
-            print(f"{elapsed:8.3f}s {formatted}")
+            position_errors = target - positions
+            if measurement == "current":
+                values = currents
+            elif measurement == "position_error":
+                values = position_errors
+            else:
+                values = _contact_feedback(position_errors)
+                if not np.any(values[measure_indices] != 0.0):
+                    next_sample += sample_period
+                    continue
+            _print_selected_values(elapsed, values, measure_indices)
             next_sample += sample_period
     except KeyboardInterrupt:
         print(f"\n{measurement_name} measurement stopped by user.")
@@ -699,14 +773,18 @@ def _run_continuous_measurement(
 
 
 def _run_measure_current(args: argparse.Namespace, config: HandConfig) -> None:
-    _run_continuous_measurement(args, config, position_error=False)
+    _run_continuous_measurement(args, config, measurement="current")
 
 
 def _run_measure_position_error(
     args: argparse.Namespace,
     config: HandConfig,
 ) -> None:
-    _run_continuous_measurement(args, config, position_error=True)
+    _run_continuous_measurement(args, config, measurement="position_error")
+
+
+def _run_detect_contact(args: argparse.Namespace, config: HandConfig) -> None:
+    _run_continuous_measurement(args, config, measurement="contact")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -854,7 +932,7 @@ def _build_parser() -> argparse.ArgumentParser:
     measure_current = commands.add_parser(
         "measure_current",
         help=(
-            "Move selected motors to MEASURE_CURRENT_POSITION and print currents"
+            "Move selected motors to MEASUREMENT_POSITIONS_RAD and print currents"
         ),
     )
     _add_measurement_arguments(measure_current, "Current")
@@ -862,11 +940,20 @@ def _build_parser() -> argparse.ArgumentParser:
     measure_position_error = commands.add_parser(
         "measure_position_error",
         help=(
-            "Move selected motors to MEASURE_CURRENT_POSITION and print "
+            "Move selected motors to MEASUREMENT_POSITIONS_RAD and print "
             "target-minus-current position errors"
         ),
     )
     _add_measurement_arguments(measure_position_error, "Position error")
+
+    detect_contact = commands.add_parser(
+        "detect_contact",
+        help=(
+            "Move selected motors to MEASUREMENT_POSITIONS_RAD and print "
+            "virtual-spring feedback while contact is detected"
+        ),
+    )
+    _add_measurement_arguments(detect_contact, "Contact")
     return parser
 
 
@@ -972,7 +1059,11 @@ def main() -> None:
             parser.error("--duration-s must be positive")
         if args.print_every < 0:
             parser.error("--print-every must be non-negative")
-    elif args.command in ("measure_current", "measure_position_error"):
+    elif args.command in (
+        "measure_current",
+        "measure_position_error",
+        "detect_contact",
+    ):
         if args.timeout_s <= 0:
             parser.error("--timeout-s must be positive")
         if args.rate_hz <= 0:
@@ -1004,8 +1095,10 @@ def main() -> None:
             _run_record(args, config)
         elif args.command == "measure_current":
             _run_measure_current(args, config)
-        else:
+        elif args.command == "measure_position_error":
             _run_measure_position_error(args, config)
+        else:
+            _run_detect_contact(args, config)
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         parser.exit(1, f"error: {exc}\n")
 
