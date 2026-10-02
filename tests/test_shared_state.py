@@ -22,7 +22,7 @@ class SharedStateTests(unittest.TestCase):
     def test_follower_position_error_is_copied_on_write_and_read(self):
         shared = SharedState()
         source = np.asarray([0.1, -0.2, 0.0])
-        shared.set_follower_position_error(source)
+        shared.set_follower_position_error(source, motor_ids=(4, 5, 6))
         source[:] = -1.0
 
         first = shared.latest_follower_position_error()
@@ -33,6 +33,15 @@ class SharedStateTests(unittest.TestCase):
             shared.latest_follower_position_error(),
             [0.1, -0.2, 0.0],
         )
+        self.assertEqual(
+            shared.latest_follower_position_error_by_motor_id(),
+            {4: 0.1, 5: -0.2, 6: 0.0},
+        )
+
+    def test_follower_motor_ids_must_align_with_errors(self):
+        shared = SharedState()
+        with self.assertRaises(ValueError):
+            shared.set_follower_position_error([0.1, 0.2], motor_ids=(4,))
 
 
 if __name__ == "__main__":

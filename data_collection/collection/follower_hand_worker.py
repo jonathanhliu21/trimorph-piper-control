@@ -234,7 +234,10 @@ def run_follower_hand_worker(
                             candidate_feedback=float(candidate_error[index]),
                             now_s=sample_time_s,
                         )
-                shared.set_follower_position_error(adjusted_error)
+                shared.set_follower_position_error(
+                    adjusted_error,
+                    motor_ids=hand.motor_ids,
+                )
                 if contact_indices and np.any(
                     adjusted_error[contact_indices] != 0.0
                 ):
