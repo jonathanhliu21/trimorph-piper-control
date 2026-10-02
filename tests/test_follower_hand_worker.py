@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from collection.contact_detection import (
+    CONTACT_EXIT_THRESHOLD,
     CONTACT_THRESHOLD,
 )
 from collection.config import (
@@ -45,7 +46,7 @@ class PrepareFollowerHandTests(unittest.TestCase):
             ],
         )
 
-    def test_contact_error_uses_static_threshold_for_motors_4_and_5_only(self):
+    def test_contact_error_uses_exit_threshold_for_motors_4_and_5_only(self):
         adjusted = adjusted_follower_position_error(
             motor_ids=(4, 5, 6),
             target_positions=[0.2, -0.2, 1.0],
@@ -55,16 +56,20 @@ class PrepareFollowerHandTests(unittest.TestCase):
         np.testing.assert_allclose(
             adjusted,
             [
-                0.2 - CONTACT_THRESHOLD,
-                -0.2 + CONTACT_THRESHOLD,
+                0.2 - CONTACT_EXIT_THRESHOLD,
+                -0.2 + CONTACT_EXIT_THRESHOLD,
                 0.0,
             ],
         )
 
-    def test_contact_error_is_zero_when_motors_4_and_5_are_below_threshold(self):
+    def test_contact_error_is_zero_below_exit_threshold(self):
         adjusted = adjusted_follower_position_error(
             motor_ids=(4, 5, 6),
-            target_positions=[CONTACT_THRESHOLD, -CONTACT_THRESHOLD, 1.0],
+            target_positions=[
+                CONTACT_EXIT_THRESHOLD,
+                -CONTACT_EXIT_THRESHOLD,
+                1.0,
+            ],
             measured_positions=[0.0, 0.0, 0.0],
         )
 

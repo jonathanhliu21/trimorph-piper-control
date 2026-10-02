@@ -5,6 +5,7 @@ import numpy as np
 from midas_hand_api.actuators import control_table as ct
 
 from collection.leader_hand_worker import (
+    FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
     FORCE_FEEDBACK_MAX_CURRENT_MA,
     TrimorphForceFeedbackController,
     force_feedback_current_ma,
@@ -46,8 +47,14 @@ class FakeHand:
 class ForceFeedbackCurrentTests(unittest.TestCase):
     def test_linear_opposing_current_and_saturation(self):
         self.assertEqual(force_feedback_current_ma(0.0), 0.0)
-        self.assertEqual(force_feedback_current_ma(0.015), -75.0)
-        self.assertEqual(force_feedback_current_ma(-0.015), 75.0)
+        half_scale_error = FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD / 2.0
+        half_current = FORCE_FEEDBACK_MAX_CURRENT_MA / 2.0
+        self.assertEqual(
+            force_feedback_current_ma(half_scale_error), -half_current
+        )
+        self.assertEqual(
+            force_feedback_current_ma(-half_scale_error), half_current
+        )
         self.assertEqual(
             force_feedback_current_ma(1.0), -FORCE_FEEDBACK_MAX_CURRENT_MA
         )
@@ -64,12 +71,18 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
             ([4], [ct.OPERATING_MODE_CURRENT], ct.ADDR_OPERATING_MODE, 1),
             hand.dxl_client.sync_writes,
         )
-        self.assertEqual(hand.dxl_client.sync_writes[-1][0:2], ([4], [-150]))
+        self.assertEqual(
+            hand.dxl_client.sync_writes[-1][0:2],
+            ([4], [-FORCE_FEEDBACK_MAX_CURRENT_MA]),
+        )
 
         controller.update({4: 0.03, 5: 0.03}, [0.4, 0.5, 0.6])
         self.assertEqual(hand.disabled, [[4], [5]])
         # Motor 5 has a negative calibration sign, so its raw current is reversed.
-        self.assertEqual(hand.dxl_client.sync_writes[-1][0:2], ([5], [150]))
+        self.assertEqual(
+            hand.dxl_client.sync_writes[-1][0:2],
+            ([5], [FORCE_FEEDBACK_MAX_CURRENT_MA]),
+        )
 
     def test_release_restores_mode_five_and_stays_torque_free(self):
         hand = FakeHand()
@@ -92,7 +105,12 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
         self.assertEqual(hand.dxl_client.position_writes, [([4], [0.55])])
         self.assertEqual(
             hand.dxl_client.sync_writes[-1],
-            ([4], [150], ct.ADDR_GOAL_CURRENT, ct.LEN_GOAL_CURRENT),
+            (
+                [4],
+                [FORCE_FEEDBACK_MAX_CURRENT_MA],
+                ct.ADDR_GOAL_CURRENT,
+                ct.LEN_GOAL_CURRENT,
+            ),
         )
 
     def test_shutdown_restores_every_active_joint(self):

@@ -7,11 +7,22 @@ import numpy as np
 
 
 CONTACT_MOTOR_IDS = (4, 5)
-CONTACT_THRESHOLD = 0.05  # rad
+CONTACT_ENTER_THRESHOLD = 0.05  # rad
+CONTACT_EXIT_THRESHOLD = 0.03  # rad
+# Compatibility name for callers that use the contact-entry threshold.
+CONTACT_THRESHOLD = CONTACT_ENTER_THRESHOLD
 CONTACT_MAX_VELOCITY_RAD_S = 1.0
 CONTACT_VIRTUAL_SPRING_STIFFNESS = 1.0  # feedback units / rad
 CONTACT_SETTLE_TIME_S = 0.05
-CONTACT_PERSISTENCE_TIME_S = 0.01  # continuous time above CONTACT_THRESHOLD
+CONTACT_PERSISTENCE_TIME_S = 0.01  # continuous time above entry threshold
+CONTACT_MIN_ENGAGED_TIME_S = 0.10
+CONTACT_EXIT_PERSISTENCE_TIME_S = 0.05
+# Candidate feedback is measured beyond the exit threshold, so this gap is
+# the equivalent candidate value required to cross the entry threshold.
+CONTACT_ENTRY_FEEDBACK_THRESHOLD = (
+    CONTACT_VIRTUAL_SPRING_STIFFNESS
+    * (CONTACT_ENTER_THRESHOLD - CONTACT_EXIT_THRESHOLD)
+)
 
 
 class ContactState(Enum):
@@ -22,7 +33,7 @@ class ContactState(Enum):
 
 
 class ContactStateMachine:
-    """Suppress motion and require a sustained static-threshold excess."""
+    """Detect sustained contact with entry/exit hysteresis and exit debounce."""
 
     def __init__(
         self,
@@ -30,20 +41,72 @@ class ContactStateMachine:
         max_velocity_rad_s: float = CONTACT_MAX_VELOCITY_RAD_S,
         settle_time_s: float = CONTACT_SETTLE_TIME_S,
         persistence_time_s: float = CONTACT_PERSISTENCE_TIME_S,
+        entry_feedback_threshold: float = CONTACT_ENTRY_FEEDBACK_THRESHOLD,
+        min_engaged_time_s: float = CONTACT_MIN_ENGAGED_TIME_S,
+        exit_persistence_time_s: float = CONTACT_EXIT_PERSISTENCE_TIME_S,
     ) -> None:
         self.max_velocity_rad_s = max_velocity_rad_s
         self.settle_time_s = settle_time_s
         self.persistence_time_s = persistence_time_s
+        self.entry_feedback_threshold = entry_feedback_threshold
+        self.min_engaged_time_s = min_engaged_time_s
+        self.exit_persistence_time_s = exit_persistence_time_s
         self.state = ContactState.MOVING
         self._settle_started_s: float | None = None
         self._contact_started_s: float | None = None
+        self._engaged_started_s: float | None = None
+        self._exit_started_s: float | None = None
         self._candidate_sign = 0.0
+        self._last_feedback = 0.0
 
     def reset(self) -> None:
         self.state = ContactState.MOVING
         self._settle_started_s = None
         self._contact_started_s = None
+        self._engaged_started_s = None
+        self._exit_started_s = None
         self._candidate_sign = 0.0
+        self._last_feedback = 0.0
+
+    def _continue_or_exit_contact(
+        self,
+        *,
+        candidate_feedback: float,
+        now_s: float,
+        exit_state: ContactState,
+    ) -> float:
+        candidate_sign = float(np.sign(candidate_feedback))
+        if candidate_sign != 0.0 and candidate_sign == self._candidate_sign:
+            self._exit_started_s = None
+            self._last_feedback = float(candidate_feedback)
+            return self._last_feedback
+
+        if self._exit_started_s is None:
+            self._exit_started_s = now_s
+        engaged_time_s = (
+            0.0
+            if self._engaged_started_s is None
+            else now_s - self._engaged_started_s
+        )
+        exit_time_s = now_s - self._exit_started_s
+        if (
+            engaged_time_s < self.min_engaged_time_s
+            or exit_time_s < self.exit_persistence_time_s
+        ):
+            # Keep publishing the last force so the leader does not switch modes
+            # during a brief contact-error dropout.
+            return self._last_feedback
+
+        if exit_state is ContactState.MOVING:
+            self.reset()
+        else:
+            self.state = exit_state
+            self._contact_started_s = None
+            self._engaged_started_s = None
+            self._exit_started_s = None
+            self._candidate_sign = 0.0
+            self._last_feedback = 0.0
+        return 0.0
 
     def update(
         self,
@@ -58,6 +121,12 @@ class ContactStateMachine:
             or abs(measured_velocity_rad_s) > self.max_velocity_rad_s
         )
         if moving:
+            if self.state is ContactState.CONTACT:
+                return self._continue_or_exit_contact(
+                    candidate_feedback=0.0,
+                    now_s=now_s,
+                    exit_state=ContactState.MOVING,
+                )
             self.reset()
             return 0.0
 
@@ -73,18 +142,22 @@ class ContactStateMachine:
                 return 0.0
             self.state = ContactState.ARMED
 
+        if self.state is ContactState.CONTACT:
+            return self._continue_or_exit_contact(
+                candidate_feedback=candidate_feedback,
+                now_s=now_s,
+                exit_state=ContactState.ARMED,
+            )
+
         candidate_sign = float(np.sign(candidate_feedback))
-        if candidate_sign == 0.0:
+        entry_candidate = (
+            abs(candidate_feedback) > self.entry_feedback_threshold
+        )
+        if not entry_candidate:
             self.state = ContactState.ARMED
             self._contact_started_s = None
             self._candidate_sign = 0.0
             return 0.0
-
-        if self.state is ContactState.CONTACT:
-            if candidate_sign == self._candidate_sign:
-                return float(candidate_feedback)
-            self.state = ContactState.ARMED
-            self._contact_started_s = None
 
         if self._contact_started_s is None or candidate_sign != self._candidate_sign:
             self._contact_started_s = now_s
@@ -96,7 +169,10 @@ class ContactStateMachine:
             return 0.0
 
         self.state = ContactState.CONTACT
-        return float(candidate_feedback)
+        self._engaged_started_s = now_s
+        self._exit_started_s = None
+        self._last_feedback = float(candidate_feedback)
+        return self._last_feedback
 
 
 def contact_feedback(

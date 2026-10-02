@@ -5,6 +5,7 @@ import time
 import numpy as np
 
 from .contact_detection import (
+    CONTACT_EXIT_THRESHOLD,
     CONTACT_MOTOR_IDS,
     CONTACT_THRESHOLD,
     ContactStateMachine,
@@ -26,7 +27,7 @@ def adjusted_follower_position_error(
     target_positions,
     measured_positions,
 ) -> np.ndarray:
-    """Return contact-adjusted error for motors 4 and 5 in follower order."""
+    """Return exit-deadband error for motors 4 and 5 in follower order."""
 
     motor_ids = tuple(int(motor_id) for motor_id in motor_ids)
     targets = np.asarray(target_positions, dtype=np.float64)
@@ -45,6 +46,7 @@ def adjusted_follower_position_error(
         position_errors = targets - positions
         adjusted_error[contact_indices] = contact_feedback(
             position_errors[contact_indices],
+            thresholds=CONTACT_EXIT_THRESHOLD,
         )
     return adjusted_error
 
