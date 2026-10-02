@@ -122,6 +122,52 @@ class ContactStateMachineTests(unittest.TestCase):
         self.assertEqual(feedback, 0.0)
         self.assertIs(detector.state, ContactState.ARMED)
 
+    def test_threshold_drop_resets_armed_persistence_timer(self):
+        detector = ContactStateMachine(settle_time_s=0.0, persistence_time_s=0.05)
+        detector.update(
+            commanded_velocity_rad_s=0.0,
+            measured_velocity_rad_s=0.0,
+            candidate_feedback=0.0,
+            now_s=0.0,
+        )
+        detector.update(
+            commanded_velocity_rad_s=0.0,
+            measured_velocity_rad_s=0.0,
+            candidate_feedback=1.0,
+            now_s=0.01,
+        )
+        detector.update(
+            commanded_velocity_rad_s=0.0,
+            measured_velocity_rad_s=0.0,
+            candidate_feedback=0.0,
+            now_s=0.04,
+        )
+        detector.update(
+            commanded_velocity_rad_s=0.0,
+            measured_velocity_rad_s=0.0,
+            candidate_feedback=1.0,
+            now_s=0.05,
+        )
+
+        self.assertEqual(
+            detector.update(
+                commanded_velocity_rad_s=0.0,
+                measured_velocity_rad_s=0.0,
+                candidate_feedback=1.0,
+                now_s=0.09,
+            ),
+            0.0,
+        )
+        self.assertEqual(
+            detector.update(
+                commanded_velocity_rad_s=0.0,
+                measured_velocity_rad_s=0.0,
+                candidate_feedback=1.0,
+                now_s=0.11,
+            ),
+            1.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

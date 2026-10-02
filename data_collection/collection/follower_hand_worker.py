@@ -9,7 +9,6 @@ from .contact_detection import (
     CONTACT_THRESHOLD,
     ContactStateMachine,
     contact_feedback,
-    dynamic_contact_threshold,
 )
 from .config import (
     FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
@@ -26,23 +25,14 @@ def adjusted_follower_position_error(
     motor_ids,
     target_positions,
     measured_positions,
-    commanded_velocities_rad_s,
 ) -> np.ndarray:
     """Return contact-adjusted error for motors 4 and 5 in follower order."""
 
     motor_ids = tuple(int(motor_id) for motor_id in motor_ids)
     targets = np.asarray(target_positions, dtype=np.float64)
     positions = np.asarray(measured_positions, dtype=np.float64)
-    commanded_velocities = np.asarray(
-        commanded_velocities_rad_s,
-        dtype=np.float64,
-    )
     expected_shape = (len(motor_ids),)
-    if (
-        targets.shape != expected_shape
-        or positions.shape != expected_shape
-        or commanded_velocities.shape != expected_shape
-    ):
+    if targets.shape != expected_shape or positions.shape != expected_shape:
         raise ValueError("Follower contact vectors must match the motor ID count")
 
     adjusted_error = np.zeros(expected_shape, dtype=np.float64)
@@ -52,11 +42,9 @@ def adjusted_follower_position_error(
         if motor_id in CONTACT_MOTOR_IDS
     ]
     if contact_indices:
-        thresholds = dynamic_contact_threshold(commanded_velocities)
         position_errors = targets - positions
         adjusted_error[contact_indices] = contact_feedback(
             position_errors[contact_indices],
-            thresholds[contact_indices],
         )
     return adjusted_error
 
@@ -228,7 +216,6 @@ def run_follower_hand_worker(
                         hand.motor_ids,
                         last_command,
                         positions,
-                        commanded_velocities,
                     )
                     if contact_detection_armed
                     else np.zeros_like(positions)

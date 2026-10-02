@@ -3,9 +3,7 @@ import unittest
 import numpy as np
 
 from collection.contact_detection import (
-    CONTACT_MAX_VELOCITY_RAD_S,
     CONTACT_THRESHOLD,
-    CONTACT_VELOCITY_ERROR_GAIN_S,
 )
 from collection.config import (
     FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
@@ -47,21 +45,17 @@ class PrepareFollowerHandTests(unittest.TestCase):
             ],
         )
 
-    def test_contact_error_uses_dynamic_threshold_for_motors_4_and_5_only(self):
-        commanded_velocity = CONTACT_MAX_VELOCITY_RAD_S / 2.0
+    def test_contact_error_uses_static_threshold_for_motors_4_and_5_only(self):
         adjusted = adjusted_follower_position_error(
             motor_ids=(4, 5, 6),
             target_positions=[0.2, -0.2, 1.0],
             measured_positions=[0.0, 0.0, 0.0],
-            commanded_velocities_rad_s=[commanded_velocity, 0.0, 0.0],
         )
 
         np.testing.assert_allclose(
             adjusted,
             [
-                0.2
-                - CONTACT_THRESHOLD
-                - CONTACT_VELOCITY_ERROR_GAIN_S * commanded_velocity,
+                0.2 - CONTACT_THRESHOLD,
                 -0.2 + CONTACT_THRESHOLD,
                 0.0,
             ],
@@ -72,24 +66,9 @@ class PrepareFollowerHandTests(unittest.TestCase):
             motor_ids=(4, 5, 6),
             target_positions=[CONTACT_THRESHOLD, -CONTACT_THRESHOLD, 1.0],
             measured_positions=[0.0, 0.0, 0.0],
-            commanded_velocities_rad_s=[0.0, 0.0, 0.0],
         )
 
         np.testing.assert_array_equal(adjusted, [0.0, 0.0, 0.0])
-
-    def test_contact_is_disabled_only_above_velocity_cutoff(self):
-        adjusted = adjusted_follower_position_error(
-            motor_ids=(4, 5),
-            target_positions=[1.0, 1.0],
-            measured_positions=[0.0, 0.0],
-            commanded_velocities_rad_s=[
-                -(CONTACT_MAX_VELOCITY_RAD_S + 0.01),
-                CONTACT_MAX_VELOCITY_RAD_S,
-            ],
-        )
-
-        self.assertEqual(adjusted[0], 0.0)
-        self.assertGreater(adjusted[1], 0.0)
 
     def test_contact_detection_arms_only_after_initial_target_is_reached(self):
         self.assertFalse(

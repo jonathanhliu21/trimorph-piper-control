@@ -8,11 +8,10 @@ import numpy as np
 
 CONTACT_MOTOR_IDS = (4, 5)
 CONTACT_THRESHOLD = 0.05  # rad
-CONTACT_VELOCITY_ERROR_GAIN_S = 0.05  # rad threshold / (rad/s)
-CONTACT_MAX_VELOCITY_RAD_S = 0.1
+CONTACT_MAX_VELOCITY_RAD_S = 1.0
 CONTACT_VIRTUAL_SPRING_STIFFNESS = 1.0  # feedback units / rad
 CONTACT_SETTLE_TIME_S = 0.1
-CONTACT_PERSISTENCE_TIME_S = 0.05
+CONTACT_PERSISTENCE_TIME_S = 0.05  # continuous time above CONTACT_THRESHOLD
 
 
 class ContactState(Enum):
@@ -23,7 +22,7 @@ class ContactState(Enum):
 
 
 class ContactStateMachine:
-    """Suppress motion transients and require sustained contact feedback."""
+    """Suppress motion and require a sustained static-threshold excess."""
 
     def __init__(
         self,
@@ -91,29 +90,13 @@ class ContactStateMachine:
             self._contact_started_s = now_s
             self._candidate_sign = candidate_sign
             return 0.0
+        # ARMED must observe uninterrupted, same-direction threshold excess
+        # before it may publish feedback and transition to CONTACT.
         if now_s - self._contact_started_s < self.persistence_time_s:
             return 0.0
 
         self.state = ContactState.CONTACT
         return float(candidate_feedback)
-
-
-def dynamic_contact_threshold(
-    commanded_velocities_rad_s: Sequence[float],
-) -> np.ndarray:
-    """Return a dynamic threshold, disabling contact above the speed cutoff."""
-
-    velocities = np.asarray(commanded_velocities_rad_s, dtype=float)
-    absolute_velocities = np.abs(velocities)
-    thresholds = (
-        CONTACT_THRESHOLD
-        + CONTACT_VELOCITY_ERROR_GAIN_S * absolute_velocities
-    )
-    return np.where(
-        absolute_velocities > CONTACT_MAX_VELOCITY_RAD_S,
-        np.inf,
-        thresholds,
-    )
 
 
 def contact_feedback(
