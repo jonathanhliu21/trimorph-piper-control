@@ -183,12 +183,15 @@ def run_follower_hand_worker(
                     next_command_ns += command_period_ns
 
             if now_ns >= next_read_ns:
-                positions, measured_velocities, _ = hand.read_pos_vel_cur()
+                positions, measured_velocities, measured_currents = (
+                    hand.read_pos_vel_cur()
+                )
                 positions = np.asarray(positions, dtype=np.float64)
                 measured_velocities = np.asarray(
                     measured_velocities,
                     dtype=np.float64,
                 )
+                measured_currents = np.asarray(measured_currents, dtype=np.float64)
                 sample_ns = time.monotonic_ns()
                 if positions.shape != (len(hand.motor_ids),) or not np.isfinite(
                     positions
@@ -199,6 +202,12 @@ def run_follower_hand_worker(
                 ) or not np.isfinite(measured_velocities).all():
                     raise RuntimeError(
                         "Follower velocity read returned an invalid motor vector"
+                    )
+                if measured_currents.shape != (
+                    len(hand.motor_ids),
+                ) or not np.isfinite(measured_currents).all():
+                    raise RuntimeError(
+                        "Follower current read returned an invalid motor vector"
                     )
                 if (
                     not contact_detection_armed
@@ -233,6 +242,7 @@ def run_follower_hand_worker(
                             measured_velocity_rad_s=float(
                                 measured_velocities[index]
                             ),
+                            measured_current_ma=float(measured_currents[index]),
                             candidate_feedback=float(candidate_error[index]),
                             now_s=sample_time_s,
                         )

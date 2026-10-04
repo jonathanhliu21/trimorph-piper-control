@@ -58,6 +58,7 @@ from data_collection.collection.contact_detection import (
     CONTACT_ENTER_THRESHOLD,
     CONTACT_EXIT_THRESHOLD,
     CONTACT_MAX_VELOCITY_RAD_S,
+    CONTACT_MOTION_CURRENT_THRESHOLD_MA,
     CONTACT_VIRTUAL_SPRING_STIFFNESS,
     ContactStateMachine,
     contact_feedback,
@@ -124,6 +125,7 @@ class _CurrentRecorder:
         self._previous_time_s: Optional[float] = None
         self._previous_targets: Optional[np.ndarray] = None
         self.latest_actual_velocities_rad_s: Optional[np.ndarray] = None
+        self.latest_currents_ma: Optional[np.ndarray] = None
 
     def start_trial(self, trial: int) -> None:
         self._trial = trial
@@ -153,6 +155,7 @@ class _CurrentRecorder:
 
         actual_positions, actual_velocities, currents = self._hand.read_pos_vel_cur()
         self.latest_actual_velocities_rad_s = np.asarray(actual_velocities, dtype=float)
+        self.latest_currents_ma = np.asarray(currents, dtype=float)
         self.trials.append(self._trial)
         self.times_s.append(sample_time_s)
         self.currents_ma.append([float(currents[index]) for index in self._indices])
@@ -638,8 +641,13 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
                     )
                     if actual_velocities is None:
                         raise RuntimeError("Current recorder did not capture velocity")
+                    actual_currents = current_recorder.latest_currents_ma
+                    if actual_currents is None:
+                        raise RuntimeError("Current recorder did not capture current")
                 else:
-                    actual_positions, actual_velocities = hand.read_pos_vel()
+                    actual_positions, actual_velocities, actual_currents = (
+                        hand.read_pos_vel_cur()
+                    )
 
                 candidate_feedback = contact_feedback(
                     target - actual_positions,
@@ -653,6 +661,7 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
                             commanded_velocities[index]
                         ),
                         measured_velocity_rad_s=float(actual_velocities[index]),
+                        measured_current_ma=float(actual_currents[index]),
                         candidate_feedback=float(candidate_feedback[index]),
                         now_s=now_s,
                     )
@@ -828,8 +837,9 @@ def _run_continuous_measurement(
         if measurement == "contact":
             print(
                 f"Contact entry/exit thresholds = {CONTACT_ENTER_THRESHOLD:g}/"
-                f"{CONTACT_EXIT_THRESHOLD:g} rad; motion suppression = "
-                f"{CONTACT_MAX_VELOCITY_RAD_S:g} rad/s; virtual spring "
+                f"{CONTACT_EXIT_THRESHOLD:g} rad; motion speed threshold = "
+                f"{CONTACT_MAX_VELOCITY_RAD_S:g} rad/s; current entry = "
+                f"{CONTACT_MOTION_CURRENT_THRESHOLD_MA:g} mA; virtual spring "
                 f"stiffness = {CONTACT_VIRTUAL_SPRING_STIFFNESS:g}"
             )
         contact_detectors = {
@@ -860,6 +870,7 @@ def _run_continuous_measurement(
                     values[index] = detector.update(
                         commanded_velocity_rad_s=0.0,
                         measured_velocity_rad_s=float(velocities[index]),
+                        measured_current_ma=float(currents[index]),
                         candidate_feedback=float(candidate_feedback[index]),
                         now_s=sample_time_s,
                     )

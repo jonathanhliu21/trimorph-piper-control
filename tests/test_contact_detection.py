@@ -59,7 +59,7 @@ class ContactStateMachineTests(unittest.TestCase):
         )
         self.assertIs(detector.state, ContactState.CONTACT)
 
-    def test_measured_motion_immediately_clears_contact(self):
+    def test_position_residual_keeps_contact_engaged_during_motion(self):
         detector = ContactStateMachine(
             settle_time_s=0.0,
             persistence_time_s=0.0,
@@ -93,8 +93,55 @@ class ContactStateMachineTests(unittest.TestCase):
             now_s=0.03,
         )
 
-        self.assertEqual(feedback, 0.0)
-        self.assertIs(detector.state, ContactState.MOVING)
+        self.assertEqual(feedback, 1.0)
+        self.assertIs(detector.state, ContactState.CONTACT)
+
+    def test_sustained_current_enters_contact_during_motion(self):
+        detector = ContactStateMachine(
+            max_velocity_rad_s=0.1,
+            motion_current_threshold_ma=250.0,
+            persistence_time_s=0.05,
+        )
+
+        for now_s in (0.0, 0.04):
+            feedback = detector.update(
+                commanded_velocity_rad_s=0.2,
+                measured_velocity_rad_s=0.1,
+                measured_current_ma=-250.0,
+                candidate_feedback=-0.08,
+                now_s=now_s,
+            )
+            self.assertEqual(feedback, 0.0)
+            self.assertIs(detector.state, ContactState.MOVING)
+
+        feedback = detector.update(
+            commanded_velocity_rad_s=0.2,
+            measured_velocity_rad_s=0.1,
+            measured_current_ma=-250.0,
+            candidate_feedback=-0.08,
+            now_s=0.06,
+        )
+
+        self.assertEqual(feedback, -0.08)
+        self.assertIs(detector.state, ContactState.CONTACT)
+
+    def test_motion_current_below_threshold_does_not_enter_contact(self):
+        detector = ContactStateMachine(
+            max_velocity_rad_s=0.1,
+            motion_current_threshold_ma=250.0,
+            persistence_time_s=0.0,
+        )
+
+        for now_s in (0.0, 0.1):
+            feedback = detector.update(
+                commanded_velocity_rad_s=0.2,
+                measured_velocity_rad_s=0.1,
+                measured_current_ma=249.9,
+                candidate_feedback=1.0,
+                now_s=now_s,
+            )
+            self.assertEqual(feedback, 0.0)
+            self.assertIs(detector.state, ContactState.MOVING)
 
     def test_contact_stays_engaged_between_entry_and_exit_thresholds(self):
         detector = ContactStateMachine(

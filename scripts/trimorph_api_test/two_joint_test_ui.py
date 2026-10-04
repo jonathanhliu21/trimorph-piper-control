@@ -36,6 +36,7 @@ from data_collection.collection.contact_detection import (
     CONTACT_EXIT_THRESHOLD,
     CONTACT_MAX_VELOCITY_RAD_S,
     CONTACT_MIN_ENGAGED_TIME_S,
+    CONTACT_MOTION_CURRENT_THRESHOLD_MA,
     CONTACT_PERSISTENCE_TIME_S,
     CONTACT_SETTLE_TIME_S,
     CONTACT_VIRTUAL_SPRING_STIFFNESS,
@@ -70,6 +71,7 @@ class ConnectionSettings:
 @dataclass(frozen=True)
 class ContactDetectorSettings:
     max_velocity_rad_s: float = CONTACT_MAX_VELOCITY_RAD_S
+    motion_current_threshold_ma: float = CONTACT_MOTION_CURRENT_THRESHOLD_MA
     settle_time_s: float = CONTACT_SETTLE_TIME_S
     persistence_time_s: float = CONTACT_PERSISTENCE_TIME_S
     entry_feedback_threshold: float = CONTACT_ENTRY_FEEDBACK_THRESHOLD
@@ -143,7 +145,8 @@ def _build_contact_detectors(
     """Validate UI tuning and create independent MCP/PIP state machines."""
 
     parameters = {
-        "Maximum velocity": settings.max_velocity_rad_s,
+        "Motion speed threshold": settings.max_velocity_rad_s,
+        "Motion current threshold": settings.motion_current_threshold_ma,
         "Settle time": settings.settle_time_s,
         "Entry persistence": settings.persistence_time_s,
         "Entry feedback threshold": settings.entry_feedback_threshold,
@@ -155,6 +158,7 @@ def _build_contact_detectors(
             raise ValueError(f"{name} must be a finite, non-negative number")
     kwargs = {
         "max_velocity_rad_s": settings.max_velocity_rad_s,
+        "motion_current_threshold_ma": settings.motion_current_threshold_ma,
         "settle_time_s": settings.settle_time_s,
         "persistence_time_s": settings.persistence_time_s,
         "entry_feedback_threshold": settings.entry_feedback_threshold,
@@ -474,6 +478,7 @@ class HandWorker(threading.Thread):
                 detector.update(
                     commanded_velocity_rad_s=float(self.commanded_velocity[index]),
                     measured_velocity_rad_s=float(velocities[index]),
+                    measured_current_ma=float(currents[index]),
                     candidate_feedback=float(candidate_feedback[index]),
                     now_s=now_s,
                 )
@@ -602,6 +607,9 @@ class ContactVisualizerUI:
             value=str(CONTACT_MAX_VELOCITY_RAD_S)
         )
         self.contact_settle_time_var = tk.StringVar(value=str(CONTACT_SETTLE_TIME_S))
+        self.contact_motion_current_var = tk.StringVar(
+            value=str(CONTACT_MOTION_CURRENT_THRESHOLD_MA)
+        )
         self.contact_persistence_var = tk.StringVar(
             value=str(CONTACT_PERSISTENCE_TIME_S)
         )
@@ -615,44 +623,59 @@ class ContactVisualizerUI:
             value=str(CONTACT_EXIT_PERSISTENCE_TIME_S)
         )
         self._labeled_entry(
-            detector, 0, "Maximum velocity", self.contact_max_velocity_var, "rad/s"
-        )
-        self._labeled_entry(
-            detector, 1, "Settle time", self.contact_settle_time_var, "seconds"
-        )
-        self._labeled_entry(
-            detector, 2, "Entry persistence", self.contact_persistence_var, "seconds"
+            detector,
+            0,
+            "Motion speed threshold",
+            self.contact_max_velocity_var,
+            "rad/s",
         )
         self._labeled_entry(
             detector,
-            3,
+            1,
+            "Motion current threshold",
+            self.contact_motion_current_var,
+            "mA",
+        )
+        self._labeled_entry(
+            detector, 2, "Settle time", self.contact_settle_time_var, "seconds"
+        )
+        self._labeled_entry(
+            detector, 3, "Entry persistence", self.contact_persistence_var, "seconds"
+        )
+        self._labeled_entry(
+            detector,
+            4,
             "Entry feedback threshold",
             self.contact_entry_feedback_var,
             "feedback",
         )
         self._labeled_entry(
             detector,
-            4,
+            5,
             "Minimum contact time",
             self.contact_min_engaged_var,
             "seconds",
         )
         self._labeled_entry(
             detector,
-            5,
+            6,
             "Exit persistence",
             self.contact_exit_persistence_var,
             "seconds",
         )
         ttk.Label(
             detector,
-            text=f"Candidate feedback deadband remains {CONTACT_EXIT_THRESHOLD:g} rad.",
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(5, 0))
+            text=(
+                "Above the motion speed threshold, current enters contact; "
+                f"feedback still uses the {CONTACT_EXIT_THRESHOLD:g} rad "
+                "position deadband."
+            ),
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(5, 0))
         ttk.Button(
             detector,
             text="Apply contact settings",
             command=self._apply_contact_settings,
-        ).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(7, 0))
+        ).grid(row=8, column=0, columnspan=3, sticky="ew", pady=(7, 0))
 
         sequence = ttk.LabelFrame(
             controls, text="Streamed open-close-open sequence", padding=10
@@ -816,6 +839,9 @@ class ContactVisualizerUI:
         try:
             settings = ContactDetectorSettings(
                 max_velocity_rad_s=float(self.contact_max_velocity_var.get()),
+                motion_current_threshold_ma=float(
+                    self.contact_motion_current_var.get()
+                ),
                 settle_time_s=float(self.contact_settle_time_var.get()),
                 persistence_time_s=float(self.contact_persistence_var.get()),
                 entry_feedback_threshold=float(

@@ -11,7 +11,8 @@ CONTACT_ENTER_THRESHOLD = 0.05  # rad
 CONTACT_EXIT_THRESHOLD = 0.03  # rad
 # Compatibility name for callers that use the contact-entry threshold.
 CONTACT_THRESHOLD = CONTACT_ENTER_THRESHOLD
-CONTACT_MAX_VELOCITY_RAD_S = 1.0
+CONTACT_MAX_VELOCITY_RAD_S = 0.5
+CONTACT_MOTION_CURRENT_THRESHOLD_MA = 250.0  # absolute measured motor current
 CONTACT_VIRTUAL_SPRING_STIFFNESS = 1.0  # feedback units / rad
 CONTACT_SETTLE_TIME_S = 0.05
 CONTACT_PERSISTENCE_TIME_S = 0.01  # continuous time above entry threshold
@@ -33,12 +34,13 @@ class ContactState(Enum):
 
 
 class ContactStateMachine:
-    """Detect sustained contact with entry/exit hysteresis and exit debounce."""
+    """Detect contact from motion current or stationary position error."""
 
     def __init__(
         self,
         *,
         max_velocity_rad_s: float = CONTACT_MAX_VELOCITY_RAD_S,
+        motion_current_threshold_ma: float = CONTACT_MOTION_CURRENT_THRESHOLD_MA,
         settle_time_s: float = CONTACT_SETTLE_TIME_S,
         persistence_time_s: float = CONTACT_PERSISTENCE_TIME_S,
         entry_feedback_threshold: float = CONTACT_ENTRY_FEEDBACK_THRESHOLD,
@@ -46,6 +48,7 @@ class ContactStateMachine:
         exit_persistence_time_s: float = CONTACT_EXIT_PERSISTENCE_TIME_S,
     ) -> None:
         self.max_velocity_rad_s = max_velocity_rad_s
+        self.motion_current_threshold_ma = motion_current_threshold_ma
         self.settle_time_s = settle_time_s
         self.persistence_time_s = persistence_time_s
         self.entry_feedback_threshold = entry_feedback_threshold
@@ -76,6 +79,10 @@ class ContactStateMachine:
         exit_state: ContactState,
     ) -> float:
         candidate_sign = float(np.sign(candidate_feedback))
+        if self._candidate_sign == 0.0 and candidate_sign != 0.0:
+            # Current can indicate contact before a position residual develops.
+            # Adopt the residual direction as soon as it becomes available.
+            self._candidate_sign = candidate_sign
         if candidate_sign != 0.0 and candidate_sign == self._candidate_sign:
             self._exit_started_s = None
             self._last_feedback = float(candidate_feedback)
@@ -115,6 +122,7 @@ class ContactStateMachine:
         measured_velocity_rad_s: float,
         candidate_feedback: float,
         now_s: float,
+        measured_current_ma: float = 0.0,
     ) -> float:
         moving = (
             abs(commanded_velocity_rad_s) > self.max_velocity_rad_s
@@ -123,16 +131,38 @@ class ContactStateMachine:
         if moving:
             if self.state is ContactState.CONTACT:
                 return self._continue_or_exit_contact(
-                    candidate_feedback=0.0,
+                    candidate_feedback=candidate_feedback,
                     now_s=now_s,
                     exit_state=ContactState.MOVING,
                 )
-            self.reset()
-            return 0.0
+
+            if self.state is not ContactState.MOVING:
+                self._contact_started_s = None
+                self._candidate_sign = 0.0
+            self.state = ContactState.MOVING
+            self._settle_started_s = None
+            if abs(measured_current_ma) < self.motion_current_threshold_ma:
+                self.reset()
+                return 0.0
+
+            if self._contact_started_s is None:
+                self._contact_started_s = now_s
+                self._candidate_sign = float(np.sign(candidate_feedback))
+                return 0.0
+            if now_s - self._contact_started_s < self.persistence_time_s:
+                return 0.0
+
+            self.state = ContactState.CONTACT
+            self._engaged_started_s = now_s
+            self._exit_started_s = None
+            self._last_feedback = float(candidate_feedback)
+            return self._last_feedback
 
         if self.state is ContactState.MOVING:
             self.state = ContactState.SUPPRESSED
             self._settle_started_s = now_s
+            self._contact_started_s = None
+            self._candidate_sign = 0.0
             return 0.0
 
         if self.state is ContactState.SUPPRESSED:

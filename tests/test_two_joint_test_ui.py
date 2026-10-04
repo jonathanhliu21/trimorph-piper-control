@@ -25,6 +25,7 @@ class ContactTuningTests(unittest.TestCase):
     def test_custom_settings_are_applied_to_both_detectors(self):
         settings = ContactDetectorSettings(
             max_velocity_rad_s=2.0,
+            motion_current_threshold_ma=275.0,
             settle_time_s=0.2,
             persistence_time_s=0.3,
             entry_feedback_threshold=0.4,
@@ -36,6 +37,9 @@ class ContactTuningTests(unittest.TestCase):
 
         self.assertEqual(len(detectors), 2)
         self.assertTrue(all(detector.max_velocity_rad_s == 2.0 for detector in detectors))
+        self.assertTrue(
+            all(detector.motion_current_threshold_ma == 275.0 for detector in detectors)
+        )
         self.assertTrue(all(detector.settle_time_s == 0.2 for detector in detectors))
         self.assertTrue(all(detector.persistence_time_s == 0.3 for detector in detectors))
         self.assertTrue(
@@ -83,7 +87,7 @@ class HandWorkerContactTests(unittest.TestCase):
         def read_pos_vel_cur(self):
             return self.positions, self.velocities, self.currents
 
-    def test_shared_state_machine_suppresses_contact_during_motion(self):
+    def test_motion_below_current_threshold_does_not_detect_contact(self):
         events = queue.Queue()
         worker = HandWorker(queue.Queue(), events)
         worker.hand = self.FakeHand()
@@ -96,6 +100,23 @@ class HandWorkerContactTests(unittest.TestCase):
         self.assertNotEqual(telemetry.candidate_feedback[0], 0.0)
         self.assertEqual(telemetry.contact_feedback[0], 0.0)
         self.assertIs(worker.contact_detectors[0].state, ContactState.MOVING)
+
+    def test_motion_above_current_threshold_detects_contact(self):
+        events = queue.Queue()
+        worker = HandWorker(queue.Queue(), events)
+        worker.hand = self.FakeHand()
+        worker.hand.currents[0] = 300.0
+        worker.contact_settings = ContactDetectorSettings(persistence_time_s=0.0)
+        worker.contact_detectors = _build_contact_detectors(worker.contact_settings)
+
+        worker._handle_command("targets", (-0.10, 0.0))
+        worker._control_tick()
+        events.get_nowait()
+        worker._control_tick()
+        telemetry = events.get_nowait().payload
+
+        self.assertEqual(telemetry.contacts, (True, False))
+        self.assertNotEqual(telemetry.contact_feedback[0], 0.0)
 
     def test_stationary_tracking_error_becomes_contact(self):
         events = queue.Queue()
