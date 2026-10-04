@@ -7,7 +7,7 @@ from data_collection.collection.contact_detection import (
     ContactState,
     ContactStateMachine,
 )
-from scripts.trimorph_api_test.two_joint_test_ui import (
+from scripts.trimorph_api_test.hand_ui import (
     AB_AD_INDICES,
     ContactDetectorSettings,
     FLEXION_INDICES,
