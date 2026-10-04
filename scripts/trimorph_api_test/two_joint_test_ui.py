@@ -1,4 +1,4 @@
-"""Interactive two-joint controller and contact visualizer.
+"""Interactive three-finger controller and contact visualizer.
 
 Run from any directory with the project environment::
 
@@ -47,13 +47,23 @@ from data_collection.collection.contact_detection import (
 from midas_hand_api import HandConfig, MidasHand
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("xl330_test_config.yaml")
-DEFAULT_MCP_ID = 5
-DEFAULT_PIP_ID = 4
+DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "midas_hand_config.yaml"
+# Physical finger tuples are PIP, MCP, AB/AD, matching the supplied diagram.
+# Control arrays use MCP, PIP, AB/AD within each finger; the mapping below keeps
+# that internal order independent of the configuration's motor order.
+FINGER_MOTOR_IDS = ((4, 5, 6), (7, 8, 9), (10, 11, 12))
+UI_MOTOR_IDS = tuple(
+    motor_id
+    for pip_id, mcp_id, ab_ad_id in FINGER_MOTOR_IDS
+    for motor_id in (mcp_id, pip_id, ab_ad_id)
+)
+JOINT_COUNT = len(UI_MOTOR_IDS)
+FLEXION_INDICES = (0, 1, 3, 4, 6, 7)
+AB_AD_INDICES = (2, 5, 8)
 CONTROL_RATE_HZ = 50.0
 PROFILE_VELOCITY_RAD_S = 3.0
 PROFILE_ACCELERATION_RAD_S2 = 50.0
-DEFAULT_JOINT_TARGETS_RAD = (0.0, 0.0)  # order: MCP, PIP
+DEFAULT_JOINT_TARGETS_RAD = (0.0,) * JOINT_COUNT
 STREAM_OPEN_ANGLE_RAD = 0.0
 STREAM_CLOSE_ANGLE_RAD = -1.35
 STREAM_PREPOSITION_TOLERANCE_RAD = 0.1
@@ -64,8 +74,6 @@ MIN_STREAM_DURATION_S = 1.0 / CONTROL_RATE_HZ
 @dataclass(frozen=True)
 class ConnectionSettings:
     config_path: Path
-    mcp_id: int
-    pip_id: int
 
 
 @dataclass(frozen=True)
@@ -81,15 +89,15 @@ class ContactDetectorSettings:
 
 @dataclass(frozen=True)
 class Telemetry:
-    positions: tuple[float, float]
-    velocities: tuple[float, float]
-    currents_ma: tuple[float, float]
-    targets: tuple[float, float]
-    errors: tuple[float, float]
-    candidate_feedback: tuple[float, float]
-    contact_feedback: tuple[float, float]
-    normalized_joint_difference: tuple[float, float]
-    contacts: tuple[bool, bool]
+    positions: tuple[float, ...]
+    velocities: tuple[float, ...]
+    currents_ma: tuple[float, ...]
+    targets: tuple[float, ...]
+    errors: tuple[float, ...]
+    candidate_feedback: tuple[float, ...]
+    contact_feedback: tuple[float, ...]
+    normalized_joint_difference: tuple[float, ...]
+    contacts: tuple[bool, ...]
     sequence_active: bool
 
 
@@ -109,11 +117,20 @@ def _validated_default_targets(
     upper = np.asarray(upper_limits, dtype=float)
     targets = np.asarray(DEFAULT_JOINT_TARGETS_RAD, dtype=float)
     if lower.shape != targets.shape or upper.shape != targets.shape:
-        raise ValueError("Expected exactly two configured joint limits for MCP and PIP")
+        raise ValueError(
+            f"Expected exactly {JOINT_COUNT} configured joint limits for three fingers"
+        )
     invalid = [
         name
         for name, target, minimum, maximum in zip(
-            ("MCP", "PIP"), targets, lower, upper
+            (
+                "Finger 1 MCP", "Finger 1 PIP", "Finger 1 AB/AD",
+                "Finger 2 MCP", "Finger 2 PIP", "Finger 2 AB/AD",
+                "Finger 3 MCP", "Finger 3 PIP", "Finger 3 AB/AD",
+            ),
+            targets,
+            lower,
+            upper,
         )
         if not minimum <= target <= maximum
     ]
@@ -125,24 +142,28 @@ def _validated_default_targets(
 
 
 def _ui_order_indices(
-    motor_ids: tuple[int, ...] | list[int], mcp_id: int, pip_id: int
-) -> tuple[int, int]:
-    """Map UI order (MCP, PIP) to an API array's configured motor order."""
+    motor_ids: tuple[int, ...] | list[int],
+    *requested_ids: int,
+) -> tuple[int, ...]:
+    """Map requested UI motor order to the configured motor order."""
 
-    if mcp_id == pip_id:
-        raise ValueError("MCP and PIP motor IDs must be different")
+    if not requested_ids:
+        requested_ids = UI_MOTOR_IDS
+    if len(set(requested_ids)) != len(requested_ids):
+        raise ValueError("All requested motor IDs must be different")
     try:
-        return motor_ids.index(mcp_id), motor_ids.index(pip_id)
+        return tuple(motor_ids.index(motor_id) for motor_id in requested_ids)
     except ValueError as exc:
         raise ValueError(
-            f"MCP/PIP motor IDs {(mcp_id, pip_id)} are not both in {tuple(motor_ids)}"
+            f"Requested motor IDs {requested_ids} are not all in "
+            f"{tuple(motor_ids)}"
         ) from exc
 
 
 def _build_contact_detectors(
     settings: ContactDetectorSettings,
-) -> tuple[ContactStateMachine, ContactStateMachine]:
-    """Validate UI tuning and create independent MCP/PIP state machines."""
+) -> tuple[ContactStateMachine, ...]:
+    """Validate tuning and create one state machine for each of nine joints."""
 
     parameters = {
         "Motion speed threshold": settings.max_velocity_rad_s,
@@ -165,7 +186,7 @@ def _build_contact_detectors(
         "min_engaged_time_s": settings.min_engaged_time_s,
         "exit_persistence_time_s": settings.exit_persistence_time_s,
     }
-    return ContactStateMachine(**kwargs), ContactStateMachine(**kwargs)
+    return tuple(ContactStateMachine(**kwargs) for _ in range(JOINT_COUNT))
 
 
 def _contact_circle_radius(contact_feedback_value: float) -> float:
@@ -187,23 +208,27 @@ def _threshold_normalized_joint_difference(
     return np.abs(np.asarray(position_errors, dtype=float)) / entry_error_threshold
 
 
-def _stream_sample(elapsed_s: float, duration_s: float) -> tuple[np.ndarray, float, bool]:
-    """Return the open-close-open target, speed, and completion state."""
+def _stream_sample(
+    elapsed_s: float, duration_s: float
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Return nine-joint open-close-open targets, speeds, and completion state."""
 
     if not math.isfinite(duration_s) or duration_s <= 0:
         raise ValueError("duration_s must be finite and positive")
-    open_targets = np.full(2, STREAM_OPEN_ANGLE_RAD)
-    close_targets = np.full(2, STREAM_CLOSE_ANGLE_RAD)
-    commanded_speed = abs(STREAM_CLOSE_ANGLE_RAD - STREAM_OPEN_ANGLE_RAD) / duration_s
+    open_targets = np.zeros(JOINT_COUNT, dtype=float)
+    close_targets = np.zeros(JOINT_COUNT, dtype=float)
+    open_targets[list(FLEXION_INDICES)] = STREAM_OPEN_ANGLE_RAD
+    close_targets[list(FLEXION_INDICES)] = STREAM_CLOSE_ANGLE_RAD
+    commanded_speeds = np.abs(close_targets - open_targets) / duration_s
     if elapsed_s <= duration_s:
         progress = max(0.0, elapsed_s / duration_s)
         targets = open_targets + progress * (close_targets - open_targets)
-        return targets, commanded_speed, False
+        return targets, commanded_speeds, False
     if elapsed_s <= 2.0 * duration_s:
         progress = (elapsed_s - duration_s) / duration_s
         targets = close_targets + progress * (open_targets - close_targets)
-        return targets, commanded_speed, False
-    return open_targets, 0.0, True
+        return targets, commanded_speeds, False
+    return open_targets, np.zeros(JOINT_COUNT, dtype=float), True
 
 
 class HandWorker(threading.Thread):
@@ -215,12 +240,12 @@ class HandWorker(threading.Thread):
         events: queue.Queue[WorkerEvent],
     ) -> None:
         # Non-daemon is deliberate: Python must not exit before torque disable.
-        super().__init__(name="two-joint-hand-worker", daemon=False)
+        super().__init__(name="finger-contact-hand-worker", daemon=False)
         self.commands = commands
         self.events = events
         self.hand: MidasHand | None = None
-        self.ui_to_hand_indices = (0, 1)
-        self.targets = np.zeros(2, dtype=float)  # order: MCP, PIP
+        self.ui_to_hand_indices = tuple(range(JOINT_COUNT))
+        self.targets = np.zeros(JOINT_COUNT, dtype=float)
         self.contact_settings = ContactDetectorSettings()
         self.contact_detectors = _build_contact_detectors(self.contact_settings)
         self.sequence_active = False
@@ -228,8 +253,8 @@ class HandWorker(threading.Thread):
         self.sequence_duration_s = 2.0
         self.sequence_started_at = 0.0
         self.preposition_started_at = 0.0
-        self.commanded_velocity = np.zeros(2, dtype=float)
-        self.profile_motion_until = np.zeros(2, dtype=float)
+        self.commanded_velocity = np.zeros(JOINT_COUNT, dtype=float)
+        self.profile_motion_until = np.zeros(JOINT_COUNT, dtype=float)
         self.running = True
 
     def run(self) -> None:
@@ -265,6 +290,8 @@ class HandWorker(threading.Thread):
             self._disconnect()
         elif name == "targets":
             new_targets = np.asarray(payload, dtype=float)
+            if new_targets.shape != (JOINT_COUNT,):
+                raise ValueError(f"Expected {JOINT_COUNT} joint targets")
             if not self.sequence_active:
                 travel_times = np.abs(new_targets - self.targets) / PROFILE_VELOCITY_RAD_S
                 self.profile_motion_until = time.monotonic() + travel_times + 0.1
@@ -284,8 +311,8 @@ class HandWorker(threading.Thread):
                 )
             if self.hand is None:
                 raise RuntimeError("Connect the hand before starting the sequence")
-            open_targets = np.full(2, STREAM_OPEN_ANGLE_RAD)
-            close_targets = np.full(2, STREAM_CLOSE_ANGLE_RAD)
+            open_targets, _, _ = _stream_sample(0.0, duration_s)
+            close_targets, _, _ = _stream_sample(duration_s, duration_s)
             if not np.array_equal(self._clip_ui_targets(open_targets), open_targets):
                 raise ValueError("The open target is outside the configured joint limits")
             if not np.array_equal(self._clip_ui_targets(close_targets), close_targets):
@@ -316,10 +343,8 @@ class HandWorker(threading.Thread):
                 "placeholders_unreviewed: false in the YAML configuration"
             )
         full_config = HandConfig.load(settings.config_path)
-        config = full_config.subset((settings.mcp_id, settings.pip_id))
-        ui_to_hand_indices = _ui_order_indices(
-            list(config.motor_ids), settings.mcp_id, settings.pip_id
-        )
+        config = full_config.subset(UI_MOTOR_IDS)
+        ui_to_hand_indices = _ui_order_indices(list(config.motor_ids))
         lower_limits = tuple(
             config.joint_lower_limits[index] for index in ui_to_hand_indices
         )
@@ -329,7 +354,7 @@ class HandWorker(threading.Thread):
         default_targets = _validated_default_targets(
             lower_limits, upper_limits
         )
-        default_targets_hand_order = np.empty(2, dtype=float)
+        default_targets_hand_order = np.empty(JOINT_COUNT, dtype=float)
         default_targets_hand_order[list(ui_to_hand_indices)] = default_targets
         hand = MidasHand(config, autoconnect=False)
         try:
@@ -397,7 +422,7 @@ class HandWorker(threading.Thread):
             self.events.put(WorkerEvent("disconnected"))
 
     def _to_hand_order(self, values: np.ndarray) -> np.ndarray:
-        ordered = np.empty(2, dtype=float)
+        ordered = np.empty(JOINT_COUNT, dtype=float)
         ordered[list(self.ui_to_hand_indices)] = values
         return ordered
 
@@ -417,14 +442,14 @@ class HandWorker(threading.Thread):
         assert self.hand is not None
         targets = self.targets.copy()
         if self.sequence_phase == "preposition":
-            targets = np.full(2, STREAM_OPEN_ANGLE_RAD)
+            targets, _, _ = _stream_sample(0.0, self.sequence_duration_s)
             self.commanded_velocity.fill(PROFILE_VELOCITY_RAD_S)
         elif self.sequence_phase == "stream":
             elapsed = time.monotonic() - self.sequence_started_at
-            targets, speed, complete = _stream_sample(
+            targets, speeds, complete = _stream_sample(
                 elapsed, self.sequence_duration_s
             )
-            self.commanded_velocity.fill(speed)
+            self.commanded_velocity = speeds
             if complete:
                 self.targets = targets.copy()
                 self.sequence_active = False
@@ -450,8 +475,9 @@ class HandWorker(threading.Thread):
         velocities = self._to_ui_order(velocities)
         currents = self._to_ui_order(currents)
         if self.sequence_phase == "preposition":
+            open_targets, _, _ = _stream_sample(0.0, self.sequence_duration_s)
             if np.all(
-                np.abs(positions - STREAM_OPEN_ANGLE_RAD)
+                np.abs(positions - open_targets)
                 <= STREAM_PREPOSITION_TOLERANCE_RAD
             ):
                 self.sequence_phase = "stream"
@@ -510,8 +536,8 @@ class ContactVisualizerUI:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Two-joint contact visualizer")
-        self.root.minsize(980, 800)
+        self.root.title("Three-finger contact visualizer")
+        self.root.minsize(1200, 900)
         self.commands: queue.Queue[tuple[str, object]] = queue.Queue()
         self.events: queue.Queue[WorkerEvent] = queue.Queue()
         self.worker = HandWorker(self.commands, self.events)
@@ -524,19 +550,19 @@ class ContactVisualizerUI:
 
         self._build_window()
         self._load_limits_from_config(show_error=False)
-        self._draw_finger(0.0, 0.0, False, False)
+        self._draw_hand()
         self.root.after(30, self._drain_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_window(self) -> None:
         outer = ttk.Frame(self.root, padding=12)
         outer.pack(fill="both", expand=True)
-        outer.columnconfigure(0, weight=3)
-        outer.columnconfigure(1, weight=2)
+        for column in range(3):
+            outer.columnconfigure(column, weight=1)
         outer.rowconfigure(1, weight=1)
 
         connection = ttk.Frame(outer)
-        connection.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        connection.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         connection.columnconfigure(1, weight=1)
         ttk.Label(connection, text="Config").grid(row=0, column=0, sticky="w")
         self.config_var = tk.StringVar(value=str(DEFAULT_CONFIG_PATH))
@@ -546,62 +572,56 @@ class ContactVisualizerUI:
         ttk.Button(connection, text="Browse…", command=self._browse_config).grid(
             row=0, column=2
         )
-        ttk.Label(connection, text="MCP ID").grid(row=0, column=3, padx=(16, 4))
-        self.mcp_id_var = tk.StringVar(value=str(DEFAULT_MCP_ID))
-        ttk.Entry(connection, textvariable=self.mcp_id_var, width=5).grid(row=0, column=4)
-        ttk.Label(connection, text="PIP ID").grid(row=0, column=5, padx=(12, 4))
-        self.pip_id_var = tk.StringVar(value=str(DEFAULT_PIP_ID))
-        ttk.Entry(connection, textvariable=self.pip_id_var, width=5).grid(row=0, column=6)
+        ttk.Label(
+            connection,
+            text="Finger motors: 4–6  ·  7–9  ·  10–12",
+        ).grid(row=0, column=3, padx=(16, 0))
         self.connect_button = ttk.Button(
             connection, text="Connect + enable torque", command=self._toggle_connection
         )
-        self.connect_button.grid(row=0, column=7, padx=(16, 0))
+        self.connect_button.grid(row=0, column=4, padx=(16, 0))
 
-        visual = ttk.LabelFrame(outer, text="Live finger", padding=8)
-        visual.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
+        visual = ttk.LabelFrame(outer, text="Live contact", padding=8)
+        visual.grid(row=1, column=0, columnspan=3, sticky="nsew")
         visual.rowconfigure(0, weight=1)
         visual.columnconfigure(0, weight=1)
         self.canvas = tk.Canvas(
-            visual, background="#10151c", highlightthickness=0, width=560, height=500
+            visual, background="#f7f7f5", highlightthickness=0, height=420
         )
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", lambda _event: self._redraw_latest())
 
-        controls = ttk.Frame(outer)
-        controls.grid(row=1, column=1, sticky="nsew", padx=(8, 0))
-        controls.columnconfigure(0, weight=1)
+        self.target_vars = [tk.DoubleVar(value=0.0) for _ in range(JOINT_COUNT)]
+        self.value_vars = [tk.StringVar(value="0.000 rad") for _ in range(JOINT_COUNT)]
+        self.scales: list[tk.Scale] = []
+        for finger_index, (pip_id, mcp_id, ab_ad_id) in enumerate(FINGER_MOTOR_IDS):
+            module = ttk.LabelFrame(
+                outer, text=f"Finger {finger_index + 1} joint targets", padding=10
+            )
+            module.grid(
+                row=2,
+                column=finger_index,
+                sticky="nsew",
+                padx=(0 if finger_index == 0 else 6, 0 if finger_index == 2 else 6),
+                pady=(10, 0),
+            )
+            module.columnconfigure(0, weight=1)
+            offset = finger_index * 3
+            for joint_offset, (joint_name, motor_id) in enumerate(
+                zip(("MCP", "PIP", "AB/AD"), (mcp_id, pip_id, ab_ad_id))
+            ):
+                self.scales.append(
+                    self._add_slider(
+                        module,
+                        joint_offset * 2,
+                        f"{joint_name}  ·  ID {motor_id}",
+                        self.target_vars[offset + joint_offset],
+                        self.value_vars[offset + joint_offset],
+                    )
+                )
 
-        contact_frame = ttk.LabelFrame(controls, text="Contact state", padding=10)
-        contact_frame.grid(row=0, column=0, sticky="ew")
-        contact_frame.columnconfigure(0, weight=1)
-        contact_frame.columnconfigure(1, weight=1)
-        self.mcp_contact_label = tk.Label(
-            contact_frame, text="MCP\nNO CONTACT", bg="#25313d", fg="white",
-            font=("TkDefaultFont", 13, "bold"), padx=12, pady=12,
-        )
-        self.mcp_contact_label.grid(row=0, column=0, sticky="ew", padx=(0, 5))
-        self.pip_contact_label = tk.Label(
-            contact_frame, text="PIP\nNO CONTACT", bg="#25313d", fg="white",
-            font=("TkDefaultFont", 13, "bold"), padx=12, pady=12,
-        )
-        self.pip_contact_label.grid(row=0, column=1, sticky="ew", padx=(5, 0))
-
-        sliders = ttk.LabelFrame(controls, text="Joint targets", padding=10)
-        sliders.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        sliders.columnconfigure(0, weight=1)
-        self.mcp_target_var = tk.DoubleVar(value=0.0)
-        self.pip_target_var = tk.DoubleVar(value=0.0)
-        self.mcp_value_var = tk.StringVar(value="0.000 rad")
-        self.pip_value_var = tk.StringVar(value="0.000 rad")
-        self.mcp_scale = self._add_slider(
-            sliders, 0, "MCP", self.mcp_target_var, self.mcp_value_var
-        )
-        self.pip_scale = self._add_slider(
-            sliders, 2, "PIP", self.pip_target_var, self.pip_value_var
-        )
-
-        detector = ttk.LabelFrame(controls, text="Contact detector", padding=10)
-        detector.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        detector = ttk.LabelFrame(outer, text="Contact detector settings", padding=10)
+        detector.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(10, 0), padx=(0, 6))
         detector.columnconfigure(1, weight=1)
         self.contact_max_velocity_var = tk.StringVar(
             value=str(CONTACT_MAX_VELOCITY_RAD_S)
@@ -678,9 +698,9 @@ class ContactVisualizerUI:
         ).grid(row=8, column=0, columnspan=3, sticky="ew", pady=(7, 0))
 
         sequence = ttk.LabelFrame(
-            controls, text="Streamed open-close-open sequence", padding=10
+            outer, text="Streamed open-close-open sequence", padding=10
         )
-        sequence.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        sequence.grid(row=3, column=2, sticky="nsew", pady=(10, 0), padx=(6, 0))
         sequence.columnconfigure(1, weight=1)
         self.sequence_duration_var = tk.StringVar(value="2.0")
         self._labeled_entry(
@@ -696,21 +716,9 @@ class ContactVisualizerUI:
             row=1, column=0, columnspan=3, sticky="ew", pady=(7, 0)
         )
 
-        readings = ttk.LabelFrame(controls, text="Live readings (MCP / PIP)", padding=10)
-        readings.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        self.readings_var = tk.StringVar(
-            value=(
-                "Position:  — / — rad\nError:     — / — rad\n"
-                "Candidate: — / —\nFeedback:  — / —\nCurrent:   — / — mA"
-            )
-        )
-        ttk.Label(readings, textvariable=self.readings_var, font="TkFixedFont").grid(
-            row=0, column=0, sticky="w"
-        )
-
         self.status_var = tk.StringVar(value="Disconnected — torque disabled")
         ttk.Label(outer, textvariable=self.status_var, anchor="w").grid(
-            row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0)
+            row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0)
         )
 
     def _add_slider(
@@ -768,19 +776,17 @@ class ContactVisualizerUI:
     def _load_limits_from_config(self, *, show_error: bool) -> bool:
         try:
             config = HandConfig.load(Path(self.config_var.get()).expanduser())
-            ids = (int(self.mcp_id_var.get()), int(self.pip_id_var.get()))
-            subset = config.subset(ids)
-            indices = _ui_order_indices(list(subset.motor_ids), *ids)
+            subset = config.subset(UI_MOTOR_IDS)
+            indices = _ui_order_indices(list(subset.motor_ids))
             lower = tuple(subset.joint_lower_limits[index] for index in indices)
             upper = tuple(subset.joint_upper_limits[index] for index in indices)
             _validated_default_targets(lower, upper)
-            self.mcp_scale.configure(from_=lower[0], to=upper[0])
-            self.pip_scale.configure(from_=lower[1], to=upper[1])
+            for scale, minimum, maximum in zip(self.scales, lower, upper):
+                scale.configure(from_=minimum, to=maximum)
             if not self.connected:
-                self.mcp_target_var.set(DEFAULT_JOINT_TARGETS_RAD[0])
-                self.pip_target_var.set(DEFAULT_JOINT_TARGETS_RAD[1])
-                self.mcp_value_var.set("0.000 rad")
-                self.pip_value_var.set("0.000 rad")
+                for target_var, value_var in zip(self.target_vars, self.value_vars):
+                    target_var.set(0.0)
+                    value_var.set("0.000 rad")
             return True
         except Exception as exc:
             if show_error:
@@ -794,11 +800,7 @@ class ContactVisualizerUI:
             self.status_var.set("Disconnecting and disabling torque…")
             return
         try:
-            settings = ConnectionSettings(
-                Path(self.config_var.get()).expanduser(),
-                int(self.mcp_id_var.get()),
-                int(self.pip_id_var.get()),
-            )
+            settings = ConnectionSettings(Path(self.config_var.get()).expanduser())
             if not settings.config_path.is_file():
                 raise ValueError(f"Configuration does not exist: {settings.config_path}")
         except ValueError as exc:
@@ -808,9 +810,9 @@ class ContactVisualizerUI:
             return
         if not messagebox.askokcancel(
             "Enable physical motion",
-            "Connecting will configure both motors, enable torque, and move the "
-            "MCP and PIP targets to 0 rad. Keep the finger clear, verify the motor "
-            "IDs, and have an emergency stop ready.",
+            "Connecting will configure motors 4–12, enable torque, and move all "
+            "three fingers to 0 rad. Keep the hand clear, verify the motor IDs, "
+            "and have an emergency stop ready.",
             icon="warning",
         ):
             return
@@ -819,8 +821,8 @@ class ContactVisualizerUI:
         self.commands.put(("connect", settings))
 
     def _slider_changed(self) -> None:
-        self.mcp_value_var.set(f"{self.mcp_target_var.get():.3f} rad")
-        self.pip_value_var.set(f"{self.pip_target_var.get():.3f} rad")
+        for target_var, value_var in zip(self.target_vars, self.value_vars):
+            value_var.set(f"{target_var.get():.3f} rad")
         # Throttle to the hardware control rate instead of debouncing. Cancelling
         # and restarting this callback on every drag event delays the command
         # until the user releases the slider, which makes control feel laggy.
@@ -831,9 +833,7 @@ class ContactVisualizerUI:
     def _send_targets(self) -> None:
         self._slider_job = None
         if self.connected and not self.sequence_active:
-            self.commands.put(
-                ("targets", (self.mcp_target_var.get(), self.pip_target_var.get()))
-            )
+            self.commands.put(("targets", tuple(var.get() for var in self.target_vars)))
 
     def _apply_contact_settings(self) -> None:
         try:
@@ -880,9 +880,10 @@ class ContactVisualizerUI:
             return
         if not messagebox.askokcancel(
             "Run open-close-open sequence",
-            "Both selected joints will move to 0 rad, stream to -1.35 rad, and "
-            f"stream back to 0 rad. Each leg takes {duration_s:g} seconds. "
-            "Make sure the full finger workspace is clear.",
+            "All MCP and PIP joints will move 0 → -1.35 → 0 rad while all "
+            "AB/AD joints remain at 0 rad. "
+            f"Each leg takes {duration_s:g} seconds. Make sure the full "
+            "finger workspace is clear.",
             icon="warning",
         ):
             return
@@ -911,12 +912,9 @@ class ContactVisualizerUI:
             self.connected = True
             self.connect_button.configure(text="Disconnect + disable torque", state="normal")
             self.sequence_button.configure(state="normal")
-            self.mcp_scale.configure(state="normal")
-            self.pip_scale.configure(state="normal")
-            self.mcp_scale.configure(from_=lower[0], to=upper[0])
-            self.pip_scale.configure(from_=lower[1], to=upper[1])
-            self.mcp_target_var.set(targets[0])
-            self.pip_target_var.set(targets[1])
+            for index, scale in enumerate(self.scales):
+                scale.configure(state="normal", from_=lower[index], to=upper[index])
+                self.target_vars[index].set(targets[index])
             self._slider_changed()
         elif event.kind == "disconnected":
             self.connected = False
@@ -925,10 +923,11 @@ class ContactVisualizerUI:
             self.sequence_button.configure(
                 text="Run open → close → open", state="disabled"
             )
-            self.mcp_scale.configure(state="normal")
-            self.pip_scale.configure(state="normal")
+            for scale in self.scales:
+                scale.configure(state="normal")
             self.status_var.set("Disconnected — torque disabled")
-            self._set_contact_labels(False, False)
+            self.latest_telemetry = None
+            self._draw_hand()
         elif event.kind == "error":
             self.connected = False
             self.sequence_active = False
@@ -936,8 +935,8 @@ class ContactVisualizerUI:
             self.sequence_button.configure(
                 text="Run open → close → open", state="disabled"
             )
-            self.mcp_scale.configure(state="normal")
-            self.pip_scale.configure(state="normal")
+            for scale in self.scales:
+                scale.configure(state="normal")
             self.status_var.set(f"Error: {event.payload}")
             if not self._closing:
                 messagebox.showerror("Hand controller error", str(event.payload))
@@ -954,124 +953,130 @@ class ContactVisualizerUI:
             )
         )
         slider_state = "disabled" if telemetry.sequence_active else "normal"
-        self.mcp_scale.configure(state=slider_state)
-        self.pip_scale.configure(state=slider_state)
+        for scale in self.scales:
+            scale.configure(state=slider_state)
         if sequence_changed and not telemetry.sequence_active:
-            self.mcp_target_var.set(telemetry.targets[0])
-            self.pip_target_var.set(telemetry.targets[1])
-            self.mcp_value_var.set(f"{telemetry.targets[0]:.3f} rad")
-            self.pip_value_var.set(f"{telemetry.targets[1]:.3f} rad")
-        mcp_contact, pip_contact = telemetry.contacts
-        self._set_contact_labels(
-            mcp_contact,
-            pip_contact,
+            for target_var, value_var, target in zip(
+                self.target_vars, self.value_vars, telemetry.targets
+            ):
+                target_var.set(target)
+                value_var.set(f"{target:.3f} rad")
+        self._draw_hand(
+            telemetry.contacts,
+            telemetry.contact_feedback,
             telemetry.normalized_joint_difference,
         )
-        self._draw_finger(
-            telemetry.positions[0],
-            telemetry.positions[1],
-            mcp_contact,
-            pip_contact,
-            telemetry.contact_feedback[0],
-            telemetry.contact_feedback[1],
-            telemetry.normalized_joint_difference[0],
-            telemetry.normalized_joint_difference[1],
-        )
-        self.readings_var.set(
-            f"Position:  {telemetry.positions[0]:7.3f} / {telemetry.positions[1]:7.3f} rad\n"
-            f"Error:     {telemetry.errors[0]:7.3f} / {telemetry.errors[1]:7.3f} rad\n"
-            f"Candidate: {telemetry.candidate_feedback[0]:7.3f} / "
-            f"{telemetry.candidate_feedback[1]:7.3f}\n"
-            f"Feedback:  {telemetry.contact_feedback[0]:7.3f} / "
-            f"{telemetry.contact_feedback[1]:7.3f}\n"
-            f"Current:   {telemetry.currents_ma[0]:7.1f} / {telemetry.currents_ma[1]:7.1f} mA"
-        )
-
-    def _set_contact_labels(
-        self,
-        mcp_contact: bool,
-        pip_contact: bool,
-        normalized_difference: tuple[float, float] = (0.0, 0.0),
-    ) -> None:
-        for label, name, contact, normalized in (
-            (self.mcp_contact_label, "MCP", mcp_contact, normalized_difference[0]),
-            (self.pip_contact_label, "PIP", pip_contact, normalized_difference[1]),
-        ):
-            state_text = (
-                f"CONTACT\n{normalized:.2f}× threshold"
-                if contact
-                else "NO CONTACT"
-            )
-            label.configure(
-                text=f"{name}\n{state_text}",
-                bg="#ff3b30" if contact else "#25313d",
-                fg="white",
-            )
 
     def _redraw_latest(self) -> None:
         telemetry = self.latest_telemetry
         if telemetry is None:
-            self._draw_finger(0.0, 0.0, False, False)
+            self._draw_hand()
         else:
-            self._draw_finger(
-                telemetry.positions[0], telemetry.positions[1],
-                telemetry.contacts[0], telemetry.contacts[1],
-                telemetry.contact_feedback[0], telemetry.contact_feedback[1],
-                telemetry.normalized_joint_difference[0],
-                telemetry.normalized_joint_difference[1],
+            self._draw_hand(
+                telemetry.contacts,
+                telemetry.contact_feedback,
+                telemetry.normalized_joint_difference,
             )
 
-    def _draw_finger(
+    def _draw_hand(
         self,
-        mcp_angle: float,
-        pip_angle: float,
-        mcp_contact: bool,
-        pip_contact: bool,
-        mcp_contact_strength: float = 0.0,
-        pip_contact_strength: float = 0.0,
-        mcp_normalized_difference: float = 0.0,
-        pip_normalized_difference: float = 0.0,
+        contacts: tuple[bool, ...] = (False,) * JOINT_COUNT,
+        contact_strengths: tuple[float, ...] = (0.0,) * JOINT_COUNT,
+        normalized_differences: tuple[float, ...] = (0.0,) * JOINT_COUNT,
     ) -> None:
         self.canvas.delete("all")
-        width = max(self.canvas.winfo_width(), 300)
-        height = max(self.canvas.winfo_height(), 300)
-        base = np.array((width * 0.24, height * 0.80))
-        proximal_angle = -math.pi / 2.0 - mcp_angle
-        distal_angle = proximal_angle - pip_angle
-        proximal_length = min(width * 0.36, height * 0.39)
-        distal_length = proximal_length * 0.82
-        joint = base + proximal_length * np.array(
-            (math.cos(proximal_angle), math.sin(proximal_angle))
-        )
-        tip = joint + distal_length * np.array(
-            (math.cos(distal_angle), math.sin(distal_angle))
-        )
+        width = max(self.canvas.winfo_width(), 600)
+        height = max(self.canvas.winfo_height(), 400)
+        x_positions = (width * 0.28, width * 0.50, width * 0.72)
+        block_width = min(120.0, width * 0.13)
+        pip_center_y = height * 0.25
+        mcp_center_y = height * 0.56
+        ab_ad_center_y = height * 0.84
+        block_height = min(115.0, height * 0.25)
 
         self.canvas.create_text(
-            16, 16, anchor="nw", fill="#8fa3b8", text="Measured joint pose",
-            font=("TkDefaultFont", 11, "bold"),
+            22, height / 2, text="MCP", fill="#333333",
+            font=("TkDefaultFont", 13, "bold"),
         )
-        self._draw_segment(base, joint, "MCP", mcp_contact)
-        self._draw_segment(joint, tip, "PIP", pip_contact)
-        for point in (base, joint):
-            x, y = point
-            self.canvas.create_oval(
-                x - 10, y - 10, x + 10, y + 10,
-                fill="#d8e0e8", outline="#10151c", width=3,
+        self.canvas.create_text(
+            22, pip_center_y, text="PIP", fill="#333333",
+            font=("TkDefaultFont", 13, "bold"),
+        )
+        self.canvas.create_text(
+            28, ab_ad_center_y, text="AB/AD", fill="#333333",
+            font=("TkDefaultFont", 13, "bold"),
+        )
+
+        # Match the supplied sketch: finger 3 is leftmost and finger 1 rightmost.
+        for x, finger_index in zip(x_positions, (2, 1, 0)):
+            offset = finger_index * 3
+            mcp_index, pip_index, ab_ad_index = offset, offset + 1, offset + 2
+            self.canvas.create_text(
+                x, 18, text=f"Finger {finger_index + 1}", fill="#333333",
+                font=("TkDefaultFont", 13, "bold"),
             )
-        x, y = tip
+            self._draw_joint_block(
+                np.asarray((x, pip_center_y)), block_width, block_height,
+                f"PIP  ·  ID {UI_MOTOR_IDS[pip_index]}", contacts[pip_index],
+            )
+            self._draw_joint_block(
+                np.asarray((x, mcp_center_y)), block_width, block_height,
+                f"MCP  ·  ID {UI_MOTOR_IDS[mcp_index]}", contacts[mcp_index],
+            )
+            self._draw_ab_ad_motor(
+                np.asarray((x, ab_ad_center_y)), UI_MOTOR_IDS[ab_ad_index],
+                contacts[ab_ad_index],
+            )
+            for index, center in (
+                (pip_index, np.asarray((x, pip_center_y))),
+                (mcp_index, np.asarray((x, mcp_center_y))),
+                (ab_ad_index, np.asarray((x, ab_ad_center_y))),
+            ):
+                if contacts[index]:
+                    self._draw_contact_circle(
+                        center, contact_strengths[index], normalized_differences[index]
+                    )
+
+    def _draw_joint_block(
+        self,
+        center: np.ndarray,
+        width: float,
+        height: float,
+        label: str,
+        contact: bool,
+    ) -> None:
+        x, y = center
+        self.canvas.create_rectangle(
+            x - width / 2,
+            y - height / 2,
+            x + width / 2,
+            y + height / 2,
+            fill="#ff6b57" if contact else "#ffffff",
+            outline="#d33c2d" if contact else "#333333",
+            width=4,
+        )
+        state = "CONTACT" if contact else "NO CONTACT"
+        self.canvas.create_text(
+            x, y, text=f"{label}\n{state}", fill="#1f1f1f",
+            justify="center", font=("TkDefaultFont", 11, "bold"),
+        )
+
+    def _draw_ab_ad_motor(
+        self, center: np.ndarray, motor_id: int, contact: bool
+    ) -> None:
+        x, y = center
+        radius = 43.0
         self.canvas.create_oval(
-            x - 7, y - 7, x + 7, y + 7,
-            fill="#d8e0e8", outline="#10151c", width=2,
+            x - radius, y - radius, x + radius, y + radius,
+            fill="#ff6b57" if contact else "#ffffff",
+            outline="#d33c2d" if contact else "#333333",
+            width=4,
         )
-        if mcp_contact:
-            self._draw_contact_circle(
-                base, mcp_contact_strength, mcp_normalized_difference
-            )
-        if pip_contact:
-            self._draw_contact_circle(
-                joint, pip_contact_strength, pip_normalized_difference
-            )
+        state = "CONTACT" if contact else "NO CONTACT"
+        self.canvas.create_text(
+            x, y, text=f"AB/AD · ID {motor_id}\n{state}", fill="#1f1f1f",
+            justify="center", font=("TkDefaultFont", 10, "bold"),
+        )
 
     def _draw_contact_circle(
         self, center: np.ndarray, strength: float, normalized_difference: float
@@ -1087,41 +1092,8 @@ class ContactVisualizerUI:
             x,
             y + radius + 13,
             text=f"{normalized_difference:.2f}× threshold",
-            fill="#ffd166",
+            fill="#9a2f20",
             font=("TkDefaultFont", 11, "bold"),
-        )
-
-    def _draw_segment(
-        self, start: np.ndarray, end: np.ndarray, label: str, contact: bool
-    ) -> None:
-        delta = end - start
-        length = float(np.linalg.norm(delta))
-        if length == 0:
-            return
-        normal = np.array((-delta[1], delta[0])) / length
-        half_width = 24.0
-        corners = (
-            start + normal * half_width,
-            end + normal * half_width,
-            end - normal * half_width,
-            start - normal * half_width,
-        )
-        points = [coordinate for point in corners for coordinate in point]
-        if contact:
-            self.canvas.create_polygon(
-                points, fill="", outline="#ff9f0a", width=12, joinstyle="round"
-            )
-        self.canvas.create_polygon(
-            points,
-            fill="#ff453a" if contact else "#3a86a8",
-            outline="#ffd166" if contact else "#83c5d8",
-            width=4,
-            joinstyle="round",
-        )
-        midpoint = (start + end) / 2.0
-        self.canvas.create_text(
-            midpoint[0], midpoint[1], text=label, fill="white",
-            font=("TkDefaultFont", 12, "bold"),
         )
 
     def _on_close(self) -> None:

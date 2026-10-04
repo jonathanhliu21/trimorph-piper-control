@@ -69,7 +69,7 @@ from midas_hand_api import HandConfig, MidasHand, home_hand
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("xl330_test_config.yaml")
 SUPPORTED_MOTOR_MODELS = ("xl330-m077-t", "xm335-t323-t")
 # Joint order is significant: PIP, MCP flexion, then optionally one ABAD motor.
-DEFAULT_MOTOR_IDS = (4, 5, 6)  # Append motor 6 when ABAD is ready.
+DEFAULT_MOTOR_IDS = (7, 8, 9)  # Append motor 6 when ABAD is ready.
 
 # Review these calibrated targets before moving hardware. The YAML joint signs
 # must make these calibrated targets move each joint in the intended direction.
