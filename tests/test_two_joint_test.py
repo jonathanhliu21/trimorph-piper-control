@@ -13,7 +13,7 @@ from data_collection.collection.contact_detection import (
     CONTACT_THRESHOLD,
     contact_feedback as shared_contact_feedback,
 )
-from scripts.trimorph_api_test.two_joint_test import (
+from scripts.trimorph_api_test.joint_test import (
     TEST_FINGER_MOTOR_IDS,
     _CurrentRecorder,
     _build_parser,
