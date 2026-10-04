@@ -14,10 +14,14 @@ from scripts.trimorph_api_test.hand_ui import (
     HandWorker,
     JOINT_COUNT,
     STREAM_CLOSE_ANGLE_RAD,
-    STREAM_OPEN_ANGLE_RAD,
+    THUMB_CLOSE_ANGLES_RAD,
+    THUMB_INDICES,
+    THUMB_OPEN_ANGLES_RAD,
     UI_MOTOR_IDS,
     _build_contact_detectors,
     _contact_circle_radius,
+    _contact_direction_label,
+    _contact_palette,
     _stream_sample,
     _threshold_normalized_joint_difference,
     _ui_order_indices,
@@ -65,6 +69,11 @@ class ContactTuningTests(unittest.TestCase):
     def test_contact_circle_grows_with_feedback_and_is_bounded(self):
         self.assertLess(_contact_circle_radius(0.02), _contact_circle_radius(0.10))
         self.assertEqual(_contact_circle_radius(100.0), 120.0)
+
+    def test_contact_direction_uses_distinct_palettes(self):
+        self.assertNotEqual(_contact_palette(0.1), _contact_palette(-0.1))
+        self.assertEqual(_contact_direction_label(0.1), "CONTACT  +")
+        self.assertEqual(_contact_direction_label(-0.1), "CONTACT  −")
 
     def test_joint_difference_is_normalized_by_effective_entry_threshold(self):
         normalized = _threshold_normalized_joint_difference(
@@ -161,25 +170,20 @@ class HandWorkerContactTests(unittest.TestCase):
         hand = self.FakeHand()
         # HandConfig.subset preserves YAML motor order while the UI groups each
         # finger as MCP, PIP, then AB/AD.
-        worker.ui_to_hand_indices = (1, 0, 2, 4, 3, 5, 7, 6, 8)
+        worker.ui_to_hand_indices = (5, 4, 6, 8, 7, 9, 11, 10, 12, 0, 1, 2, 3)
         worker.hand = hand
-        worker.targets = np.asarray(
-            [-0.10, -0.20, 0.01, -0.30, -0.40, 0.02, -0.50, -0.60, 0.03]
-        )
-        hand.positions = np.asarray(
-            [-0.21, -0.11, 0.01, -0.41, -0.31, 0.02, -0.61, -0.51, 0.03]
-        )
+        worker.targets = np.linspace(-0.60, 0.0, JOINT_COUNT)
+        hand.positions = np.linspace(-0.12, 0.0, JOINT_COUNT)
 
         worker._control_tick()
         telemetry = events.get_nowait().payload
 
+        expected_targets = np.empty(JOINT_COUNT)
+        expected_targets[list(worker.ui_to_hand_indices)] = worker.targets
+        np.testing.assert_allclose(hand.last_targets, expected_targets)
         np.testing.assert_allclose(
-            hand.last_targets,
-            (-0.20, -0.10, 0.01, -0.40, -0.30, 0.02, -0.60, -0.50, 0.03),
-        )
-        self.assertEqual(
             telemetry.positions,
-            (-0.11, -0.21, 0.01, -0.31, -0.41, 0.02, -0.51, -0.61, 0.03),
+            hand.positions[list(worker.ui_to_hand_indices)],
         )
 
 
@@ -193,8 +197,9 @@ class StreamSequenceTests(unittest.TestCase):
         finished, stopped_speeds, finished_complete = _stream_sample(
             2.1 * duration_s, duration_s
         )
-        open_targets = np.full(JOINT_COUNT, STREAM_OPEN_ANGLE_RAD)
-        close_targets = np.zeros(JOINT_COUNT)
+        open_targets = np.zeros(JOINT_COUNT)
+        open_targets[list(THUMB_INDICES)] = THUMB_OPEN_ANGLES_RAD
+        close_targets = open_targets.copy()
         close_targets[list(FLEXION_INDICES)] = STREAM_CLOSE_ANGLE_RAD
 
         np.testing.assert_allclose(start, open_targets)
@@ -212,6 +217,20 @@ class StreamSequenceTests(unittest.TestCase):
         np.testing.assert_array_equal(stopped_speeds, np.zeros(JOINT_COUNT))
         np.testing.assert_array_equal(start[list(AB_AD_INDICES)], np.zeros(3))
         np.testing.assert_array_equal(closed[list(AB_AD_INDICES)], np.zeros(3))
+        np.testing.assert_allclose(start[list(THUMB_INDICES)], THUMB_OPEN_ANGLES_RAD)
+        np.testing.assert_allclose(closed[list(THUMB_INDICES)], THUMB_OPEN_ANGLES_RAD)
+
+    def test_thumb_stream_keeps_fingers_open(self):
+        duration_s = 2.0
+
+        opened, speeds, _ = _stream_sample(0.0, duration_s, "thumb")
+        closed, _, _ = _stream_sample(duration_s, duration_s, "thumb")
+
+        np.testing.assert_array_equal(opened[:9], np.zeros(9))
+        np.testing.assert_array_equal(closed[:9], np.zeros(9))
+        np.testing.assert_allclose(opened[list(THUMB_INDICES)], THUMB_OPEN_ANGLES_RAD)
+        np.testing.assert_allclose(closed[list(THUMB_INDICES)], THUMB_CLOSE_ANGLES_RAD)
+        np.testing.assert_array_equal(speeds[:9], np.zeros(9))
 
     def test_stream_rejects_non_positive_duration(self):
         for duration_s in (0.0, -1.0, float("nan"), float("inf")):
@@ -219,12 +238,24 @@ class StreamSequenceTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "finite and positive"):
                     _stream_sample(0.0, duration_s)
 
+    def test_thumb_and_finger_sequences_are_mutually_exclusive(self):
+        worker = HandWorker(queue.Queue(), queue.Queue())
+        worker.hand = HandWorkerContactTests.FakeHand()
+        worker._clip_ui_targets = lambda targets: targets
+
+        worker._handle_command("start_sequence", ("thumb", 2.0))
+
+        self.assertTrue(worker.sequence_active)
+        self.assertEqual(worker.sequence_kind, "thumb")
+        with self.assertRaisesRegex(RuntimeError, "active sequence"):
+            worker._handle_command("start_sequence", ("fingers", 2.0))
+
 
 class JointLimitTests(unittest.TestCase):
-    def test_ui_order_maps_all_nine_motor_ids(self):
+    def test_ui_order_maps_all_thirteen_motor_ids(self):
         self.assertEqual(
-            _ui_order_indices(list(range(4, 13))),
-            (1, 0, 2, 4, 3, 5, 7, 6, 8),
+            _ui_order_indices(list(range(13))),
+            (5, 4, 6, 8, 7, 9, 11, 10, 12, 0, 1, 2, 3),
         )
 
     def test_zero_defaults_are_validated_against_configured_limits(self):
@@ -241,10 +272,10 @@ class JointLimitTests(unittest.TestCase):
 
     def test_duplicate_ab_ad_motor_id_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "must be different"):
-            _ui_order_indices(list(range(4, 13)), 5, 4, 5)
+            _ui_order_indices(list(range(13)), 5, 4, 5)
 
-    def test_motor_set_covers_exactly_the_three_non_thumb_fingers(self):
-        self.assertEqual(set(UI_MOTOR_IDS), set(range(4, 13)))
+    def test_motor_set_covers_the_full_hand(self):
+        self.assertEqual(set(UI_MOTOR_IDS), set(range(13)))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Interactive three-finger controller and contact visualizer.
+"""Interactive hand controller and contact visualizer.
 
 Run from any directory with the project environment::
 
@@ -52,20 +52,25 @@ DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "midas_hand_config.yaml"
 # Control arrays use MCP, PIP, AB/AD within each finger; the mapping below keeps
 # that internal order independent of the configuration's motor order.
 FINGER_MOTOR_IDS = ((4, 5, 6), (7, 8, 9), (10, 11, 12))
-UI_MOTOR_IDS = tuple(
+FINGER_UI_MOTOR_IDS = tuple(
     motor_id
     for pip_id, mcp_id, ab_ad_id in FINGER_MOTOR_IDS
     for motor_id in (mcp_id, pip_id, ab_ad_id)
 )
+THUMB_MOTOR_IDS = (0, 1, 2, 3)  # IP, MCP, CMC side, CMC roll
+UI_MOTOR_IDS = FINGER_UI_MOTOR_IDS + THUMB_MOTOR_IDS
 JOINT_COUNT = len(UI_MOTOR_IDS)
 FLEXION_INDICES = (0, 1, 3, 4, 6, 7)
 AB_AD_INDICES = (2, 5, 8)
+THUMB_INDICES = (9, 10, 11, 12)
 CONTROL_RATE_HZ = 50.0
 PROFILE_VELOCITY_RAD_S = 3.0
 PROFILE_ACCELERATION_RAD_S2 = 50.0
 DEFAULT_JOINT_TARGETS_RAD = (0.0,) * JOINT_COUNT
 STREAM_OPEN_ANGLE_RAD = 0.0
 STREAM_CLOSE_ANGLE_RAD = -1.35
+THUMB_OPEN_ANGLES_RAD = (0.0, 0.0, 0.8, 0.0)
+THUMB_CLOSE_ANGLES_RAD = (-1.4, -1.4, -0.1, 1.5)
 STREAM_PREPOSITION_TOLERANCE_RAD = 0.1
 STREAM_PREPOSITION_TIMEOUT_S = 4.0
 MIN_STREAM_DURATION_S = 1.0 / CONTROL_RATE_HZ
@@ -99,6 +104,7 @@ class Telemetry:
     normalized_joint_difference: tuple[float, ...]
     contacts: tuple[bool, ...]
     sequence_active: bool
+    sequence_kind: Literal["fingers", "thumb"] | None
 
 
 @dataclass(frozen=True)
@@ -118,7 +124,7 @@ def _validated_default_targets(
     targets = np.asarray(DEFAULT_JOINT_TARGETS_RAD, dtype=float)
     if lower.shape != targets.shape or upper.shape != targets.shape:
         raise ValueError(
-            f"Expected exactly {JOINT_COUNT} configured joint limits for three fingers"
+            f"Expected exactly {JOINT_COUNT} configured joint limits for the hand"
         )
     invalid = [
         name
@@ -127,6 +133,7 @@ def _validated_default_targets(
                 "Finger 1 MCP", "Finger 1 PIP", "Finger 1 AB/AD",
                 "Finger 2 MCP", "Finger 2 PIP", "Finger 2 AB/AD",
                 "Finger 3 MCP", "Finger 3 PIP", "Finger 3 AB/AD",
+                "Thumb IP", "Thumb MCP", "Thumb CMC side", "Thumb CMC roll",
             ),
             targets,
             lower,
@@ -163,7 +170,7 @@ def _ui_order_indices(
 def _build_contact_detectors(
     settings: ContactDetectorSettings,
 ) -> tuple[ContactStateMachine, ...]:
-    """Validate tuning and create one state machine for each of nine joints."""
+    """Validate tuning and create one state machine for each hand joint."""
 
     parameters = {
         "Motion speed threshold": settings.max_velocity_rad_s,
@@ -195,6 +202,24 @@ def _contact_circle_radius(contact_feedback_value: float) -> float:
     return min(120.0, 22.0 + 420.0 * abs(float(contact_feedback_value)))
 
 
+def _contact_palette(contact_feedback_value: float) -> tuple[str, str, str, str]:
+    """Return fill, outline, ring, and accent colors for feedback direction."""
+
+    if contact_feedback_value > 0:
+        return "#74c0fc", "#1864ab", "#1971c2", "#a5d8ff"
+    if contact_feedback_value < 0:
+        return "#ff8a65", "#c92a2a", "#e03131", "#ffc9c9"
+    return "#b197fc", "#6741d9", "#7048e8", "#d0bfff"
+
+
+def _contact_direction_label(contact_feedback_value: float) -> str:
+    if contact_feedback_value > 0:
+        return "CONTACT  +"
+    if contact_feedback_value < 0:
+        return "CONTACT  −"
+    return "CONTACT"
+
+
 def _threshold_normalized_joint_difference(
     position_errors: np.ndarray,
     settings: ContactDetectorSettings,
@@ -209,16 +234,23 @@ def _threshold_normalized_joint_difference(
 
 
 def _stream_sample(
-    elapsed_s: float, duration_s: float
+    elapsed_s: float,
+    duration_s: float,
+    sequence_kind: Literal["fingers", "thumb"] = "fingers",
 ) -> tuple[np.ndarray, np.ndarray, bool]:
-    """Return nine-joint open-close-open targets, speeds, and completion state."""
+    """Return collision-safe finger or thumb open-close-open targets."""
 
     if not math.isfinite(duration_s) or duration_s <= 0:
         raise ValueError("duration_s must be finite and positive")
     open_targets = np.zeros(JOINT_COUNT, dtype=float)
-    close_targets = np.zeros(JOINT_COUNT, dtype=float)
-    open_targets[list(FLEXION_INDICES)] = STREAM_OPEN_ANGLE_RAD
-    close_targets[list(FLEXION_INDICES)] = STREAM_CLOSE_ANGLE_RAD
+    open_targets[list(THUMB_INDICES)] = THUMB_OPEN_ANGLES_RAD
+    close_targets = open_targets.copy()
+    if sequence_kind == "fingers":
+        close_targets[list(FLEXION_INDICES)] = STREAM_CLOSE_ANGLE_RAD
+    elif sequence_kind == "thumb":
+        close_targets[list(THUMB_INDICES)] = THUMB_CLOSE_ANGLES_RAD
+    else:
+        raise ValueError(f"Unknown sequence kind: {sequence_kind}")
     commanded_speeds = np.abs(close_targets - open_targets) / duration_s
     if elapsed_s <= duration_s:
         progress = max(0.0, elapsed_s / duration_s)
@@ -249,6 +281,7 @@ class HandWorker(threading.Thread):
         self.contact_settings = ContactDetectorSettings()
         self.contact_detectors = _build_contact_detectors(self.contact_settings)
         self.sequence_active = False
+        self.sequence_kind: Literal["fingers", "thumb"] | None = None
         self.sequence_phase: Literal["idle", "preposition", "stream"] = "idle"
         self.sequence_duration_s = 2.0
         self.sequence_started_at = 0.0
@@ -304,27 +337,41 @@ class HandWorker(threading.Thread):
             self.contact_settings = settings
             self.events.put(WorkerEvent("status", "Contact detector settings applied"))
         elif name == "start_sequence":
-            duration_s = float(payload)  # type: ignore[arg-type]
+            sequence_kind, duration_value = payload  # type: ignore[misc]
+            if sequence_kind not in ("fingers", "thumb"):
+                raise ValueError(f"Unknown sequence kind: {sequence_kind}")
+            if self.sequence_active:
+                raise RuntimeError("Stop the active sequence before starting another")
+            duration_s = float(duration_value)
             if not math.isfinite(duration_s) or duration_s < MIN_STREAM_DURATION_S:
                 raise ValueError(
                     f"Time per leg must be at least {MIN_STREAM_DURATION_S:g} seconds"
                 )
             if self.hand is None:
                 raise RuntimeError("Connect the hand before starting the sequence")
-            open_targets, _, _ = _stream_sample(0.0, duration_s)
-            close_targets, _, _ = _stream_sample(duration_s, duration_s)
+            open_targets, _, _ = _stream_sample(0.0, duration_s, sequence_kind)
+            close_targets, _, _ = _stream_sample(
+                duration_s, duration_s, sequence_kind
+            )
             if not np.array_equal(self._clip_ui_targets(open_targets), open_targets):
                 raise ValueError("The open target is outside the configured joint limits")
             if not np.array_equal(self._clip_ui_targets(close_targets), close_targets):
                 raise ValueError("The close target is outside the configured joint limits")
             self.sequence_duration_s = duration_s
+            self.sequence_kind = sequence_kind
             self.sequence_phase = "preposition"
             self.preposition_started_at = time.monotonic()
             self.sequence_active = True
             self._reset_contact_detectors()
-            self.events.put(WorkerEvent("status", "Moving to the open start position…"))
+            self.events.put(
+                WorkerEvent(
+                    "status",
+                    f"Opening the hand before the {sequence_kind} sequence…",
+                )
+            )
         elif name == "stop_sequence":
             self.sequence_active = False
+            self.sequence_kind = None
             self.sequence_phase = "idle"
             self.commanded_velocity.fill(0.0)
             self._reset_contact_detectors()
@@ -389,6 +436,7 @@ class HandWorker(threading.Thread):
         self.ui_to_hand_indices = ui_to_hand_indices
         self.targets = default_targets.copy()
         self.sequence_active = False
+        self.sequence_kind = None
         self.sequence_phase = "idle"
         self.commanded_velocity.fill(0.0)
         positions_ui_order = np.asarray(positions)[list(ui_to_hand_indices)]
@@ -409,6 +457,7 @@ class HandWorker(threading.Thread):
     def _disconnect(self, *, emit_event: bool = True) -> None:
         hand, self.hand = self.hand, None
         self.sequence_active = False
+        self.sequence_kind = None
         self.sequence_phase = "idle"
         self.commanded_velocity.fill(0.0)
         self.profile_motion_until.fill(0.0)
@@ -442,21 +491,29 @@ class HandWorker(threading.Thread):
         assert self.hand is not None
         targets = self.targets.copy()
         if self.sequence_phase == "preposition":
-            targets, _, _ = _stream_sample(0.0, self.sequence_duration_s)
+            assert self.sequence_kind is not None
+            targets, _, _ = _stream_sample(
+                0.0, self.sequence_duration_s, self.sequence_kind
+            )
             self.commanded_velocity.fill(PROFILE_VELOCITY_RAD_S)
         elif self.sequence_phase == "stream":
+            assert self.sequence_kind is not None
             elapsed = time.monotonic() - self.sequence_started_at
             targets, speeds, complete = _stream_sample(
-                elapsed, self.sequence_duration_s
+                elapsed, self.sequence_duration_s, self.sequence_kind
             )
             self.commanded_velocity = speeds
             if complete:
+                completed_kind = self.sequence_kind
                 self.targets = targets.copy()
                 self.sequence_active = False
+                self.sequence_kind = None
                 self.sequence_phase = "idle"
                 self._reset_contact_detectors()
                 self.events.put(
-                    WorkerEvent("status", "Open-close-open sequence complete")
+                    WorkerEvent(
+                        "status", f"{completed_kind.title()} sequence complete"
+                    )
                 )
         else:
             self.commanded_velocity = np.where(
@@ -475,7 +532,10 @@ class HandWorker(threading.Thread):
         velocities = self._to_ui_order(velocities)
         currents = self._to_ui_order(currents)
         if self.sequence_phase == "preposition":
-            open_targets, _, _ = _stream_sample(0.0, self.sequence_duration_s)
+            assert self.sequence_kind is not None
+            open_targets, _, _ = _stream_sample(
+                0.0, self.sequence_duration_s, self.sequence_kind
+            )
             if np.all(
                 np.abs(positions - open_targets)
                 <= STREAM_PREPOSITION_TOLERANCE_RAD
@@ -527,6 +587,7 @@ class HandWorker(threading.Thread):
             ),
             contacts=tuple(bool(value) for value in contacts),
             sequence_active=self.sequence_active,
+            sequence_kind=self.sequence_kind,
         )
         self.events.put(WorkerEvent("telemetry", telemetry))
 
@@ -536,14 +597,15 @@ class ContactVisualizerUI:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Three-finger contact visualizer")
-        self.root.minsize(1200, 900)
+        self.root.title("Hand contact visualizer")
+        self.root.minsize(1400, 920)
         self.commands: queue.Queue[tuple[str, object]] = queue.Queue()
         self.events: queue.Queue[WorkerEvent] = queue.Queue()
         self.worker = HandWorker(self.commands, self.events)
         self.worker.start()
         self.connected = False
         self.sequence_active = False
+        self.sequence_kind: Literal["fingers", "thumb"] | None = None
         self.latest_telemetry: Telemetry | None = None
         self._slider_job: str | None = None
         self._closing = False
@@ -557,12 +619,12 @@ class ContactVisualizerUI:
     def _build_window(self) -> None:
         outer = ttk.Frame(self.root, padding=12)
         outer.pack(fill="both", expand=True)
-        for column in range(3):
+        for column in range(4):
             outer.columnconfigure(column, weight=1)
         outer.rowconfigure(1, weight=1)
 
         connection = ttk.Frame(outer)
-        connection.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        connection.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
         connection.columnconfigure(1, weight=1)
         ttk.Label(connection, text="Config").grid(row=0, column=0, sticky="w")
         self.config_var = tk.StringVar(value=str(DEFAULT_CONFIG_PATH))
@@ -574,7 +636,7 @@ class ContactVisualizerUI:
         )
         ttk.Label(
             connection,
-            text="Finger motors: 4–6  ·  7–9  ·  10–12",
+            text="Thumb: 0–3  ·  Fingers: 4–6  ·  7–9  ·  10–12",
         ).grid(row=0, column=3, padx=(16, 0))
         self.connect_button = ttk.Button(
             connection, text="Connect + enable torque", command=self._toggle_connection
@@ -582,7 +644,7 @@ class ContactVisualizerUI:
         self.connect_button.grid(row=0, column=4, padx=(16, 0))
 
         visual = ttk.LabelFrame(outer, text="Live contact", padding=8)
-        visual.grid(row=1, column=0, columnspan=3, sticky="nsew")
+        visual.grid(row=1, column=0, columnspan=4, sticky="nsew")
         visual.rowconfigure(0, weight=1)
         visual.columnconfigure(0, weight=1)
         self.canvas = tk.Canvas(
@@ -619,6 +681,25 @@ class ContactVisualizerUI:
                         self.value_vars[offset + joint_offset],
                     )
                 )
+
+        thumb_module = ttk.LabelFrame(outer, text="Thumb joint targets", padding=10)
+        thumb_module.grid(
+            row=2, column=3, sticky="nsew", padx=(6, 0), pady=(10, 0)
+        )
+        thumb_module.columnconfigure(0, weight=1)
+        for joint_offset, (joint_name, motor_id) in enumerate(
+            zip(("IP", "MCP", "CMC side", "CMC roll"), THUMB_MOTOR_IDS)
+        ):
+            target_index = THUMB_INDICES[joint_offset]
+            self.scales.append(
+                self._add_slider(
+                    thumb_module,
+                    joint_offset * 2,
+                    f"{joint_name}  ·  ID {motor_id}",
+                    self.target_vars[target_index],
+                    self.value_vars[target_index],
+                )
+            )
 
         detector = ttk.LabelFrame(outer, text="Contact detector settings", padding=10)
         detector.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(10, 0), padx=(0, 6))
@@ -697,28 +778,34 @@ class ContactVisualizerUI:
             command=self._apply_contact_settings,
         ).grid(row=8, column=0, columnspan=3, sticky="ew", pady=(7, 0))
 
-        sequence = ttk.LabelFrame(
-            outer, text="Streamed open-close-open sequence", padding=10
-        )
-        sequence.grid(row=3, column=2, sticky="nsew", pady=(10, 0), padx=(6, 0))
-        sequence.columnconfigure(1, weight=1)
-        self.sequence_duration_var = tk.StringVar(value="2.0")
-        self._labeled_entry(
-            sequence, 0, "Time per leg", self.sequence_duration_var, "seconds"
-        )
-        self.sequence_button = ttk.Button(
-            sequence,
-            text="Run open → close → open",
-            command=self._toggle_sequence,
-            state="disabled",
-        )
-        self.sequence_button.grid(
-            row=1, column=0, columnspan=3, sticky="ew", pady=(7, 0)
-        )
+        self.sequence_duration_vars: dict[str, tk.StringVar] = {}
+        self.sequence_buttons: dict[str, ttk.Button] = {}
+        for column, kind, title in (
+            (2, "fingers", "Finger open-close-open sequence"),
+            (3, "thumb", "Thumb open-close-open sequence"),
+        ):
+            sequence = ttk.LabelFrame(outer, text=title, padding=10)
+            sequence.grid(
+                row=3, column=column, sticky="nsew", pady=(10, 0), padx=(6, 0)
+            )
+            sequence.columnconfigure(1, weight=1)
+            duration_var = tk.StringVar(value="2.0")
+            self.sequence_duration_vars[kind] = duration_var
+            self._labeled_entry(
+                sequence, 0, "Time per leg", duration_var, "seconds"
+            )
+            button = ttk.Button(
+                sequence,
+                text="Run open → close → open",
+                command=lambda selected=kind: self._toggle_sequence(selected),
+                state="disabled",
+            )
+            button.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(7, 0))
+            self.sequence_buttons[kind] = button
 
         self.status_var = tk.StringVar(value="Disconnected — torque disabled")
         ttk.Label(outer, textvariable=self.status_var, anchor="w").grid(
-            row=4, column=0, columnspan=3, sticky="ew", pady=(10, 0)
+            row=4, column=0, columnspan=4, sticky="ew", pady=(10, 0)
         )
 
     def _add_slider(
@@ -810,8 +897,8 @@ class ContactVisualizerUI:
             return
         if not messagebox.askokcancel(
             "Enable physical motion",
-            "Connecting will configure motors 4–12, enable torque, and move all "
-            "three fingers to 0 rad. Keep the hand clear, verify the motor IDs, "
+            "Connecting will configure motors 0–12, enable torque, and move all "
+            "hand joints to 0 rad. Keep the hand clear, verify the motor IDs, "
             "and have an emergency stop ready.",
             icon="warning",
         ):
@@ -862,12 +949,13 @@ class ContactVisualizerUI:
                 "Contact detector settings saved; they will apply on connection"
             )
 
-    def _toggle_sequence(self) -> None:
+    def _toggle_sequence(self, sequence_kind: Literal["fingers", "thumb"]) -> None:
         if self.sequence_active:
-            self.commands.put(("stop_sequence", None))
+            if self.sequence_kind == sequence_kind:
+                self.commands.put(("stop_sequence", None))
             return
         try:
-            duration_s = float(self.sequence_duration_var.get())
+            duration_s = float(self.sequence_duration_vars[sequence_kind].get())
             if not math.isfinite(duration_s) or duration_s <= 0:
                 raise ValueError("Time per leg must be a positive number of seconds")
             if duration_s < MIN_STREAM_DURATION_S:
@@ -879,15 +967,20 @@ class ContactVisualizerUI:
             messagebox.showerror("Invalid sequence time", str(exc))
             return
         if not messagebox.askokcancel(
-            "Run open-close-open sequence",
-            "All MCP and PIP joints will move 0 → -1.35 → 0 rad while all "
-            "AB/AD joints remain at 0 rad. "
-            f"Each leg takes {duration_s:g} seconds. Make sure the full "
-            "finger workspace is clear.",
+            f"Run {sequence_kind} open-close-open sequence",
+            (
+                "All finger MCP and PIP joints will move 0 → -1.35 → 0 rad; "
+                "finger AB/AD joints stay at 0 rad and the thumb stays open. "
+                if sequence_kind == "fingers"
+                else "The thumb will use its configured four-joint open and close "
+                "targets while every finger remains open at 0 rad. "
+            )
+            + f"Each leg takes {duration_s:g} seconds. Make sure the full hand "
+            "workspace is clear.",
             icon="warning",
         ):
             return
-        self.commands.put(("start_sequence", duration_s))
+        self.commands.put(("start_sequence", (sequence_kind, duration_s)))
 
     def _drain_events(self) -> None:
         latest_telemetry: Telemetry | None = None
@@ -911,7 +1004,8 @@ class ContactVisualizerUI:
             lower, upper, targets, _port = event.payload  # type: ignore[misc]
             self.connected = True
             self.connect_button.configure(text="Disconnect + disable torque", state="normal")
-            self.sequence_button.configure(state="normal")
+            for button in self.sequence_buttons.values():
+                button.configure(state="normal")
             for index, scale in enumerate(self.scales):
                 scale.configure(state="normal", from_=lower[index], to=upper[index])
                 self.target_vars[index].set(targets[index])
@@ -919,10 +1013,10 @@ class ContactVisualizerUI:
         elif event.kind == "disconnected":
             self.connected = False
             self.sequence_active = False
+            self.sequence_kind = None
             self.connect_button.configure(text="Connect + enable torque", state="normal")
-            self.sequence_button.configure(
-                text="Run open → close → open", state="disabled"
-            )
+            for button in self.sequence_buttons.values():
+                button.configure(text="Run open → close → open", state="disabled")
             for scale in self.scales:
                 scale.configure(state="normal")
             self.status_var.set("Disconnected — torque disabled")
@@ -931,10 +1025,10 @@ class ContactVisualizerUI:
         elif event.kind == "error":
             self.connected = False
             self.sequence_active = False
+            self.sequence_kind = None
             self.connect_button.configure(text="Connect + enable torque", state="normal")
-            self.sequence_button.configure(
-                text="Run open → close → open", state="disabled"
-            )
+            for button in self.sequence_buttons.values():
+                button.configure(text="Run open → close → open", state="disabled")
             for scale in self.scales:
                 scale.configure(state="normal")
             self.status_var.set(f"Error: {event.payload}")
@@ -945,13 +1039,17 @@ class ContactVisualizerUI:
         self.latest_telemetry = telemetry
         sequence_changed = self.sequence_active != telemetry.sequence_active
         self.sequence_active = telemetry.sequence_active
-        self.sequence_button.configure(
-            text=(
-                "Stop sequence"
-                if telemetry.sequence_active
-                else "Run open → close → open"
+        self.sequence_kind = telemetry.sequence_kind
+        for kind, button in self.sequence_buttons.items():
+            is_active_button = telemetry.sequence_active and kind == telemetry.sequence_kind
+            button.configure(
+                text="Stop sequence" if is_active_button else "Run open → close → open",
+                state=(
+                    "normal"
+                    if not telemetry.sequence_active or is_active_button
+                    else "disabled"
+                ),
             )
-        )
         slider_state = "disabled" if telemetry.sequence_active else "normal"
         for scale in self.scales:
             scale.configure(state=slider_state)
@@ -987,8 +1085,8 @@ class ContactVisualizerUI:
         self.canvas.delete("all")
         width = max(self.canvas.winfo_width(), 600)
         height = max(self.canvas.winfo_height(), 400)
-        x_positions = (width * 0.28, width * 0.50, width * 0.72)
-        block_width = min(120.0, width * 0.13)
+        x_positions = (width * 0.15, width * 0.32, width * 0.49)
+        block_width = min(120.0, width * 0.12)
         pip_center_y = height * 0.25
         mcp_center_y = height * 0.56
         ab_ad_center_y = height * 0.84
@@ -1006,6 +1104,7 @@ class ContactVisualizerUI:
             28, ab_ad_center_y, text="AB/AD", fill="#333333",
             font=("TkDefaultFont", 13, "bold"),
         )
+        self._draw_contact_direction_legend(width)
 
         # Match the supplied sketch: finger 3 is leftmost and finger 1 rightmost.
         for x, finger_index in zip(x_positions, (2, 1, 0)):
@@ -1018,14 +1117,18 @@ class ContactVisualizerUI:
             self._draw_joint_block(
                 np.asarray((x, pip_center_y)), block_width, block_height,
                 f"PIP  ·  ID {UI_MOTOR_IDS[pip_index]}", contacts[pip_index],
+                contact_strengths[pip_index],
             )
             self._draw_joint_block(
                 np.asarray((x, mcp_center_y)), block_width, block_height,
                 f"MCP  ·  ID {UI_MOTOR_IDS[mcp_index]}", contacts[mcp_index],
+                contact_strengths[mcp_index],
             )
-            self._draw_ab_ad_motor(
-                np.asarray((x, ab_ad_center_y)), UI_MOTOR_IDS[ab_ad_index],
+            self._draw_round_joint(
+                np.asarray((x, ab_ad_center_y)),
+                f"AB/AD · ID {UI_MOTOR_IDS[ab_ad_index]}",
                 contacts[ab_ad_index],
+                contact_strengths[ab_ad_index],
             )
             for index, center in (
                 (pip_index, np.asarray((x, pip_center_y))),
@@ -1037,6 +1140,44 @@ class ContactVisualizerUI:
                         center, contact_strengths[index], normalized_differences[index]
                     )
 
+        thumb_x = width * 0.76
+        thumb_width = min(105.0, width * 0.10)
+        thumb_height = min(88.0, height * 0.19)
+        thumb_centers = (
+            np.asarray((thumb_x, height * 0.20)),
+            np.asarray((thumb_x, height * 0.45)),
+            np.asarray((thumb_x - 8.0, height * 0.68)),
+            np.asarray((thumb_x - 28.0, height * 0.88)),
+        )
+        self.canvas.create_text(
+            thumb_x, 18, text="Thumb", fill="#333333",
+            font=("TkDefaultFont", 13, "bold"),
+        )
+        self._draw_joint_block(
+            thumb_centers[0], thumb_width, thumb_height,
+            "IP  ·  ID 0", contacts[THUMB_INDICES[0]],
+            contact_strengths[THUMB_INDICES[0]],
+        )
+        self._draw_joint_block(
+            thumb_centers[1], thumb_width, thumb_height,
+            "MCP  ·  ID 1", contacts[THUMB_INDICES[1]],
+            contact_strengths[THUMB_INDICES[1]],
+        )
+        self._draw_rotated_joint_block(
+            thumb_centers[2], thumb_width, thumb_height * 0.78,
+            "CMC side  ·  ID 2", contacts[THUMB_INDICES[2]],
+            contact_strengths[THUMB_INDICES[2]], -14.0,
+        )
+        self._draw_round_joint(
+            thumb_centers[3], "CMC roll · ID 3", contacts[THUMB_INDICES[3]],
+            contact_strengths[THUMB_INDICES[3]],
+        )
+        for index, center in zip(THUMB_INDICES, thumb_centers):
+            if contacts[index]:
+                self._draw_contact_circle(
+                    center, contact_strengths[index], normalized_differences[index]
+                )
+
     def _draw_joint_block(
         self,
         center: np.ndarray,
@@ -1044,50 +1185,115 @@ class ContactVisualizerUI:
         height: float,
         label: str,
         contact: bool,
+        contact_feedback_value: float,
     ) -> None:
         x, y = center
+        fill, outline, _, _ = _contact_palette(contact_feedback_value)
         self.canvas.create_rectangle(
             x - width / 2,
             y - height / 2,
             x + width / 2,
             y + height / 2,
-            fill="#ff6b57" if contact else "#ffffff",
-            outline="#d33c2d" if contact else "#333333",
+            fill=fill if contact else "#ffffff",
+            outline=outline if contact else "#333333",
             width=4,
         )
-        state = "CONTACT" if contact else "NO CONTACT"
+        state = _contact_direction_label(contact_feedback_value) if contact else "NO CONTACT"
         self.canvas.create_text(
             x, y, text=f"{label}\n{state}", fill="#1f1f1f",
             justify="center", font=("TkDefaultFont", 11, "bold"),
         )
 
-    def _draw_ab_ad_motor(
-        self, center: np.ndarray, motor_id: int, contact: bool
+    def _draw_rotated_joint_block(
+        self,
+        center: np.ndarray,
+        width: float,
+        height: float,
+        label: str,
+        contact: bool,
+        contact_feedback_value: float,
+        angle_degrees: float,
+    ) -> None:
+        angle = math.radians(angle_degrees)
+        rotation = np.asarray(
+            ((math.cos(angle), -math.sin(angle)),
+             (math.sin(angle), math.cos(angle)))
+        )
+        corners = np.asarray(
+            (
+                (-width / 2, -height / 2),
+                (width / 2, -height / 2),
+                (width / 2, height / 2),
+                (-width / 2, height / 2),
+            )
+        )
+        points = (corners @ rotation.T) + center
+        fill, outline, _, _ = _contact_palette(contact_feedback_value)
+        self.canvas.create_polygon(
+            *points.ravel(),
+            fill=fill if contact else "#ffffff",
+            outline=outline if contact else "#333333",
+            width=4,
+        )
+        state = _contact_direction_label(contact_feedback_value) if contact else "NO CONTACT"
+        self.canvas.create_text(
+            center[0], center[1], text=f"{label}\n{state}", fill="#1f1f1f",
+            justify="center", angle=angle_degrees,
+            font=("TkDefaultFont", 9, "bold"),
+        )
+
+    def _draw_round_joint(
+        self,
+        center: np.ndarray,
+        label: str,
+        contact: bool,
+        contact_feedback_value: float,
     ) -> None:
         x, y = center
         radius = 43.0
+        fill, outline, _, _ = _contact_palette(contact_feedback_value)
         self.canvas.create_oval(
             x - radius, y - radius, x + radius, y + radius,
-            fill="#ff6b57" if contact else "#ffffff",
-            outline="#d33c2d" if contact else "#333333",
+            fill=fill if contact else "#ffffff",
+            outline=outline if contact else "#333333",
             width=4,
         )
-        state = "CONTACT" if contact else "NO CONTACT"
+        state = _contact_direction_label(contact_feedback_value) if contact else "NO CONTACT"
         self.canvas.create_text(
-            x, y, text=f"AB/AD · ID {motor_id}\n{state}", fill="#1f1f1f",
+            x, y, text=f"{label}\n{state}", fill="#1f1f1f",
             justify="center", font=("TkDefaultFont", 10, "bold"),
         )
+
+    def _draw_contact_direction_legend(self, canvas_width: float) -> None:
+        x = canvas_width - 185.0
+        self.canvas.create_text(
+            x, 18, anchor="w", text="Contact direction", fill="#333333",
+            font=("TkDefaultFont", 11, "bold"),
+        )
+        for row, (feedback, label) in enumerate(
+            ((1.0, "Positive feedback"), (-1.0, "Negative feedback"))
+        ):
+            fill, outline, _, _ = _contact_palette(feedback)
+            y = 43.0 + row * 27.0
+            self.canvas.create_rectangle(
+                x, y - 8, x + 20, y + 8, fill=fill, outline=outline, width=2
+            )
+            self.canvas.create_text(
+                x + 29, y, anchor="w", text=label, fill="#333333",
+                font=("TkDefaultFont", 10),
+            )
 
     def _draw_contact_circle(
         self, center: np.ndarray, strength: float, normalized_difference: float
     ) -> None:
-        """Draw a contact-only ring whose radius tracks feedback magnitude."""
+        """Draw a direction-colored ring whose radius tracks feedback magnitude."""
 
         radius = _contact_circle_radius(strength)
+        _, _, ring, accent = _contact_palette(strength)
         x, y = center
         bounds = (x - radius, y - radius, x + radius, y + radius)
-        self.canvas.create_oval(*bounds, outline="#ff6b00", width=9)
-        self.canvas.create_oval(*bounds, outline="#ffd166", width=3)
+        self.canvas.create_oval(*bounds, outline=ring, width=9)
+        self.canvas.create_oval(*bounds, outline=accent, width=3)
         self.canvas.create_text(
             x,
             y + radius + 13,
@@ -1107,7 +1313,8 @@ class ContactVisualizerUI:
         self._closing = True
         self.status_var.set("Disabling torque and closing…")
         self.connect_button.configure(state="disabled")
-        self.sequence_button.configure(state="disabled")
+        for button in self.sequence_buttons.values():
+            button.configure(state="disabled")
         self.commands.put(("stop", None))
         self._finish_close()
 
