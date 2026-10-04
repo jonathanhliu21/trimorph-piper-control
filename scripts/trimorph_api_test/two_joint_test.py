@@ -1,9 +1,8 @@
 """Hardware bring-up CLI for an XL330 or XM335 finger test fixture.
 
 The commands mirror ``xl330_hand_test.py``, but every bus operation is limited
-to the selected motor IDs. By default those are the index-finger PIP and
-MCP-flex motors (IDs 4 and 5 in the full-hand configuration). If a third motor
-is added, it is treated as the MCP AB/AD motor.
+to the motor IDs for the finger selected by ``--test-finger``. The default is
+``finger-1`` (motor IDs 4, 5, and 6).
 
 Run from the repository root, for example:
 
@@ -16,13 +15,11 @@ Run from the repository root, for example:
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_position_error --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py detect_contact --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py home
-    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
-        home --joints 4
 
-Use ``--motor-ids`` before the command if the fixture uses different IDs:
+Use ``--test-finger`` before the command to select the motors under test:
 
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
-        --motor-ids 7,8 record
+        --test-finger thumb record
 
 The ``motor_model`` in the selected YAML determines whether the fixture uses
 XL330-M077-T or XM335-T323-T motors. Use a model-specific configuration so the
@@ -68,15 +65,46 @@ from midas_hand_api import HandConfig, MidasHand, home_hand
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("xl330_test_config.yaml")
 SUPPORTED_MOTOR_MODELS = ("xl330-m077-t", "xm335-t323-t")
-# Joint order is significant: PIP, MCP flexion, then optionally one ABAD motor.
-DEFAULT_MOTOR_IDS = (7, 8, 9)  # Append motor 6 when ABAD is ready.
+TEST_FINGER_MOTOR_IDS = {
+    "thumb": (0, 1, 2, 3),
+    "finger-1": (4, 5, 6),
+    "finger-2": (7, 8, 9),
+    "finger-3": (10, 11, 12),
+}
+DEFAULT_TEST_FINGER = "finger-1"
 
 # Review these calibrated targets before moving hardware. The YAML joint signs
 # must make these calibrated targets move each joint in the intended direction.
-FLEXION_OPEN_ANGLE_RAD = 0.0
-FLEXION_CLOSE_ANGLE_RAD = -1.35
-AB_AD_OPEN_ANGLE_RAD = 0.35
-AB_AD_CLOSE_ANGLE_RAD = -0.35
+OPEN_ANGLES_RAD = (
+    0.0,
+    0.0,
+    0.8,
+    0.0,
+    0.0,
+    0.0,
+    0.35,
+    0.0,
+    0.0,
+    0.35,
+    0.0,
+    0.0,
+    0.35,
+)
+CLOSE_ANGLES_RAD = (
+    -1.4,
+    -1.4,
+    -0.1,
+    1.5,
+    -1.35,
+    -1.35,
+    -0.35,
+    -1.35,
+    -1.35,
+    -0.35,
+    -1.35,
+    -1.35,
+    -0.35,
+)
 
 MOTOR_LABELS = {
     0: "Thumb IP",
@@ -102,9 +130,19 @@ STREAM_MOVE_RATE_HZ = 30.0
 STREAM_MOVE_DURATION_S = 2.0
 STREAM_MOVE_SETTLE_S = 0.5
 MEASUREMENT_POSITIONS_RAD = {
+    0: 0.0,
+    1: 0.0,
+    2: 0.0,
+    3: 1.0,
     4: -0.1,  # Index PIP
     5: -0.5,  # Index MCP flex
     6: -0.5,  # Index MCP abduct
+    7: -0.1,  # Index PIP
+    8: -0.5,  # Index MCP flex
+    9: -0.5,  # Index MCP abduct
+    10: -0.1,  # Index PIP
+    11: -0.5,  # Index MCP flex
+    12: -0.5,  # Index MCP abduct
 }
 class _CurrentRecorder:
     """Collect selected motor currents only when explicitly sampled."""
@@ -227,22 +265,10 @@ def _parse_motor_ids(value: str) -> tuple[int, ...]:
     return result
 
 
-def _parse_fixture_motor_ids(value: str) -> tuple[int, ...]:
-    result = _parse_motor_ids(value)
-    expected_count = len(DEFAULT_MOTOR_IDS)
-    if len(result) != expected_count:
-        raise argparse.ArgumentTypeError(
-            f"exactly {expected_count} motor IDs are required"
-        )
-    return result
-
-
 def _motion_angles(motor_id: int) -> tuple[float, float]:
-    """Return the open and closed targets for a flexion or AB/AD motor."""
+    """Return the joint-specific open and closed targets for a motor."""
 
-    if len(DEFAULT_MOTOR_IDS) > 2 and motor_id == DEFAULT_MOTOR_IDS[2]:
-        return AB_AD_OPEN_ANGLE_RAD, AB_AD_CLOSE_ANGLE_RAD
-    return FLEXION_OPEN_ANGLE_RAD, FLEXION_CLOSE_ANGLE_RAD
+    return OPEN_ANGLES_RAD[motor_id], CLOSE_ANGLES_RAD[motor_id]
 
 
 def _load_config(path: Path, motor_ids: Sequence[int]) -> HandConfig:
@@ -411,12 +437,15 @@ def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
         open_angle, close_angle = _motion_angles(motor_id)
         _check_move_target(config, motor_id, close_angle)
         _check_move_target(config, motor_id, open_angle)
-    print(f"Selected motor IDs = {list(config.motor_ids)}")
-    print(f"FLEXION_OPEN_ANGLE_RAD  = {FLEXION_OPEN_ANGLE_RAD}")
-    print(f"FLEXION_CLOSE_ANGLE_RAD = {FLEXION_CLOSE_ANGLE_RAD}")
-    if len(DEFAULT_MOTOR_IDS) > 2:
-        print(f"AB_AD_OPEN_ANGLE_RAD    = {AB_AD_OPEN_ANGLE_RAD}")
-        print(f"AB_AD_CLOSE_ANGLE_RAD   = {AB_AD_CLOSE_ANGLE_RAD}")
+    print(f"Selected motor IDs = {list(test_motor_ids)}")
+    print(
+        "Open angles (rad)  = "
+        f"{[_motion_angles(motor_id)[0] for motor_id in test_motor_ids]}"
+    )
+    print(
+        "Close angles (rad) = "
+        f"{[_motion_angles(motor_id)[1] for motor_id in test_motor_ids]}"
+    )
     if args.skip_target_safety:
         print("WARNING: target timeout failures will not stop this movement sequence")
     _confirm_motion("Profile move testing", args.yes)
@@ -913,12 +942,12 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--motor-ids",
-        type=_parse_fixture_motor_ids,
-        default=DEFAULT_MOTOR_IDS,
+        "--test-finger",
+        choices=tuple(TEST_FINGER_MOTOR_IDS),
+        default=DEFAULT_TEST_FINGER,
         help=(
-            f"{len(DEFAULT_MOTOR_IDS)} comma-separated fixture motor IDs "
-            f"(default: {','.join(map(str, DEFAULT_MOTOR_IDS))})"
+            "Finger whose motors may be tested and torque-enabled "
+            f"(default: {DEFAULT_TEST_FINGER})"
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1213,7 +1242,8 @@ def main() -> None:
             parser.error("--pause-s must be non-negative")
 
     try:
-        config = _load_config(args.config, args.motor_ids)
+        motor_ids = TEST_FINGER_MOTOR_IDS[args.test_finger]
+        config = _load_config(args.config, motor_ids)
         if args.command == "home":
             _run_home(args, config)
         elif args.command in ("profile_move", "profile_move_sequential"):

@@ -14,9 +14,11 @@ from data_collection.collection.contact_detection import (
     contact_feedback as shared_contact_feedback,
 )
 from scripts.trimorph_api_test.two_joint_test import (
+    TEST_FINGER_MOTOR_IDS,
     _CurrentRecorder,
     _build_parser,
     _load_config,
+    _motion_angles,
     _output_current_csv,
     contact_feedback,
     main,
@@ -101,6 +103,51 @@ class TwoJointConfigTests(unittest.TestCase):
         )
 
         self.assertTrue(args.force)
+
+    def test_test_finger_defaults_to_finger_1(self):
+        args = _build_parser().parse_args(["record"])
+
+        self.assertEqual(args.test_finger, "finger-1")
+
+    def test_test_finger_accepts_each_motor_group(self):
+        parser = _build_parser()
+
+        for test_finger in ("thumb", "finger-1", "finger-2", "finger-3"):
+            with self.subTest(test_finger=test_finger):
+                args = parser.parse_args(
+                    ["--test-finger", test_finger, "record"]
+                )
+                self.assertEqual(args.test_finger, test_finger)
+
+    def test_test_finger_motor_groups(self):
+        self.assertEqual(
+            TEST_FINGER_MOTOR_IDS,
+            {
+                "thumb": (0, 1, 2, 3),
+                "finger-1": (4, 5, 6),
+                "finger-2": (7, 8, 9),
+                "finger-3": (10, 11, 12),
+            },
+        )
+
+    def test_motion_angles_are_joint_specific(self):
+        expected = (
+            (0.0, -1.57),
+            (0.0, -1.4),
+            (0.8, -0.1),
+            (0.0, 2.0),
+            (0.0, -1.35),
+            (0.0, -1.35),
+            (0.35, -0.35),
+            (0.0, -1.35),
+            (0.0, -1.35),
+            (0.35, -0.35),
+            (0.0, -1.35),
+            (0.0, -1.35),
+            (0.35, -0.35),
+        )
+
+        self.assertEqual(tuple(_motion_angles(i) for i in range(13)), expected)
 
     def test_current_recorder_outputs_target_and_actual_velocities(self):
         class FakeHand:
