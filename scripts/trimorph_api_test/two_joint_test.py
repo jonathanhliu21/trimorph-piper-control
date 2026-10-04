@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -46,6 +47,21 @@ from typing import Callable, Optional, Sequence
 import numpy as np
 import yaml
 
+# Direct ``python scripts/.../two_joint_test.py`` execution only places this
+# script's directory on sys.path. Add the repository root for the shared
+# data_collection package.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
+from data_collection.collection.contact_detection import (
+    CONTACT_ENTER_THRESHOLD,
+    CONTACT_EXIT_THRESHOLD,
+    CONTACT_MAX_VELOCITY_RAD_S,
+    CONTACT_VIRTUAL_SPRING_STIFFNESS,
+    ContactStateMachine,
+    contact_feedback,
+)
 from midas_hand_api import HandConfig, MidasHand, home_hand
 
 
@@ -89,11 +105,6 @@ MEASUREMENT_POSITIONS_RAD = {
     5: -0.5,  # Index MCP flex
     6: -0.5,  # Index MCP abduct
 }
-CONTACT_THRESHOLD = 0.05  # rad
-CONTACT_VELOCITY_ERROR_GAIN_S = 0.035  # rad threshold / (rad/s)
-CONTACT_VIRTUAL_SPRING_STIFFNESS = 1.0  # feedback units / rad
-
-
 class _CurrentRecorder:
     """Collect selected motor currents only when explicitly sampled."""
 
@@ -112,6 +123,7 @@ class _CurrentRecorder:
         self.actual_velocities_rad_s: list[list[float]] = []
         self._previous_time_s: Optional[float] = None
         self._previous_targets: Optional[np.ndarray] = None
+        self.latest_actual_velocities_rad_s: Optional[np.ndarray] = None
 
     def start_trial(self, trial: int) -> None:
         self._trial = trial
@@ -140,6 +152,7 @@ class _CurrentRecorder:
             target_velocities = np.asarray(target_velocities_rad_s, dtype=float)
 
         actual_positions, actual_velocities, currents = self._hand.read_pos_vel_cur()
+        self.latest_actual_velocities_rad_s = np.asarray(actual_velocities, dtype=float)
         self.trials.append(self._trial)
         self.times_s.append(sample_time_s)
         self.currents_ma.append([float(currents[index]) for index in self._indices])
@@ -372,26 +385,6 @@ def _selected_motor_ids(
     return tuple(selected)
 
 
-def _dynamic_contact_threshold(
-    commanded_velocities_rad_s: Sequence[float],
-) -> np.ndarray:
-    """Increase the contact threshold by expected velocity tracking lag."""
-
-    velocities = np.asarray(commanded_velocities_rad_s, dtype=float)
-    return CONTACT_THRESHOLD + CONTACT_VELOCITY_ERROR_GAIN_S * np.abs(velocities)
-
-
-def _contact_feedback(
-    position_errors: Sequence[float],
-    thresholds: float | Sequence[float] = CONTACT_THRESHOLD,
-) -> np.ndarray:
-    """Return signed virtual-spring feedback beyond the contact deadband."""
-
-    errors = np.asarray(position_errors, dtype=float)
-    contact_excess = np.maximum(np.abs(errors) - thresholds, 0.0)
-    return CONTACT_VIRTUAL_SPRING_STIFFNESS * np.sign(errors) * contact_excess
-
-
 def _print_selected_values(
     elapsed_s: float,
     values: Sequence[float],
@@ -555,13 +548,9 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
         )
     )
     print(
-        f"Contact threshold  = {CONTACT_THRESHOLD:g} rad + "
-        f"{CONTACT_VELOCITY_ERROR_GAIN_S:g}s * |commanded velocity|"
-    )
-    print(
-        "Contact feedback   = signed error beyond the dynamic threshold; "
-        "virtual spring stiffness = "
-        f"{CONTACT_VIRTUAL_SPRING_STIFFNESS:g} feedback units/rad"
+        f"Contact detection  = entry {CONTACT_ENTER_THRESHOLD:g} rad, "
+        f"exit {CONTACT_EXIT_THRESHOLD:g} rad, motion suppressed above "
+        f"{CONTACT_MAX_VELOCITY_RAD_S:g} rad/s"
     )
     _confirm_motion("Stream move testing", args.yes)
 
@@ -627,6 +616,9 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
             target = np.array(open_target, copy=True)
             previous_target = np.array(target, copy=True)
             previous_sample_t: Optional[float] = None
+            contact_detectors = {
+                index: ContactStateMachine() for index in selected_indices
+            }
             start_t = time.monotonic()
             for tick, (sample_t, angles_rad) in enumerate(zip(sample_times, samples)):
                 target[selected_indices] = angles_rad
@@ -641,19 +633,32 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
                         float(sample_t),
                         target_velocities_rad_s=commanded_velocities,
                     )
+                    actual_velocities = (
+                        current_recorder.latest_actual_velocities_rad_s
+                    )
+                    if actual_velocities is None:
+                        raise RuntimeError("Current recorder did not capture velocity")
                 else:
-                    actual_positions = hand.read_pos()
+                    actual_positions, actual_velocities = hand.read_pos_vel()
 
-                dynamic_thresholds = _dynamic_contact_threshold(
-                    commanded_velocities
-                )
-                feedback = _contact_feedback(
+                candidate_feedback = contact_feedback(
                     target - actual_positions,
-                    dynamic_thresholds,
+                    thresholds=CONTACT_EXIT_THRESHOLD,
                 )
+                feedback = np.zeros_like(candidate_feedback)
+                now_s = time.monotonic()
+                for index, detector in contact_detectors.items():
+                    feedback[index] = detector.update(
+                        commanded_velocity_rad_s=float(
+                            commanded_velocities[index]
+                        ),
+                        measured_velocity_rad_s=float(actual_velocities[index]),
+                        candidate_feedback=float(candidate_feedback[index]),
+                        now_s=now_s,
+                    )
                 if np.any(feedback[selected_indices] != 0.0):
                     _print_selected_values(
-                        time.monotonic() - start_t,
+                        now_s - start_t,
                         feedback,
                         selected_indices,
                     )
@@ -822,10 +827,14 @@ def _run_continuous_measurement(
         )
         if measurement == "contact":
             print(
-                f"CONTACT_THRESHOLD = {CONTACT_THRESHOLD:g} rad, "
-                "CONTACT_VIRTUAL_SPRING_STIFFNESS = "
-                f"{CONTACT_VIRTUAL_SPRING_STIFFNESS:g} feedback units/rad"
+                f"Contact entry/exit thresholds = {CONTACT_ENTER_THRESHOLD:g}/"
+                f"{CONTACT_EXIT_THRESHOLD:g} rad; motion suppression = "
+                f"{CONTACT_MAX_VELOCITY_RAD_S:g} rad/s; virtual spring "
+                f"stiffness = {CONTACT_VIRTUAL_SPRING_STIFFNESS:g}"
             )
+        contact_detectors = {
+            index: ContactStateMachine() for index in measure_indices
+        }
         sample_period = 1.0 / args.rate_hz
         start_monotonic = time.monotonic()
         next_sample = start_monotonic
@@ -834,14 +843,26 @@ def _run_continuous_measurement(
             if now < next_sample:
                 time.sleep(next_sample - now)
             elapsed = time.monotonic() - start_monotonic
-            positions, _, currents = hand.read_pos_vel_cur()
+            positions, velocities, currents = hand.read_pos_vel_cur()
             position_errors = target - positions
             if measurement == "current":
                 values = currents
             elif measurement == "position_error":
                 values = position_errors
             else:
-                values = _contact_feedback(position_errors)
+                candidate_feedback = contact_feedback(
+                    position_errors,
+                    thresholds=CONTACT_EXIT_THRESHOLD,
+                )
+                values = np.zeros_like(candidate_feedback)
+                sample_time_s = time.monotonic()
+                for index, detector in contact_detectors.items():
+                    values[index] = detector.update(
+                        commanded_velocity_rad_s=0.0,
+                        measured_velocity_rad_s=float(velocities[index]),
+                        candidate_feedback=float(candidate_feedback[index]),
+                        now_s=sample_time_s,
+                    )
                 if not np.any(values[measure_indices] != 0.0):
                     next_sample += sample_period
                     continue

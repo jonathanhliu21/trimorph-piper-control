@@ -9,15 +9,16 @@ from unittest import mock
 import numpy as np
 import yaml
 
-from scripts.trimorph_api_test.two_joint_test import (
+from data_collection.collection.contact_detection import (
     CONTACT_THRESHOLD,
-    CONTACT_VELOCITY_ERROR_GAIN_S,
+    contact_feedback as shared_contact_feedback,
+)
+from scripts.trimorph_api_test.two_joint_test import (
     _CurrentRecorder,
-    _contact_feedback,
-    _dynamic_contact_threshold,
     _build_parser,
     _load_config,
     _output_current_csv,
+    contact_feedback,
     main,
 )
 
@@ -56,34 +57,22 @@ class TwoJointConfigTests(unittest.TestCase):
 
         self.assertEqual(config.motor_model, "xm335-t323-t")
 
-    def test_contact_feedback_is_zero_inside_threshold(self):
-        feedback = _contact_feedback(
-            [-CONTACT_THRESHOLD, 0.0, CONTACT_THRESHOLD]
-        )
+    def test_reuses_shared_contact_feedback(self):
+        self.assertIs(contact_feedback, shared_contact_feedback)
+
+        feedback = contact_feedback([-CONTACT_THRESHOLD, 0.0, CONTACT_THRESHOLD])
 
         np.testing.assert_array_equal(feedback, [0.0, 0.0, 0.0])
 
     def test_contact_feedback_is_signed_excess_error(self):
-        feedback = _contact_feedback(
+        feedback = contact_feedback(
             [-CONTACT_THRESHOLD - 0.25, CONTACT_THRESHOLD + 0.5]
         )
 
         np.testing.assert_allclose(feedback, [-0.25, 0.5])
 
-    def test_dynamic_contact_threshold_increases_with_speed(self):
-        thresholds = _dynamic_contact_threshold([-2.0, 0.0, 1.0])
-
-        np.testing.assert_allclose(
-            thresholds,
-            [
-                CONTACT_THRESHOLD + 2.0 * CONTACT_VELOCITY_ERROR_GAIN_S,
-                CONTACT_THRESHOLD,
-                CONTACT_THRESHOLD + CONTACT_VELOCITY_ERROR_GAIN_S,
-            ],
-        )
-
     def test_contact_feedback_accepts_joint_specific_thresholds(self):
-        feedback = _contact_feedback([0.25, -0.25], [0.2, 0.3])
+        feedback = contact_feedback([0.25, -0.25], [0.2, 0.3])
 
         np.testing.assert_allclose(feedback, [0.05, 0.0])
 
