@@ -8,13 +8,62 @@ from data_collection.collection.contact_detection import (
     ContactStateMachine,
 )
 from scripts.trimorph_api_test.two_joint_test_ui import (
+    ContactDetectorSettings,
     HandWorker,
     STREAM_CLOSE_ANGLE_RAD,
     STREAM_OPEN_ANGLE_RAD,
+    _build_contact_detectors,
+    _contact_circle_radius,
     _stream_sample,
+    _threshold_normalized_joint_difference,
     _ui_order_indices,
     _validated_default_targets,
 )
+
+
+class ContactTuningTests(unittest.TestCase):
+    def test_custom_settings_are_applied_to_both_detectors(self):
+        settings = ContactDetectorSettings(
+            max_velocity_rad_s=2.0,
+            settle_time_s=0.2,
+            persistence_time_s=0.3,
+            entry_feedback_threshold=0.4,
+            min_engaged_time_s=0.5,
+            exit_persistence_time_s=0.6,
+        )
+
+        detectors = _build_contact_detectors(settings)
+
+        self.assertEqual(len(detectors), 2)
+        self.assertTrue(all(detector.max_velocity_rad_s == 2.0 for detector in detectors))
+        self.assertTrue(all(detector.settle_time_s == 0.2 for detector in detectors))
+        self.assertTrue(all(detector.persistence_time_s == 0.3 for detector in detectors))
+        self.assertTrue(
+            all(detector.entry_feedback_threshold == 0.4 for detector in detectors)
+        )
+        self.assertTrue(all(detector.min_engaged_time_s == 0.5 for detector in detectors))
+        self.assertTrue(
+            all(detector.exit_persistence_time_s == 0.6 for detector in detectors)
+        )
+
+    def test_negative_or_non_finite_settings_are_rejected(self):
+        for value in (-0.1, float("nan"), float("inf")):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "finite, non-negative"):
+                    _build_contact_detectors(
+                        ContactDetectorSettings(max_velocity_rad_s=value)
+                    )
+
+    def test_contact_circle_grows_with_feedback_and_is_bounded(self):
+        self.assertLess(_contact_circle_radius(0.02), _contact_circle_radius(0.10))
+        self.assertEqual(_contact_circle_radius(100.0), 120.0)
+
+    def test_joint_difference_is_normalized_by_effective_entry_threshold(self):
+        normalized = _threshold_normalized_joint_difference(
+            np.asarray([0.05, -0.10]), ContactDetectorSettings()
+        )
+
+        np.testing.assert_allclose(normalized, (1.0, 2.0))
 
 
 class HandWorkerContactTests(unittest.TestCase):

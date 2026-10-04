@@ -31,13 +31,14 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from data_collection.collection.contact_detection import (
-    CONTACT_ENTER_THRESHOLD,
+    CONTACT_ENTRY_FEEDBACK_THRESHOLD,
     CONTACT_EXIT_PERSISTENCE_TIME_S,
     CONTACT_EXIT_THRESHOLD,
     CONTACT_MAX_VELOCITY_RAD_S,
     CONTACT_MIN_ENGAGED_TIME_S,
     CONTACT_PERSISTENCE_TIME_S,
     CONTACT_SETTLE_TIME_S,
+    CONTACT_VIRTUAL_SPRING_STIFFNESS,
     ContactState,
     ContactStateMachine,
     contact_feedback,
@@ -67,6 +68,16 @@ class ConnectionSettings:
 
 
 @dataclass(frozen=True)
+class ContactDetectorSettings:
+    max_velocity_rad_s: float = CONTACT_MAX_VELOCITY_RAD_S
+    settle_time_s: float = CONTACT_SETTLE_TIME_S
+    persistence_time_s: float = CONTACT_PERSISTENCE_TIME_S
+    entry_feedback_threshold: float = CONTACT_ENTRY_FEEDBACK_THRESHOLD
+    min_engaged_time_s: float = CONTACT_MIN_ENGAGED_TIME_S
+    exit_persistence_time_s: float = CONTACT_EXIT_PERSISTENCE_TIME_S
+
+
+@dataclass(frozen=True)
 class Telemetry:
     positions: tuple[float, float]
     velocities: tuple[float, float]
@@ -75,6 +86,7 @@ class Telemetry:
     errors: tuple[float, float]
     candidate_feedback: tuple[float, float]
     contact_feedback: tuple[float, float]
+    normalized_joint_difference: tuple[float, float]
     contacts: tuple[bool, bool]
     sequence_active: bool
 
@@ -125,6 +137,52 @@ def _ui_order_indices(
         ) from exc
 
 
+def _build_contact_detectors(
+    settings: ContactDetectorSettings,
+) -> tuple[ContactStateMachine, ContactStateMachine]:
+    """Validate UI tuning and create independent MCP/PIP state machines."""
+
+    parameters = {
+        "Maximum velocity": settings.max_velocity_rad_s,
+        "Settle time": settings.settle_time_s,
+        "Entry persistence": settings.persistence_time_s,
+        "Entry feedback threshold": settings.entry_feedback_threshold,
+        "Minimum contact time": settings.min_engaged_time_s,
+        "Exit persistence": settings.exit_persistence_time_s,
+    }
+    for name, value in parameters.items():
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be a finite, non-negative number")
+    kwargs = {
+        "max_velocity_rad_s": settings.max_velocity_rad_s,
+        "settle_time_s": settings.settle_time_s,
+        "persistence_time_s": settings.persistence_time_s,
+        "entry_feedback_threshold": settings.entry_feedback_threshold,
+        "min_engaged_time_s": settings.min_engaged_time_s,
+        "exit_persistence_time_s": settings.exit_persistence_time_s,
+    }
+    return ContactStateMachine(**kwargs), ContactStateMachine(**kwargs)
+
+
+def _contact_circle_radius(contact_feedback_value: float) -> float:
+    """Map absolute contact feedback to a bounded on-canvas radius."""
+
+    return min(120.0, 22.0 + 420.0 * abs(float(contact_feedback_value)))
+
+
+def _threshold_normalized_joint_difference(
+    position_errors: np.ndarray,
+    settings: ContactDetectorSettings,
+) -> np.ndarray:
+    """Return |target - measured| divided by the effective entry threshold."""
+
+    entry_error_threshold = (
+        CONTACT_EXIT_THRESHOLD
+        + settings.entry_feedback_threshold / CONTACT_VIRTUAL_SPRING_STIFFNESS
+    )
+    return np.abs(np.asarray(position_errors, dtype=float)) / entry_error_threshold
+
+
 def _stream_sample(elapsed_s: float, duration_s: float) -> tuple[np.ndarray, float, bool]:
     """Return the open-close-open target, speed, and completion state."""
 
@@ -159,7 +217,8 @@ class HandWorker(threading.Thread):
         self.hand: MidasHand | None = None
         self.ui_to_hand_indices = (0, 1)
         self.targets = np.zeros(2, dtype=float)  # order: MCP, PIP
-        self.contact_detectors = (ContactStateMachine(), ContactStateMachine())
+        self.contact_settings = ContactDetectorSettings()
+        self.contact_detectors = _build_contact_detectors(self.contact_settings)
         self.sequence_active = False
         self.sequence_phase: Literal["idle", "preposition", "stream"] = "idle"
         self.sequence_duration_s = 2.0
@@ -206,6 +265,13 @@ class HandWorker(threading.Thread):
                 travel_times = np.abs(new_targets - self.targets) / PROFILE_VELOCITY_RAD_S
                 self.profile_motion_until = time.monotonic() + travel_times + 0.1
             self.targets = new_targets
+        elif name == "contact_settings":
+            settings = payload
+            if not isinstance(settings, ContactDetectorSettings):
+                raise TypeError("Invalid contact detector settings")
+            self.contact_detectors = _build_contact_detectors(settings)
+            self.contact_settings = settings
+            self.events.put(WorkerEvent("status", "Contact detector settings applied"))
         elif name == "start_sequence":
             duration_s = float(payload)  # type: ignore[arg-type]
             if not math.isfinite(duration_s) or duration_s < MIN_STREAM_DURATION_S:
@@ -399,6 +465,9 @@ class HandWorker(threading.Thread):
         candidate_feedback = contact_feedback(
             errors, thresholds=CONTACT_EXIT_THRESHOLD
         )
+        normalized_difference = _threshold_normalized_joint_difference(
+            errors, self.contact_settings
+        )
         now_s = time.monotonic()
         detected_feedback = np.asarray(
             [
@@ -422,6 +491,9 @@ class HandWorker(threading.Thread):
             errors=tuple(float(value) for value in errors),
             candidate_feedback=tuple(float(value) for value in candidate_feedback),
             contact_feedback=tuple(float(value) for value in detected_feedback),
+            normalized_joint_difference=tuple(
+                float(value) for value in normalized_difference
+            ),
             contacts=tuple(bool(value) for value in contacts),
             sequence_active=self.sequence_active,
         )
@@ -434,7 +506,7 @@ class ContactVisualizerUI:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Two-joint contact visualizer")
-        self.root.minsize(980, 680)
+        self.root.minsize(980, 800)
         self.commands: queue.Queue[tuple[str, object]] = queue.Queue()
         self.events: queue.Queue[WorkerEvent] = queue.Queue()
         self.worker = HandWorker(self.commands, self.events)
@@ -525,18 +597,62 @@ class ContactVisualizerUI:
 
         detector = ttk.LabelFrame(controls, text="Contact detector", padding=10)
         detector.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        detector_summary = (
-            f"Entry / exit error: {CONTACT_ENTER_THRESHOLD:g} / "
-            f"{CONTACT_EXIT_THRESHOLD:g} rad\n"
-            f"Motion suppression: > {CONTACT_MAX_VELOCITY_RAD_S:g} rad/s\n"
-            f"Settle / entry persistence: {CONTACT_SETTLE_TIME_S:g} / "
-            f"{CONTACT_PERSISTENCE_TIME_S:g} s\n"
-            f"Minimum contact / exit persistence: {CONTACT_MIN_ENGAGED_TIME_S:g} / "
-            f"{CONTACT_EXIT_PERSISTENCE_TIME_S:g} s"
+        detector.columnconfigure(1, weight=1)
+        self.contact_max_velocity_var = tk.StringVar(
+            value=str(CONTACT_MAX_VELOCITY_RAD_S)
         )
-        ttk.Label(detector, text=detector_summary, justify="left").grid(
-            row=0, column=0, sticky="w"
+        self.contact_settle_time_var = tk.StringVar(value=str(CONTACT_SETTLE_TIME_S))
+        self.contact_persistence_var = tk.StringVar(
+            value=str(CONTACT_PERSISTENCE_TIME_S)
         )
+        self.contact_entry_feedback_var = tk.StringVar(
+            value=str(CONTACT_ENTRY_FEEDBACK_THRESHOLD)
+        )
+        self.contact_min_engaged_var = tk.StringVar(
+            value=str(CONTACT_MIN_ENGAGED_TIME_S)
+        )
+        self.contact_exit_persistence_var = tk.StringVar(
+            value=str(CONTACT_EXIT_PERSISTENCE_TIME_S)
+        )
+        self._labeled_entry(
+            detector, 0, "Maximum velocity", self.contact_max_velocity_var, "rad/s"
+        )
+        self._labeled_entry(
+            detector, 1, "Settle time", self.contact_settle_time_var, "seconds"
+        )
+        self._labeled_entry(
+            detector, 2, "Entry persistence", self.contact_persistence_var, "seconds"
+        )
+        self._labeled_entry(
+            detector,
+            3,
+            "Entry feedback threshold",
+            self.contact_entry_feedback_var,
+            "feedback",
+        )
+        self._labeled_entry(
+            detector,
+            4,
+            "Minimum contact time",
+            self.contact_min_engaged_var,
+            "seconds",
+        )
+        self._labeled_entry(
+            detector,
+            5,
+            "Exit persistence",
+            self.contact_exit_persistence_var,
+            "seconds",
+        )
+        ttk.Label(
+            detector,
+            text=f"Candidate feedback deadband remains {CONTACT_EXIT_THRESHOLD:g} rad.",
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(5, 0))
+        ttk.Button(
+            detector,
+            text="Apply contact settings",
+            command=self._apply_contact_settings,
+        ).grid(row=7, column=0, columnspan=3, sticky="ew", pady=(7, 0))
 
         sequence = ttk.LabelFrame(
             controls, text="Streamed open-close-open sequence", padding=10
@@ -696,6 +812,30 @@ class ContactVisualizerUI:
                 ("targets", (self.mcp_target_var.get(), self.pip_target_var.get()))
             )
 
+    def _apply_contact_settings(self) -> None:
+        try:
+            settings = ContactDetectorSettings(
+                max_velocity_rad_s=float(self.contact_max_velocity_var.get()),
+                settle_time_s=float(self.contact_settle_time_var.get()),
+                persistence_time_s=float(self.contact_persistence_var.get()),
+                entry_feedback_threshold=float(
+                    self.contact_entry_feedback_var.get()
+                ),
+                min_engaged_time_s=float(self.contact_min_engaged_var.get()),
+                exit_persistence_time_s=float(
+                    self.contact_exit_persistence_var.get()
+                ),
+            )
+            _build_contact_detectors(settings)
+        except ValueError as exc:
+            messagebox.showerror("Invalid contact setting", str(exc))
+            return
+        self.commands.put(("contact_settings", settings))
+        if not self.connected:
+            self.status_var.set(
+                "Contact detector settings saved; they will apply on connection"
+            )
+
     def _toggle_sequence(self) -> None:
         if self.sequence_active:
             self.commands.put(("stop_sequence", None))
@@ -796,9 +936,20 @@ class ContactVisualizerUI:
             self.mcp_value_var.set(f"{telemetry.targets[0]:.3f} rad")
             self.pip_value_var.set(f"{telemetry.targets[1]:.3f} rad")
         mcp_contact, pip_contact = telemetry.contacts
-        self._set_contact_labels(mcp_contact, pip_contact)
+        self._set_contact_labels(
+            mcp_contact,
+            pip_contact,
+            telemetry.normalized_joint_difference,
+        )
         self._draw_finger(
-            telemetry.positions[0], telemetry.positions[1], mcp_contact, pip_contact
+            telemetry.positions[0],
+            telemetry.positions[1],
+            mcp_contact,
+            pip_contact,
+            telemetry.contact_feedback[0],
+            telemetry.contact_feedback[1],
+            telemetry.normalized_joint_difference[0],
+            telemetry.normalized_joint_difference[1],
         )
         self.readings_var.set(
             f"Position:  {telemetry.positions[0]:7.3f} / {telemetry.positions[1]:7.3f} rad\n"
@@ -810,13 +961,23 @@ class ContactVisualizerUI:
             f"Current:   {telemetry.currents_ma[0]:7.1f} / {telemetry.currents_ma[1]:7.1f} mA"
         )
 
-    def _set_contact_labels(self, mcp_contact: bool, pip_contact: bool) -> None:
-        for label, name, contact in (
-            (self.mcp_contact_label, "MCP", mcp_contact),
-            (self.pip_contact_label, "PIP", pip_contact),
+    def _set_contact_labels(
+        self,
+        mcp_contact: bool,
+        pip_contact: bool,
+        normalized_difference: tuple[float, float] = (0.0, 0.0),
+    ) -> None:
+        for label, name, contact, normalized in (
+            (self.mcp_contact_label, "MCP", mcp_contact, normalized_difference[0]),
+            (self.pip_contact_label, "PIP", pip_contact, normalized_difference[1]),
         ):
+            state_text = (
+                f"CONTACT\n{normalized:.2f}× threshold"
+                if contact
+                else "NO CONTACT"
+            )
             label.configure(
-                text=f"{name}\n{'CONTACT' if contact else 'NO CONTACT'}",
+                text=f"{name}\n{state_text}",
                 bg="#ff3b30" if contact else "#25313d",
                 fg="white",
             )
@@ -829,6 +990,9 @@ class ContactVisualizerUI:
             self._draw_finger(
                 telemetry.positions[0], telemetry.positions[1],
                 telemetry.contacts[0], telemetry.contacts[1],
+                telemetry.contact_feedback[0], telemetry.contact_feedback[1],
+                telemetry.normalized_joint_difference[0],
+                telemetry.normalized_joint_difference[1],
             )
 
     def _draw_finger(
@@ -837,6 +1001,10 @@ class ContactVisualizerUI:
         pip_angle: float,
         mcp_contact: bool,
         pip_contact: bool,
+        mcp_contact_strength: float = 0.0,
+        pip_contact_strength: float = 0.0,
+        mcp_normalized_difference: float = 0.0,
+        pip_normalized_difference: float = 0.0,
     ) -> None:
         self.canvas.delete("all")
         width = max(self.canvas.winfo_width(), 300)
@@ -869,6 +1037,32 @@ class ContactVisualizerUI:
         self.canvas.create_oval(
             x - 7, y - 7, x + 7, y + 7,
             fill="#d8e0e8", outline="#10151c", width=2,
+        )
+        if mcp_contact:
+            self._draw_contact_circle(
+                base, mcp_contact_strength, mcp_normalized_difference
+            )
+        if pip_contact:
+            self._draw_contact_circle(
+                joint, pip_contact_strength, pip_normalized_difference
+            )
+
+    def _draw_contact_circle(
+        self, center: np.ndarray, strength: float, normalized_difference: float
+    ) -> None:
+        """Draw a contact-only ring whose radius tracks feedback magnitude."""
+
+        radius = _contact_circle_radius(strength)
+        x, y = center
+        bounds = (x - radius, y - radius, x + radius, y + radius)
+        self.canvas.create_oval(*bounds, outline="#ff6b00", width=9)
+        self.canvas.create_oval(*bounds, outline="#ffd166", width=3)
+        self.canvas.create_text(
+            x,
+            y + radius + 13,
+            text=f"{normalized_difference:.2f}× threshold",
+            fill="#ffd166",
+            font=("TkDefaultFont", 11, "bold"),
         )
 
     def _draw_segment(
