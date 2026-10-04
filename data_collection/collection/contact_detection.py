@@ -11,7 +11,7 @@ CONTACT_ENTER_THRESHOLD = 0.05  # rad
 CONTACT_EXIT_THRESHOLD = 0.03  # rad
 # Compatibility name for callers that use the contact-entry threshold.
 CONTACT_THRESHOLD = CONTACT_ENTER_THRESHOLD
-CONTACT_MAX_VELOCITY_RAD_S = 0.5
+CONTACT_MAX_VELOCITY_RAD_S = 0.7
 CONTACT_MOTION_CURRENT_THRESHOLD_MA = 250.0  # absolute measured motor current
 CONTACT_VIRTUAL_SPRING_STIFFNESS = 1.0  # feedback units / rad
 CONTACT_SETTLE_TIME_S = 0.05
