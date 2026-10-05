@@ -60,6 +60,7 @@ from data_collection.collection.contact_detection import (
     ContactStateMachine,
     contact_feedback,
 )
+from data_collection.collection.hand_common import is_compatible_dynamixel_model
 from midas_hand_api import HandConfig, MidasHand, home_hand
 
 
@@ -311,7 +312,9 @@ def _verify_bus(hand: MidasHand) -> None:
     wrong_models = {
         motor_id: model_number
         for motor_id, model_number in models.items()
-        if model_number != hand.config.expected_model_number
+        if not is_compatible_dynamixel_model(
+            model_number, hand.config.expected_model_number
+        )
     }
     if missing:
         raise OSError(f"Configured motors did not respond: {missing}")

@@ -44,6 +44,7 @@ from data_collection.collection.contact_detection import (
     ContactStateMachine,
     contact_feedback,
 )
+from data_collection.collection.hand_common import is_compatible_dynamixel_model
 from midas_hand_api import HandConfig, MidasHand
 
 
@@ -413,7 +414,9 @@ class HandWorker(threading.Thread):
             wrong_models = {
                 motor_id: model
                 for motor_id, model in models.items()
-                if model != config.expected_model_number
+                if not is_compatible_dynamixel_model(
+                    model, config.expected_model_number
+                )
             }
             if wrong_models:
                 raise OSError(f"Unexpected Dynamixel model numbers: {wrong_models}")

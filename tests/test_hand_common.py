@@ -7,6 +7,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from collection.hand_common import (
+    XC330_M181_T_MODEL_NUMBER,
+    XL330_M077_T_MODEL_NUMBER,
+    is_compatible_dynamixel_model,
     load_follower_config,
     load_hand_config,
     verify_connected_hand,
@@ -41,6 +44,37 @@ class VerifyConnectedHandTests(unittest.TestCase):
         responses[7] = 1710
         with self.assertRaisesRegex(RuntimeError, "unexpected motor models"):
             verify_connected_hand(_Hand(responses), role="test")
+
+    def test_accepts_mixed_xl330_m077_and_xc330_m181_motors(self):
+        responses = {
+            motor_id: (
+                XL330_M077_T_MODEL_NUMBER
+                if motor_id % 2 == 0
+                else XC330_M181_T_MODEL_NUMBER
+            )
+            for motor_id in range(13)
+        }
+
+        verify_connected_hand(_Hand(responses), role="test")
+
+
+class CompatibleDynamixelModelTests(unittest.TestCase):
+    def test_mixed_models_are_compatible_in_either_config_direction(self):
+        self.assertTrue(
+            is_compatible_dynamixel_model(
+                XC330_M181_T_MODEL_NUMBER, XL330_M077_T_MODEL_NUMBER
+            )
+        )
+        self.assertTrue(
+            is_compatible_dynamixel_model(
+                XL330_M077_T_MODEL_NUMBER, XC330_M181_T_MODEL_NUMBER
+            )
+        )
+
+    def test_unrelated_model_still_has_to_match_exactly(self):
+        self.assertFalse(is_compatible_dynamixel_model(1710, 1190))
+        self.assertFalse(is_compatible_dynamixel_model(1190, 1710))
+        self.assertTrue(is_compatible_dynamixel_model(1710, 1710))
 
 
 @dataclass(frozen=True)

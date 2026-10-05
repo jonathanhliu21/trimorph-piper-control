@@ -5,6 +5,28 @@ from pathlib import Path
 from typing import Sequence
 
 
+XL330_M077_T_MODEL_NUMBER = 1190
+XC330_M181_T_MODEL_NUMBER = 1230
+MIXED_HAND_MODEL_NUMBERS = frozenset(
+    (XL330_M077_T_MODEL_NUMBER, XC330_M181_T_MODEL_NUMBER)
+)
+
+
+def is_compatible_dynamixel_model(
+    model_number: int, expected_model_number: int
+) -> bool:
+    """Return whether a responding motor is compatible with the configured model.
+
+    XL330-M077-T and XC330-M181-T motors may be mixed on the same hand. Other
+    models must continue to match the model selected by the YAML configuration.
+    """
+
+    return model_number == expected_model_number or (
+        expected_model_number in MIXED_HAND_MODEL_NUMBERS
+        and model_number in MIXED_HAND_MODEL_NUMBERS
+    )
+
+
 def load_hand_config(
     path: Path, port: str, active_motors: Sequence[int] | None = None
 ):
@@ -73,7 +95,9 @@ def verify_connected_hand(hand, *, role: str) -> None:
     wrong_models = {
         motor_id: model_number
         for motor_id, model_number in responses.items()
-        if model_number != hand.config.expected_model_number
+        if not is_compatible_dynamixel_model(
+            model_number, hand.config.expected_model_number
+        )
     }
     if wrong_models:
         raise RuntimeError(
