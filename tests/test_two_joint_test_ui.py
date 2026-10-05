@@ -23,9 +23,7 @@ from scripts.trimorph_api_test.hand_ui import (
     _contact_direction_label,
     _contact_palette,
     _build_parser,
-    _sum_tactile_normal_forces,
     _stream_sample,
-    _tactile_circle_radius,
     _threshold_normalized_joint_difference,
     _ui_order_indices,
     _validated_default_targets,
@@ -100,32 +98,14 @@ class TactileTests(unittest.TestCase):
 
         self.assertEqual(args.paxini_port, "/dev/cu.usbserial-PAXINI")
 
-    def test_normal_force_is_summed_over_all_taxels_in_ui_order(self):
-        forces = _sum_tactile_normal_forces(
-            {
-                "thumb": np.asarray([7.0, 8.0]),
-                "ring": np.asarray([5.0, 6.0]),
-                "middle": np.asarray([3.0, 4.0]),
-                "index": np.asarray([1.0, 2.0]),
-            }
+    def test_tactile_debug_log_path_is_accepted(self):
+        args = _build_parser().parse_args(
+            ["--tactile-debug-log", "output/tactile-contact-debug.log"]
         )
 
-        self.assertEqual(forces, (3.0, 7.0, 11.0, 15.0))
-
-    def test_missing_tactile_finger_is_reported(self):
-        with self.assertRaisesRegex(RuntimeError, "missing sensors.*ring"):
-            _sum_tactile_normal_forces(
-                {
-                    "thumb": np.zeros(1),
-                    "middle": np.zeros(1),
-                    "index": np.zeros(1),
-                }
-            )
-
-    def test_tactile_circle_uses_force_magnitude_and_is_bounded(self):
-        self.assertEqual(_tactile_circle_radius(-9.0), _tactile_circle_radius(9.0))
-        self.assertEqual(_tactile_circle_radius(10_000.0), 24.0)
-
+        self.assertEqual(
+            str(args.tactile_debug_log), "output/tactile-contact-debug.log"
+        )
 
 class HandWorkerContactTests(unittest.TestCase):
     class FakeHand:
@@ -238,7 +218,7 @@ class HandWorkerContactTests(unittest.TestCase):
             hand.positions[list(worker.ui_to_hand_indices)],
         )
 
-    def test_tactile_worker_publishes_summed_normal_forces(self):
+    def test_tactile_worker_publishes_binary_contacts(self):
         events = queue.Queue()
         worker = HandWorker(queue.Queue(), events, add_tactile=True)
         worker.hand = self.FakeHand()
@@ -246,7 +226,7 @@ class HandWorkerContactTests(unittest.TestCase):
         worker._control_tick()
         telemetry = events.get_nowait().payload
 
-        self.assertEqual(telemetry.tactile_forces_n, (3.0, 3.0, 9.0, 6.0))
+        self.assertEqual(telemetry.tactile_contacts, (False,) * 4)
 
 
 class StreamSequenceTests(unittest.TestCase):
