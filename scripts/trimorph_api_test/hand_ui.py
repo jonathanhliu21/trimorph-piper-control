@@ -2,7 +2,8 @@
 
 Run from any directory with the project environment::
 
-    .venv/bin/python scripts/trimorph_api_test/two_joint_test_ui.py
+    .venv/bin/python scripts/trimorph_api_test/hand_ui.py [--add-tactile]
+        [--paxini-port /dev/cu.usbserial-XXXX]
 
 The hardware is owned by one background thread. Tkinter never performs a bus
 operation, so rendering and the Stop controls remain responsive.
@@ -10,6 +11,7 @@ operation, so rendering and the Stop controls remain responsive.
 
 from __future__ import annotations
 
+import argparse
 import math
 import queue
 import sys
@@ -45,7 +47,7 @@ from data_collection.collection.contact_detection import (
     contact_feedback,
 )
 from data_collection.collection.hand_common import is_compatible_dynamixel_model
-from midas_hand_api import HandConfig, MidasHand
+from midas_hand_api import HandConfig, MidasHand, PaxiniConfig, PaxiniHandSensor
 
 
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "midas_hand_config.yaml"
@@ -75,6 +77,7 @@ THUMB_CLOSE_ANGLES_RAD = (-1.4, -1.4, -0.1, 1.5)
 STREAM_PREPOSITION_TOLERANCE_RAD = 0.1
 STREAM_PREPOSITION_TIMEOUT_S = 4.0
 MIN_STREAM_DURATION_S = 1.0 / CONTROL_RATE_HZ
+TACTILE_SENSOR_NAMES = ("index", "middle", "ring", "thumb")
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,7 @@ class Telemetry:
     contact_feedback: tuple[float, ...]
     normalized_joint_difference: tuple[float, ...]
     contacts: tuple[bool, ...]
+    tactile_forces_n: tuple[float, ...] | None
     sequence_active: bool
     sequence_kind: Literal["fingers", "thumb"] | None
 
@@ -203,6 +207,29 @@ def _contact_circle_radius(contact_feedback_value: float) -> float:
     return min(120.0, 22.0 + 420.0 * abs(float(contact_feedback_value)))
 
 
+def _sum_tactile_normal_forces(
+    normal_forces: dict[str, np.ndarray],
+) -> tuple[float, ...]:
+    """Sum every taxel's normal force in Finger 1–3, Thumb display order."""
+
+    missing = [name for name in TACTILE_SENSOR_NAMES if name not in normal_forces]
+    if missing:
+        raise RuntimeError(f"Tactile frame is missing sensors: {missing}")
+    totals = tuple(
+        float(np.sum(np.asarray(normal_forces[name], dtype=float)))
+        for name in TACTILE_SENSOR_NAMES
+    )
+    if not all(math.isfinite(value) for value in totals):
+        raise RuntimeError("Tactile frame contains non-finite normal-force readings")
+    return totals
+
+
+def _tactile_circle_radius(force_n: float) -> float:
+    """Map total normal-force magnitude to a compact fingertip circle."""
+
+    return min(24.0, 10.0 + 2.0 * math.sqrt(abs(float(force_n))))
+
+
 def _contact_palette(contact_feedback_value: float) -> tuple[str, str, str, str]:
     """Return fill, outline, ring, and accent colors for feedback direction."""
 
@@ -271,11 +298,16 @@ class HandWorker(threading.Thread):
         self,
         commands: queue.Queue[tuple[str, object]],
         events: queue.Queue[WorkerEvent],
+        *,
+        add_tactile: bool = False,
+        paxini_port: str | None = None,
     ) -> None:
         # Non-daemon is deliberate: Python must not exit before torque disable.
         super().__init__(name="finger-contact-hand-worker", daemon=False)
         self.commands = commands
         self.events = events
+        self.add_tactile = add_tactile
+        self.paxini_port = paxini_port
         self.hand: MidasHand | None = None
         self.ui_to_hand_indices = tuple(range(JOINT_COUNT))
         self.targets = np.zeros(JOINT_COUNT, dtype=float)
@@ -382,7 +414,10 @@ class HandWorker(threading.Thread):
 
     def _connect(self, settings: ConnectionSettings) -> None:
         self._disconnect()
-        self.events.put(WorkerEvent("status", "Connecting and verifying motors…"))
+        hardware = "motors and tactile sensor" if self.add_tactile else "motors"
+        self.events.put(
+            WorkerEvent("status", f"Connecting and verifying {hardware}…")
+        )
         with settings.config_path.open(encoding="utf-8") as stream:
             raw_config = yaml.safe_load(stream) or {}
         if raw_config.get("placeholders_unreviewed", True):
@@ -404,7 +439,14 @@ class HandWorker(threading.Thread):
         )
         default_targets_hand_order = np.empty(JOINT_COUNT, dtype=float)
         default_targets_hand_order[list(ui_to_hand_indices)] = default_targets
-        hand = MidasHand(config, autoconnect=False)
+        tactile_sensor = (
+            PaxiniHandSensor(PaxiniConfig(port=self.paxini_port))
+            if self.add_tactile
+            else None
+        )
+        hand = MidasHand(
+            config, autoconnect=False, tactile_sensor=tactile_sensor
+        )
         try:
             hand.connect()
             models = hand.ping()
@@ -430,9 +472,19 @@ class HandWorker(threading.Thread):
             )
             hand.enable_torque()
             hand.set_positions(default_targets_hand_order, clip=False)
-        except Exception:
+        except Exception as exc:
+            tactile_connection_failed = (
+                tactile_sensor is not None
+                and hand.is_connected
+                and not tactile_sensor.is_connected
+            )
             if hand.is_connected:
                 hand.shutdown()
+            if tactile_connection_failed:
+                raise RuntimeError(
+                    "Tactile sensor requested, but the Paxini "
+                    f"sensor could not be found or connected: {exc}"
+                ) from exc
             raise
 
         self.hand = hand
@@ -455,7 +507,15 @@ class HandWorker(threading.Thread):
             hand.port,
         )
         self.events.put(WorkerEvent("connected", limits))
-        self.events.put(WorkerEvent("status", f"Connected on {hand.port}; torque enabled"))
+        tactile_status = (
+            f"; tactile on {tactile_sensor.port}" if tactile_sensor is not None else ""
+        )
+        self.events.put(
+            WorkerEvent(
+                "status",
+                f"Connected on {hand.port}{tactile_status}; torque enabled",
+            )
+        )
 
     def _disconnect(self, *, emit_event: bool = True) -> None:
         hand, self.hand = self.hand, None
@@ -577,6 +637,16 @@ class HandWorker(threading.Thread):
         contacts = np.asarray(
             [detector.state is ContactState.CONTACT for detector in self.contact_detectors]
         )
+        tactile_forces_n: tuple[float, ...] | None = None
+        if self.add_tactile:
+            try:
+                tactile_forces_n = _sum_tactile_normal_forces(
+                    self.hand.read_tactile_fz()
+                )
+            except RuntimeError as exc:
+                if "No tactile data available yet" not in str(exc):
+                    raise
+                tactile_forces_n = (0.0,) * len(TACTILE_SENSOR_NAMES)
         telemetry = Telemetry(
             positions=tuple(float(value) for value in positions),
             velocities=tuple(float(value) for value in velocities),
@@ -589,6 +659,7 @@ class HandWorker(threading.Thread):
                 float(value) for value in normalized_difference
             ),
             contacts=tuple(bool(value) for value in contacts),
+            tactile_forces_n=tactile_forces_n,
             sequence_active=self.sequence_active,
             sequence_kind=self.sequence_kind,
         )
@@ -598,13 +669,25 @@ class HandWorker(threading.Thread):
 class ContactVisualizerUI:
     """Tk interface for direct position control and contact visualization."""
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        *,
+        add_tactile: bool = False,
+        paxini_port: str | None = None,
+    ) -> None:
         self.root = root
         self.root.title("Hand contact visualizer")
         self.root.minsize(1400, 920)
         self.commands: queue.Queue[tuple[str, object]] = queue.Queue()
         self.events: queue.Queue[WorkerEvent] = queue.Queue()
-        self.worker = HandWorker(self.commands, self.events)
+        self.add_tactile = add_tactile
+        self.worker = HandWorker(
+            self.commands,
+            self.events,
+            add_tactile=add_tactile,
+            paxini_port=paxini_port,
+        )
         self.worker.start()
         self.connected = False
         self.sequence_active = False
@@ -1066,6 +1149,7 @@ class ContactVisualizerUI:
             telemetry.contacts,
             telemetry.contact_feedback,
             telemetry.normalized_joint_difference,
+            telemetry.tactile_forces_n,
         )
 
     def _redraw_latest(self) -> None:
@@ -1077,6 +1161,7 @@ class ContactVisualizerUI:
                 telemetry.contacts,
                 telemetry.contact_feedback,
                 telemetry.normalized_joint_difference,
+                telemetry.tactile_forces_n,
             )
 
     def _draw_hand(
@@ -1084,14 +1169,16 @@ class ContactVisualizerUI:
         contacts: tuple[bool, ...] = (False,) * JOINT_COUNT,
         contact_strengths: tuple[float, ...] = (0.0,) * JOINT_COUNT,
         normalized_differences: tuple[float, ...] = (0.0,) * JOINT_COUNT,
+        tactile_forces_n: tuple[float, ...] | None = None,
     ) -> None:
         self.canvas.delete("all")
         width = max(self.canvas.winfo_width(), 600)
         height = max(self.canvas.winfo_height(), 400)
+        show_tactile = tactile_forces_n is not None
         x_positions = (width * 0.15, width * 0.32, width * 0.49)
         block_width = min(120.0, width * 0.12)
-        pip_center_y = height * 0.25
-        mcp_center_y = height * 0.56
+        pip_center_y = height * (0.31 if show_tactile else 0.25)
+        mcp_center_y = height * (0.59 if show_tactile else 0.56)
         ab_ad_center_y = height * 0.84
         block_height = min(115.0, height * 0.25)
 
@@ -1117,6 +1204,11 @@ class ContactVisualizerUI:
                 x, 18, text=f"Finger {finger_index + 1}", fill="#333333",
                 font=("TkDefaultFont", 13, "bold"),
             )
+            if show_tactile:
+                assert tactile_forces_n is not None
+                self._draw_tactile_circle(
+                    np.asarray((x, 55.0)), tactile_forces_n[finger_index]
+                )
             self._draw_joint_block(
                 np.asarray((x, pip_center_y)), block_width, block_height,
                 f"PIP  ·  ID {UI_MOTOR_IDS[pip_index]}", contacts[pip_index],
@@ -1146,16 +1238,26 @@ class ContactVisualizerUI:
         thumb_x = width * 0.76
         thumb_width = min(105.0, width * 0.10)
         thumb_height = min(88.0, height * 0.19)
-        thumb_centers = (
-            np.asarray((thumb_x, height * 0.20)),
-            np.asarray((thumb_x, height * 0.45)),
-            np.asarray((thumb_x - 8.0, height * 0.68)),
-            np.asarray((thumb_x - 28.0, height * 0.88)),
+        thumb_y_fractions = (
+            (0.30, 0.50, 0.70, 0.88)
+            if show_tactile
+            else (0.20, 0.45, 0.68, 0.88)
+        )
+        thumb_centers = tuple(
+            np.asarray((thumb_x + x_offset, height * y_fraction))
+            for x_offset, y_fraction in zip(
+                (0.0, 0.0, -8.0, -28.0), thumb_y_fractions
+            )
         )
         self.canvas.create_text(
             thumb_x, 18, text="Thumb", fill="#333333",
             font=("TkDefaultFont", 13, "bold"),
         )
+        if show_tactile:
+            assert tactile_forces_n is not None
+            self._draw_tactile_circle(
+                np.asarray((thumb_x, 55.0)), tactile_forces_n[3]
+            )
         self._draw_joint_block(
             thumb_centers[0], thumb_width, thumb_height,
             "IP  ·  ID 0", contacts[THUMB_INDICES[0]],
@@ -1305,6 +1407,30 @@ class ContactVisualizerUI:
             font=("TkDefaultFont", 11, "bold"),
         )
 
+    def _draw_tactile_circle(self, center: np.ndarray, force_n: float) -> None:
+        """Draw a fingertip indicator sized by summed normal force."""
+
+        x, y = center
+        radius = _tactile_circle_radius(force_n)
+        fill = "#51cf66" if force_n >= 0.0 else "#ff8787"
+        outline = "#2b8a3e" if force_n >= 0.0 else "#c92a2a"
+        self.canvas.create_oval(
+            x - radius,
+            y - radius,
+            x + radius,
+            y + radius,
+            fill=fill,
+            outline=outline,
+            width=3,
+        )
+        self.canvas.create_text(
+            x,
+            y,
+            text=f"{force_n:.1f} N",
+            fill="#1f1f1f",
+            font=("TkDefaultFont", 9, "bold"),
+        )
+
     def _on_close(self) -> None:
         if self._closing:
             return
@@ -1328,9 +1454,36 @@ class ContactVisualizerUI:
             self.root.destroy()
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--add-tactile",
+        action="store_true",
+        help=(
+            "connect the auto-detected Paxini tactile sensor and show the summed "
+            "normal force above each fingertip"
+        ),
+    )
+    parser.add_argument(
+        "--paxini-port",
+        metavar="PORT",
+        help=(
+            "Paxini serial port, for example /dev/cu.usbserial-XXXX; providing "
+            "this option also enables tactile sensing"
+        ),
+    )
+    return parser
+
+
 def main() -> None:
+    args = _build_parser().parse_args()
+    add_tactile = args.add_tactile or args.paxini_port is not None
     root = tk.Tk()
-    ui = ContactVisualizerUI(root)
+    ui = ContactVisualizerUI(
+        root,
+        add_tactile=add_tactile,
+        paxini_port=args.paxini_port,
+    )
     try:
         root.mainloop()
     finally:

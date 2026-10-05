@@ -22,7 +22,10 @@ from scripts.trimorph_api_test.hand_ui import (
     _contact_circle_radius,
     _contact_direction_label,
     _contact_palette,
+    _build_parser,
+    _sum_tactile_normal_forces,
     _stream_sample,
+    _tactile_circle_radius,
     _threshold_normalized_joint_difference,
     _ui_order_indices,
     _validated_default_targets,
@@ -83,6 +86,47 @@ class ContactTuningTests(unittest.TestCase):
         np.testing.assert_allclose(normalized, (1.0, 2.0, 0.5))
 
 
+class TactileTests(unittest.TestCase):
+    def test_add_tactile_flag_is_opt_in(self):
+        parser = _build_parser()
+
+        self.assertFalse(parser.parse_args([]).add_tactile)
+        self.assertTrue(parser.parse_args(["--add-tactile"]).add_tactile)
+
+    def test_paxini_port_is_accepted(self):
+        args = _build_parser().parse_args(
+            ["--paxini-port", "/dev/cu.usbserial-PAXINI"]
+        )
+
+        self.assertEqual(args.paxini_port, "/dev/cu.usbserial-PAXINI")
+
+    def test_normal_force_is_summed_over_all_taxels_in_ui_order(self):
+        forces = _sum_tactile_normal_forces(
+            {
+                "thumb": np.asarray([7.0, 8.0]),
+                "ring": np.asarray([5.0, 6.0]),
+                "middle": np.asarray([3.0, 4.0]),
+                "index": np.asarray([1.0, 2.0]),
+            }
+        )
+
+        self.assertEqual(forces, (3.0, 7.0, 11.0, 15.0))
+
+    def test_missing_tactile_finger_is_reported(self):
+        with self.assertRaisesRegex(RuntimeError, "missing sensors.*ring"):
+            _sum_tactile_normal_forces(
+                {
+                    "thumb": np.zeros(1),
+                    "middle": np.zeros(1),
+                    "index": np.zeros(1),
+                }
+            )
+
+    def test_tactile_circle_uses_force_magnitude_and_is_bounded(self):
+        self.assertEqual(_tactile_circle_radius(-9.0), _tactile_circle_radius(9.0))
+        self.assertEqual(_tactile_circle_radius(10_000.0), 24.0)
+
+
 class HandWorkerContactTests(unittest.TestCase):
     class FakeHand:
         def __init__(self):
@@ -99,6 +143,14 @@ class HandWorkerContactTests(unittest.TestCase):
 
         def read_pos_vel_cur(self):
             return self.positions, self.velocities, self.currents
+
+        def read_tactile_fz(self):
+            return {
+                "index": np.asarray([1.0, 2.0]),
+                "middle": np.asarray([3.0]),
+                "ring": np.asarray([4.0, 5.0]),
+                "thumb": np.asarray([6.0]),
+            }
 
     def test_motion_below_current_threshold_does_not_detect_contact(self):
         events = queue.Queue()
@@ -185,6 +237,16 @@ class HandWorkerContactTests(unittest.TestCase):
             telemetry.positions,
             hand.positions[list(worker.ui_to_hand_indices)],
         )
+
+    def test_tactile_worker_publishes_summed_normal_forces(self):
+        events = queue.Queue()
+        worker = HandWorker(queue.Queue(), events, add_tactile=True)
+        worker.hand = self.FakeHand()
+
+        worker._control_tick()
+        telemetry = events.get_nowait().payload
+
+        self.assertEqual(telemetry.tactile_forces_n, (3.0, 3.0, 9.0, 6.0))
 
 
 class StreamSequenceTests(unittest.TestCase):
