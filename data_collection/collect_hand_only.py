@@ -26,6 +26,7 @@ DEFAULT_WARMUP_TIME_S = 5.0
 DEFAULT_HAND_MEASURE_RATE_HZ = 100.0
 DATA_COLLECTION_MODE = "data_collection"
 RETARGET_ONLY_MODE = "retarget_only"
+DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class HandOnlyCollectionConfig:
     follower_command_scale: float = 1.0
     follower_max_step_rad: float = 0.15
     follower_interpolation_alpha: float = 0.4
+    thumb_retarget_model: Path | None = None
     follower_joint_command_scales: dict[int, float] = field(
         default_factory=lambda: {
             0: 1.0,
@@ -98,6 +100,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--follower-config", type=Path)
     parser.add_argument("--follower-port")
+    parser.add_argument(
+        "--thumb-model",
+        type=Path,
+        default=DEFAULT_THUMB_MODEL,
+        help=(
+            "Linear TRIMORPH-to-MIDAS thumb model produced by "
+            "fit_model_to_endpoints.py (default: %(default)s)."
+        ),
+    )
     parser.add_argument(
         "--episode-time",
         type=float,
@@ -258,6 +269,11 @@ def main() -> int:
             else None
         ),
         follower_hand_port=args.follower_port,
+        thumb_retarget_model=(
+            args.thumb_model.expanduser()
+            if args.follower_config is not None
+            else None
+        ),
     )
     if (config.follower_hand_config is None) != (config.follower_hand_port is None):
         raise ValueError("--follower-config and --follower-port must be provided together")

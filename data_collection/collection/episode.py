@@ -207,6 +207,11 @@ class EpisodeBuffer:
                 "joint_command_scales": getattr(
                     self.config, "follower_joint_command_scales", None
                 ),
+                "thumb_retarget_model": (
+                    str(self.config.thumb_retarget_model)
+                    if getattr(self.config, "thumb_retarget_model", None) is not None
+                    else None
+                ),
                 "interpolation_alpha": getattr(
                     self.config, "follower_interpolation_alpha", None
                 ),
