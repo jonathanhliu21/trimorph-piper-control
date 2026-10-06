@@ -1,8 +1,9 @@
 """Hardware bring-up CLI for an XL330 or XM335 finger test fixture.
 
 The commands mirror ``xl330_hand_test.py``, but every bus operation is limited
-to the motor IDs for the finger selected by ``--test-finger``. The default is
-``finger-1`` (motor IDs 4, 5, and 6).
+to the motor IDs for the finger selected by ``--test-finger``. Non-homing
+commands default to ``finger-1`` (motor IDs 4, 5, and 6). The ``home`` command
+homes every configured motor when ``--test-finger`` is omitted.
 
 Run from the repository root, for example:
 
@@ -20,6 +21,16 @@ Use ``--test-finger`` before the command to select the motors under test:
 
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
         --test-finger thumb record
+
+To home only one finger while preserving every other saved home offset:
+
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
+        --test-finger thumb home
+
+Add ``--joints`` after ``home`` to home only motor IDs from that finger:
+
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
+        --test-finger thumb home --joints 0 2
 
 The ``motor_model`` in the selected YAML determines whether the fixture uses
 XL330-M077-T or XM335-T323-T motors. Use a model-specific configuration so the
@@ -76,6 +87,7 @@ DEFAULT_TEST_FINGER = "finger-1"
 
 # Review these calibrated targets before moving hardware. The YAML joint signs
 # must make these calibrated targets move each joint in the intended direction.
+# TODO fix this for trimorph thumb
 OPEN_ANGLES_RAD = (
     0.0,
     0.0,
@@ -272,13 +284,18 @@ def _motion_angles(motor_id: int) -> tuple[float, float]:
     return OPEN_ANGLES_RAD[motor_id], CLOSE_ANGLES_RAD[motor_id]
 
 
-def _load_config(path: Path, motor_ids: Sequence[int]) -> HandConfig:
+def _load_config(
+    path: Path,
+    motor_ids: Optional[Sequence[int]] = None,
+) -> HandConfig:
     full_config = HandConfig.load(path)
     if full_config.motor_model not in SUPPORTED_MOTOR_MODELS:
         raise ValueError(
             f"This script supports only XL330-M077-T and XM335-T323-T, but "
             f"{path} selects {full_config.motor_model}"
         )
+    if motor_ids is None:
+        return full_config
     return full_config.subset(motor_ids)
 
 
@@ -303,6 +320,21 @@ def _require_homing_entries(config: HandConfig) -> None:
         raise ValueError(
             "No homing entry is configured for selected motor IDs "
             f"{missing}; refusing to move toward an unknown hard stop"
+        )
+
+
+def _validate_home_joints(
+    joints: Optional[Sequence[int]],
+    test_finger: Optional[str],
+) -> None:
+    if joints is None or test_finger is None:
+        return
+    allowed_ids = set(TEST_FINGER_MOTOR_IDS[test_finger])
+    invalid_ids = sorted(set(joints) - allowed_ids)
+    if invalid_ids:
+        raise ValueError(
+            f"Home joints {invalid_ids} do not belong to {test_finger}; "
+            f"allowed motor IDs are {sorted(allowed_ids)}"
         )
 
 
@@ -335,9 +367,8 @@ def _confirm_motion(action: str, assume_yes: bool) -> None:
 def _run_home(args: argparse.Namespace, config: HandConfig) -> None:
     _require_reviewed_config(args.config)
     _require_homing_entries(config)
-    action = "Homing"
-    if args.joints is not None:
-        action = f"Homing joints {args.joints}"
+    selected_ids = list(config.motor_ids) if args.joints is None else args.joints
+    action = f"Homing motor IDs {selected_ids}"
     _confirm_motion(action, args.yes)
     hand = MidasHand(config, autoconnect=False)
     try:
@@ -351,14 +382,16 @@ def _run_home(args: argparse.Namespace, config: HandConfig) -> None:
             current_threshold_ma=args.current_threshold_ma,
             homing_velocity_rad_s=args.velocity_rad_s,
         )
+        saved_indices = (
+            range(calibrated.n_motors)
+            if args.joints is None
+            else [calibrated.motor_ids.index(motor_id) for motor_id in args.joints]
+        )
         calibrated.save_merged_offsets(
-            range(calibrated.n_motors),
+            saved_indices,
             args.config,
         )
-        if args.joints is None:
-            homed = f"motor IDs {list(calibrated.motor_ids)}"
-        else:
-            homed = f"joints {args.joints}"
+        homed = f"motor IDs {selected_ids}"
         print(f"Homing complete; measured offsets for {homed} merged into {args.config}")
     finally:
         if hand.is_connected:
@@ -947,22 +980,30 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--test-finger",
         choices=tuple(TEST_FINGER_MOTOR_IDS),
-        default=DEFAULT_TEST_FINGER,
+        default=None,
         help=(
-            "Finger whose motors may be tested and torque-enabled "
-            f"(default: {DEFAULT_TEST_FINGER})"
+            "Finger whose motors may be tested and torque-enabled; for home, "
+            "omit this option to home every configured motor (other commands "
+            f"default to {DEFAULT_TEST_FINGER})"
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    home = commands.add_parser("home", help="Home all or selected configured joints")
+    home = commands.add_parser(
+        "home",
+        help=(
+            "Home every configured motor, or only the finger selected by "
+            "--test-finger"
+        ),
+    )
     home.add_argument(
         "--joints",
         nargs="+",
         type=int,
-        metavar="INDEX",
+        metavar="MOTOR_ID",
         help=(
-            "Configured joint indices to home (default: all configured joints)"
+            "Motor IDs to home (default: all motors selected by --test-finger, "
+            "or all configured motors when --test-finger is omitted)"
         ),
     )
     home.add_argument("--current-threshold-ma", type=float, default=200.0)
@@ -1245,7 +1286,13 @@ def main() -> None:
             parser.error("--pause-s must be non-negative")
 
     try:
-        motor_ids = TEST_FINGER_MOTOR_IDS[args.test_finger]
+        if args.command == "home":
+            _validate_home_joints(args.joints, args.test_finger)
+        if args.command == "home" and args.test_finger is None:
+            motor_ids = None
+        else:
+            test_finger = args.test_finger or DEFAULT_TEST_FINGER
+            motor_ids = TEST_FINGER_MOTOR_IDS[test_finger]
         config = _load_config(args.config, motor_ids)
         if args.command == "home":
             _run_home(args, config)

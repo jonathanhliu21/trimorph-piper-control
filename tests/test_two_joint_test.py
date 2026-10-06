@@ -3,6 +3,7 @@ import csv
 import io
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -20,6 +21,8 @@ from scripts.trimorph_api_test.joint_test import (
     _load_config,
     _motion_angles,
     _output_current_csv,
+    _run_home,
+    _validate_home_joints,
     contact_feedback,
     main,
 )
@@ -104,10 +107,119 @@ class TwoJointConfigTests(unittest.TestCase):
 
         self.assertTrue(args.force)
 
-    def test_test_finger_defaults_to_finger_1(self):
+    def test_test_finger_is_unset_when_omitted(self):
         args = _build_parser().parse_args(["record"])
 
-        self.assertEqual(args.test_finger, "finger-1")
+        self.assertIsNone(args.test_finger)
+
+    def test_home_accepts_joint_selection(self):
+        args = _build_parser().parse_args(["home", "--joints", "0", "2"])
+
+        self.assertEqual(args.joints, [0, 2])
+
+    def test_home_joints_must_belong_to_selected_finger(self):
+        with self.assertRaisesRegex(ValueError, "do not belong to thumb"):
+            _validate_home_joints([0, 4], "thumb")
+
+    def test_home_joints_allow_selected_finger_motor_ids(self):
+        _validate_home_joints([0, 2], "thumb")
+
+    def test_home_joints_without_test_finger_allow_full_hand_selection(self):
+        _validate_home_joints([0, 12], None)
+
+    def test_load_config_without_motor_ids_keeps_full_hand(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.yaml"
+            path.write_text(
+                yaml.safe_dump(
+                    {
+                        "motor_model": "xl330-m077-t",
+                        "motor_ids": list(range(13)),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            config = _load_config(path)
+
+        self.assertEqual(config.motor_ids, tuple(range(13)))
+
+    def test_joint_home_preserves_unselected_offsets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fixture.yaml"
+            original_offsets = {motor_id: float(motor_id) for motor_id in range(13)}
+            path.write_text(
+                yaml.safe_dump(
+                    {
+                        "placeholders_unreviewed": False,
+                        "motor_model": "xl330-m077-t",
+                        "motor_ids": list(range(13)),
+                        "home_offsets": original_offsets,
+                        "homing": {
+                            "thumb": [
+                                [motor_id, f"Thumb joint {motor_id}", 0.0, 1]
+                                for motor_id in range(4)
+                            ],
+                            "fingers": [],
+                        },
+                    },
+                    sort_keys=False,
+                ),
+                encoding="utf-8",
+            )
+            config = _load_config(path, TEST_FINGER_MOTOR_IDS["thumb"])
+            calibrated = replace(
+                config,
+                home_offsets=tuple(
+                    100.0 + motor_id for motor_id in config.motor_ids
+                ),
+            )
+
+            class FakeHand:
+                def __init__(self, hand_config, autoconnect=False):
+                    self.config = hand_config
+                    self.motor_ids = hand_config.motor_ids
+                    self.is_connected = False
+
+                def connect(self):
+                    self.is_connected = True
+
+                def ping(self):
+                    return {motor_id: 1190 for motor_id in self.motor_ids}
+
+                def configure(self, enable_torque=False):
+                    pass
+
+                def shutdown(self):
+                    self.is_connected = False
+
+            args = mock.Mock(
+                config=path,
+                yes=True,
+                joints=[0, 2],
+                current_threshold_ma=200.0,
+                velocity_rad_s=1.5,
+            )
+            with mock.patch(
+                "scripts.trimorph_api_test.joint_test.MidasHand", FakeHand
+            ), mock.patch(
+                "scripts.trimorph_api_test.joint_test.home_hand",
+                return_value=calibrated,
+            ):
+                _run_home(args, config)
+
+            saved_offsets = yaml.safe_load(
+                path.read_text(encoding="utf-8")
+            )["home_offsets"]
+
+        self.assertEqual(
+            saved_offsets,
+            {
+                **original_offsets,
+                0: 100.0,
+                2: 102.0,
+            },
+        )
 
     def test_test_finger_accepts_each_motor_group(self):
         parser = _build_parser()
