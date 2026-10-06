@@ -116,3 +116,28 @@ def apply_thumb_retargeting(
     for motor_id, value in zip(model.midas_motor_ids, prediction):
         result[index_by_id[motor_id]] = value
     return result
+
+
+def build_follower_target(
+    leader_positions: Sequence[float],
+    motor_ids: Sequence[int],
+    *,
+    command_scale: float,
+    joint_command_scales: Sequence[float],
+    thumb_model: ThumbRetargetModel | None,
+) -> np.ndarray:
+    """Apply ordinary scaling, then replace only modeled MIDAS joints 2-3."""
+
+    leader = np.asarray(leader_positions, dtype=np.float64)
+    scales = np.asarray(joint_command_scales, dtype=np.float64)
+    expected_shape = (len(motor_ids),)
+    if leader.shape != expected_shape or scales.shape != expected_shape:
+        raise ValueError("Follower target inputs must match the motor ID count")
+    target = leader * float(command_scale) * scales
+    if thumb_model is not None:
+        retargeted = apply_thumb_retargeting(leader, motor_ids, thumb_model)
+        thumb_ids = set(thumb_model.midas_motor_ids)
+        for index, motor_id in enumerate(motor_ids):
+            if int(motor_id) in thumb_ids:
+                target[index] = retargeted[index]
+    return target

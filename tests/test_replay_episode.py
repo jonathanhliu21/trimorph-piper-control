@@ -6,7 +6,9 @@ from unittest.mock import patch
 
 import numpy as np
 
+from collection.thumb_retargeting import ThumbRetargetModel
 from replay_episode import (
+    build_replay_hand_config,
     load_hand_stream,
     load_piper_stream,
     replay_interval,
@@ -14,6 +16,7 @@ from replay_episode import (
     sample_stream,
     scale_hand_stream,
     parse_args,
+    prepare_hand_stream_for_replay,
 )
 
 
@@ -21,6 +24,22 @@ class ReplayEpisodeTests(unittest.TestCase):
     def test_use_follower_cli_option(self):
         with patch("sys.argv", ["replay_episode.py", "--use-follower"]):
             self.assertTrue(parse_args().use_follower)
+
+    def test_follower_config_is_subset_to_recorded_motor_ids(self):
+        expected = object()
+        path = Path("midas.yaml")
+        with patch(
+            "replay_episode.load_follower_config", return_value=expected
+        ) as loader:
+            actual = build_replay_hand_config(
+                path,
+                "/dev/midas",
+                (0, 1, 2, 3),
+                use_follower=True,
+            )
+
+        self.assertIs(actual, expected)
+        loader.assert_called_once_with(path, "/dev/midas", (0, 1, 2, 3))
 
     def test_follower_scale_is_applied_to_all_hand_positions(self):
         times = np.asarray([0.0, 1.0])
@@ -43,6 +62,44 @@ class ReplayEpisodeTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(scaled_positions, [[0.5, -4.0], [1.5, -8.0]])
+
+    def test_midas_replay_retargets_only_joints_two_and_three(self):
+        times = np.asarray([0.0, 1.0])
+        positions = np.asarray(
+            [[1.0, 2.0, 3.0, 4.0, 5.0], [2.0, 3.0, 4.0, 5.0, 6.0]]
+        )
+        model = ThumbRetargetModel(np.eye(2) * 2.0, np.ones(2))
+
+        _, targets = prepare_hand_stream_for_replay(
+            (times, positions),
+            (0, 1, 2, 3, 4),
+            use_follower=True,
+            command_scale=0.5,
+            joint_command_scales=np.asarray([0.1, 0.2, 0.3, 0.4, 0.5]),
+            thumb_model=model,
+        )
+
+        np.testing.assert_allclose(
+            targets,
+            [[0.05, 0.2, 7.0, 9.0, 1.25], [0.1, 0.3, 9.0, 11.0, 1.5]],
+        )
+
+    def test_trimorph_replay_keeps_raw_joint_positions(self):
+        times = np.asarray([0.0, 1.0])
+        positions = np.asarray([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+        stream = (times, positions)
+
+        result = prepare_hand_stream_for_replay(
+            stream,
+            (0, 1, 2, 3),
+            use_follower=False,
+            command_scale=100.0,
+            joint_command_scales=np.full(4, 100.0),
+            thumb_model=ThumbRetargetModel(np.eye(2) * 100.0, np.ones(2)),
+        )
+
+        self.assertIs(result, stream)
+        np.testing.assert_array_equal(result[1], positions)
 
     def test_legacy_proprioception_filename_is_still_supported(self):
         with tempfile.TemporaryDirectory() as temp_dir:

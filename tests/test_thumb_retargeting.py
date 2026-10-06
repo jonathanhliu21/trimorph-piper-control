@@ -5,11 +5,11 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.follower_hand_worker import follower_target
 from collection.thumb_retargeting import (
     MODEL_FORMAT,
     ThumbRetargetModel,
     apply_thumb_retargeting,
+    build_follower_target,
     load_thumb_retarget_model,
 )
 from fit_model_to_endpoints import fit_linear_model
@@ -37,7 +37,7 @@ class ThumbRetargetingTests(unittest.TestCase):
 
     def test_follower_target_overwrites_only_thumb_after_scaling(self):
         model = ThumbRetargetModel(np.eye(2) * 2.0, np.ones(2))
-        target = follower_target(
+        target = build_follower_target(
             [1, 2, 3, 4, 5],
             [0, 1, 2, 3, 4],
             command_scale=0.5,

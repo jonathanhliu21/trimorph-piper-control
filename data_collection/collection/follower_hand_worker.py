@@ -21,35 +21,9 @@ from .episode import EpisodeBuffer, RecordingManager
 from .hand_common import load_follower_config, verify_connected_hand
 from .shared_state import SharedState
 from .thumb_retargeting import (
-    ThumbRetargetModel,
-    apply_thumb_retargeting,
+    build_follower_target,
     load_thumb_retarget_model,
 )
-
-
-def follower_target(
-    leader_positions,
-    motor_ids,
-    *,
-    command_scale: float,
-    joint_command_scales,
-    thumb_model: ThumbRetargetModel | None,
-) -> np.ndarray:
-    """Build a follower target, preserving calibrated thumb model units."""
-
-    leader = np.asarray(leader_positions, dtype=np.float64)
-    scales = np.asarray(joint_command_scales, dtype=np.float64)
-    expected_shape = (len(motor_ids),)
-    if leader.shape != expected_shape or scales.shape != expected_shape:
-        raise ValueError("Follower target inputs must match the motor ID count")
-    target = leader * float(command_scale) * scales
-    if thumb_model is not None:
-        retargeted = apply_thumb_retargeting(leader, motor_ids, thumb_model)
-        thumb_ids = set(thumb_model.midas_motor_ids)
-        for index, motor_id in enumerate(motor_ids):
-            if int(motor_id) in thumb_ids:
-                target[index] = retargeted[index]
-    return target
 
 
 def adjusted_follower_position_error(
@@ -195,7 +169,7 @@ def run_follower_hand_worker(
                             f"expects ({len(hand.motor_ids)},)"
                         )
                     target = hand.clip_positions(
-                        follower_target(
+                        build_follower_target(
                             target,
                             hand.motor_ids,
                             command_scale=config.follower_command_scale,

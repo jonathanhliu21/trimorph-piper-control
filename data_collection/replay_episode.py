@@ -25,6 +25,12 @@ from collection.hand_common import (
     load_hand_config,
     verify_connected_hand,
 )
+from collection.thumb_retargeting import (
+    THUMB_RETARGET_MOTOR_IDS,
+    ThumbRetargetModel,
+    build_follower_target,
+    load_thumb_retarget_model,
+)
 
 
 DATASET_ROOT = Path("data_trimorph")
@@ -33,6 +39,7 @@ PREPOSITION_SECONDS = 3.0
 SETTLE_SECONDS = 1.0
 PIPER_PREPOSITION_SPEED_PERCENT = 20
 PIPER_REPLAY_SPEED_PERCENT = 100
+DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,8 +58,17 @@ def parse_args() -> argparse.Namespace:
         "--use-follower",
         action="store_true",
         help=(
-            "Treat --hand-config and --hand-port as a MIDAS follower and scale "
-            "leader_hand.csv targets by follower_command_scale."
+            "Treat --hand-config and --hand-port as a MIDAS follower, applying "
+            "normal action scaling plus the joints 2-3 thumb model."
+        ),
+    )
+    parser.add_argument(
+        "--thumb-model",
+        type=Path,
+        default=DEFAULT_THUMB_MODEL,
+        help=(
+            "Joints 2-3 TRIMORPH-to-MIDAS model used only with --use-follower "
+            "(default: %(default)s)."
         ),
     )
     parser.add_argument("--rate-hz", type=float, default=REPLAY_HZ)
@@ -157,6 +173,36 @@ def scale_hand_stream(
     return times, positions * scale
 
 
+def prepare_hand_stream_for_replay(
+    stream: tuple[np.ndarray, np.ndarray],
+    motor_ids: tuple[int, ...],
+    *,
+    use_follower: bool,
+    command_scale: float,
+    joint_command_scales: np.ndarray,
+    thumb_model: ThumbRetargetModel | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Retarget a MIDAS replay stream or preserve raw TRIMORPH positions."""
+
+    if not use_follower:
+        return stream
+    times, positions = stream
+    targets = np.asarray(
+        [
+            build_follower_target(
+                position,
+                motor_ids,
+                command_scale=command_scale,
+                joint_command_scales=joint_command_scales,
+                thumb_model=thumb_model,
+            )
+            for position in positions
+        ],
+        dtype=np.float64,
+    )
+    return times, targets
+
+
 def load_piper_stream(
     path: Path, *, allow_empty: bool = False
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -179,6 +225,19 @@ def replay_interval(*streams: tuple[np.ndarray, np.ndarray] | None) -> tuple[flo
     if end_s < start_s:
         raise ValueError("Selected streams do not overlap in episode time")
     return start_s, end_s
+
+
+def build_replay_hand_config(
+    hand_config: Path,
+    hand_port: str,
+    active_motors: tuple[int, ...],
+    *,
+    use_follower: bool,
+):
+    """Load either hand configuration narrowed to the recorded motor columns."""
+
+    loader = load_follower_config if use_follower else load_hand_config
+    return loader(hand_config, hand_port, active_motors)
 
 
 def move_to_first_pose(hand, api, hand_stream, piper_stream, start_s: float, args) -> None:
@@ -229,15 +288,29 @@ def main() -> int:
     config = apply_overrides(
         build_config(), hand_config=args.hand_config, hand_port=args.hand_port
     )
-    if args.use_follower and hand_stream is not None:
+    if hand_stream is not None:
         joint_scales = np.asarray(
             joint_command_scales_for_motor_ids(
                 config.follower_joint_command_scales, active_motors or ()
             ),
             dtype=np.float64,
         )
-        hand_stream = scale_hand_stream(
-            hand_stream, config.follower_command_scale * joint_scales
+        active_motor_set = set(active_motors or ())
+        needs_thumb_model = bool(
+            active_motor_set & set(THUMB_RETARGET_MOTOR_IDS)
+        )
+        thumb_model = (
+            load_thumb_retarget_model(args.thumb_model.expanduser())
+            if args.use_follower and needs_thumb_model
+            else None
+        )
+        hand_stream = prepare_hand_stream_for_replay(
+            hand_stream,
+            active_motors or (),
+            use_follower=args.use_follower,
+            command_scale=config.follower_command_scale,
+            joint_command_scales=joint_scales,
+            thumb_model=thumb_model,
         )
 
     hand = None
@@ -246,14 +319,12 @@ def main() -> int:
         if replay_hand:
             from midas_hand_api import MidasHand
 
-            if args.use_follower:
-                replay_hand_config = load_follower_config(
-                    config.hand_config, config.hand_port
-                )
-            else:
-                replay_hand_config = load_hand_config(
-                    config.hand_config, config.hand_port, active_motors
-                )
+            replay_hand_config = build_replay_hand_config(
+                config.hand_config,
+                config.hand_port,
+                active_motors or (),
+                use_follower=args.use_follower,
+            )
             hand = MidasHand(config=replay_hand_config, autoconnect=True)
             verify_connected_hand(
                 hand, role="follower" if args.use_follower else "replay"
