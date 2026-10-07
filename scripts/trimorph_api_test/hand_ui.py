@@ -48,6 +48,17 @@ from data_collection.collection.contact_detection import (
     contact_feedback,
 )
 from data_collection.collection.hand_common import is_compatible_dynamixel_model
+from data_collection.collection.live_contact_widget import (
+    FINGER_MOTOR_IDS,
+    JOINT_COUNT,
+    THUMB_INDICES,
+    THUMB_MOTOR_IDS,
+    UI_MOTOR_IDS,
+    LiveContactWidget,
+    contact_circle_radius as _contact_circle_radius,
+    contact_direction_label as _contact_direction_label,
+    contact_palette as _contact_palette,
+)
 from data_collection.collection.tactile_contact_detection import (
     TactileContactDetector,
 )
@@ -55,21 +66,8 @@ from midas_hand_api import HandConfig, MidasHand, PaxiniConfig, PaxiniHandSensor
 
 
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "midas_hand_config.yaml"
-# Physical finger tuples are PIP, MCP, AB/AD, matching the supplied diagram.
-# Control arrays use MCP, PIP, AB/AD within each finger; the mapping below keeps
-# that internal order independent of the configuration's motor order.
-FINGER_MOTOR_IDS = ((4, 5, 6), (7, 8, 9), (10, 11, 12))
-FINGER_UI_MOTOR_IDS = tuple(
-    motor_id
-    for pip_id, mcp_id, ab_ad_id in FINGER_MOTOR_IDS
-    for motor_id in (mcp_id, pip_id, ab_ad_id)
-)
-THUMB_MOTOR_IDS = (0, 1, 2, 3)  # IP, MCP, CMC side, CMC roll
-UI_MOTOR_IDS = FINGER_UI_MOTOR_IDS + THUMB_MOTOR_IDS
-JOINT_COUNT = len(UI_MOTOR_IDS)
 FLEXION_INDICES = (0, 1, 3, 4, 6, 7)
 AB_AD_INDICES = (2, 5, 8)
-THUMB_INDICES = (9, 10, 11, 12)
 CONTROL_RATE_HZ = 50.0
 PROFILE_VELOCITY_RAD_S = 3.0
 PROFILE_ACCELERATION_RAD_S2 = 50.0
@@ -221,30 +219,6 @@ def _build_contact_detectors(
         "exit_persistence_time_s": settings.exit_persistence_time_s,
     }
     return tuple(ContactStateMachine(**kwargs) for _ in range(JOINT_COUNT))
-
-
-def _contact_circle_radius(contact_feedback_value: float) -> float:
-    """Map absolute contact feedback to a bounded on-canvas radius."""
-
-    return min(120.0, 22.0 + 420.0 * abs(float(contact_feedback_value)))
-
-
-def _contact_palette(contact_feedback_value: float) -> tuple[str, str, str, str]:
-    """Return fill, outline, ring, and accent colors for feedback direction."""
-
-    if contact_feedback_value > 0:
-        return "#74c0fc", "#1864ab", "#1971c2", "#a5d8ff"
-    if contact_feedback_value < 0:
-        return "#ff8a65", "#c92a2a", "#e03131", "#ffc9c9"
-    return "#b197fc", "#6741d9", "#7048e8", "#d0bfff"
-
-
-def _contact_direction_label(contact_feedback_value: float) -> str:
-    if contact_feedback_value > 0:
-        return "CONTACT  +"
-    if contact_feedback_value < 0:
-        return "CONTACT  −"
-    return "CONTACT"
 
 
 def _threshold_normalized_joint_difference(
@@ -745,15 +719,9 @@ class ContactVisualizerUI:
         )
         self.connect_button.grid(row=0, column=4, padx=(16, 0))
 
-        visual = ttk.LabelFrame(outer, text="Live contact", padding=8)
-        visual.grid(row=1, column=0, columnspan=4, sticky="nsew")
-        visual.rowconfigure(0, weight=1)
-        visual.columnconfigure(0, weight=1)
-        self.canvas = tk.Canvas(
-            visual, background="#f7f7f5", highlightthickness=0, height=420
-        )
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.canvas.bind("<Configure>", lambda _event: self._redraw_latest())
+        self.live_contact = LiveContactWidget(outer)
+        self.live_contact.grid(row=1, column=0, columnspan=4, sticky="nsew")
+        self.canvas = self.live_contact.canvas
 
         self.target_vars = [tk.DoubleVar(value=0.0) for _ in range(JOINT_COUNT)]
         self.value_vars = [tk.StringVar(value="0.000 rad") for _ in range(JOINT_COUNT)]
@@ -1187,6 +1155,13 @@ class ContactVisualizerUI:
         normalized_differences: tuple[float, ...] = (0.0,) * JOINT_COUNT,
         tactile_contacts: tuple[bool, ...] | None = None,
     ) -> None:
+        self.live_contact.show(
+            contacts,
+            contact_strengths,
+            normalized_differences,
+            tactile_contacts,
+        )
+        return
         self.canvas.delete("all")
         width = max(self.canvas.winfo_width(), 600)
         height = max(self.canvas.winfo_height(), 400)

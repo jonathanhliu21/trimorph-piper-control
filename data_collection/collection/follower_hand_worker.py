@@ -5,6 +5,7 @@ import time
 import numpy as np
 
 from .contact_detection import (
+    CONTACT_ENTER_THRESHOLD,
     CONTACT_EXIT_THRESHOLD,
     CONTACT_MOTOR_IDS,
     CONTACT_THRESHOLD,
@@ -263,6 +264,14 @@ def run_follower_hand_worker(
                 shared.set_follower_position_error(
                     adjusted_error,
                     motor_ids=hand.motor_ids,
+                )
+                normalized_joint_difference = (
+                    np.abs(last_command - positions) / CONTACT_ENTER_THRESHOLD
+                )
+                shared.set_follower_contact_snapshot(
+                    hand.motor_ids,
+                    adjusted_error,
+                    normalized_joint_difference,
                 )
                 if contact_indices and np.any(
                     adjusted_error[contact_indices] != 0.0

@@ -43,6 +43,26 @@ class SharedStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             shared.set_follower_position_error([0.1, 0.2], motor_ids=(4,))
 
+    def test_follower_contact_snapshot_is_atomic_and_immutable(self):
+        shared = SharedState()
+        feedback = np.asarray([0.1, -0.2])
+        normalized = np.asarray([2.0, 3.0])
+        shared.set_follower_contact_snapshot((5, 4), feedback, normalized)
+        feedback[:] = 0.0
+        normalized[:] = 0.0
+
+        snapshot = shared.latest_follower_contact_snapshot()
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.motor_ids, (5, 4))
+        self.assertEqual(snapshot.contact_feedback, (0.1, -0.2))
+        self.assertEqual(snapshot.normalized_joint_difference, (2.0, 3.0))
+
+    def test_follower_contact_snapshot_vectors_must_align(self):
+        shared = SharedState()
+        with self.assertRaises(ValueError):
+            shared.set_follower_contact_snapshot((4, 5), [0.1], [2.0, 3.0])
+
 
 if __name__ == "__main__":
     unittest.main()

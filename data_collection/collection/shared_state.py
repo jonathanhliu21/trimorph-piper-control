@@ -1,8 +1,16 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 
 import numpy as np
+
+
+@dataclass(frozen=True)
+class FollowerContactSnapshot:
+    motor_ids: tuple[int, ...]
+    contact_feedback: tuple[float, ...]
+    normalized_joint_difference: tuple[float, ...]
 
 
 class SharedState:
@@ -11,6 +19,7 @@ class SharedState:
         self._latest_hand_target: np.ndarray | None = None
         self._latest_follower_position_error: np.ndarray | None = None
         self._latest_follower_motor_ids: tuple[int, ...] | None = None
+        self._latest_follower_contact_snapshot: FollowerContactSnapshot | None = None
         self._latest_task_bgr: np.ndarray | None = None
         self.shutdown = threading.Event()
 
@@ -64,6 +73,27 @@ class SharedState:
                     self._latest_follower_position_error,
                 )
             }
+
+    def set_follower_contact_snapshot(
+        self,
+        motor_ids: tuple[int, ...] | list[int],
+        contact_feedback: np.ndarray | tuple[float, ...] | list[float],
+        normalized_joint_difference: np.ndarray | tuple[float, ...] | list[float],
+    ) -> None:
+        ids = tuple(int(motor_id) for motor_id in motor_ids)
+        feedback = tuple(float(value) for value in contact_feedback)
+        normalized = tuple(float(value) for value in normalized_joint_difference)
+        if not len(ids) == len(feedback) == len(normalized):
+            raise ValueError("Follower contact snapshot vectors must align")
+        snapshot = FollowerContactSnapshot(ids, feedback, normalized)
+        with self._lock:
+            self._latest_follower_contact_snapshot = snapshot
+
+    def latest_follower_contact_snapshot(
+        self,
+    ) -> FollowerContactSnapshot | None:
+        with self._lock:
+            return self._latest_follower_contact_snapshot
 
     def set_task_frame(self, bgr: np.ndarray) -> None:
         with self._lock:

@@ -28,6 +28,7 @@ from scripts.trimorph_api_test.hand_ui import (
     _ui_order_indices,
     _validated_default_targets,
 )
+from data_collection.collection.live_contact_widget import contact_vectors_by_motor_id
 
 
 class ContactTuningTests(unittest.TestCase):
@@ -82,6 +83,18 @@ class ContactTuningTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(normalized, (1.0, 2.0, 0.5))
+
+    def test_follower_contacts_are_mapped_by_motor_id(self):
+        contacts, strengths, normalized = contact_vectors_by_motor_id(
+            (5, 4), (-0.2, 0.1), (3.0, 2.0)
+        )
+
+        self.assertTrue(contacts[UI_MOTOR_IDS.index(4)])
+        self.assertTrue(contacts[UI_MOTOR_IDS.index(5)])
+        self.assertFalse(contacts[UI_MOTOR_IDS.index(6)])
+        self.assertEqual(strengths[UI_MOTOR_IDS.index(4)], 0.1)
+        self.assertEqual(strengths[UI_MOTOR_IDS.index(5)], -0.2)
+        self.assertEqual(normalized[UI_MOTOR_IDS.index(4)], 2.0)
 
 
 class TactileTests(unittest.TestCase):

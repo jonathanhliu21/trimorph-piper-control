@@ -8,6 +8,7 @@ from collect_hand_only import (
     DATA_COLLECTION_MODE,
     RETARGET_ONLY_MODE,
     HandOnlyCollectionConfig,
+    main,
     parse_args,
     run_hand_only,
     start_episode,
@@ -43,6 +44,17 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertEqual(parse_args().mode, RETARGET_ONLY_MODE)
         with patch("sys.argv", ["collect_hand_only.py", "--data-collection"]):
             self.assertEqual(parse_args().mode, DATA_COLLECTION_MODE)
+
+    def test_show_ui_flag_is_opt_in(self):
+        with patch("sys.argv", ["collect_hand_only.py"]):
+            self.assertFalse(parse_args().show_ui)
+        with patch("sys.argv", ["collect_hand_only.py", "--show-ui"]):
+            self.assertTrue(parse_args().show_ui)
+
+    def test_show_ui_requires_follower_configuration(self):
+        with patch("sys.argv", ["collect_hand_only.py", "--show-ui"]):
+            with self.assertRaisesRegex(ValueError, "--show-ui requires"):
+                main()
 
     def test_episode_flushes_empty_camera_and_piper_csvs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -125,6 +137,39 @@ class HandOnlyCollectionTests(unittest.TestCase):
                 self.assertEqual(run_hand_only(config), 0)
 
             self.assertFalse((Path(temp_dir) / "raw").exists())
+
+    def test_ui_close_uses_normal_collection_cleanup(self):
+        class FinishedThread:
+            def join(self, timeout=None):
+                return None
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = HandOnlyCollectionConfig(
+                dataset_root=Path(temp_dir),
+                hand_config=Path("config/hand.yaml"),
+                hand_port="/dev/hand",
+                hand_measure_rate_hz=100.0,
+                warmup_time=0.0,
+                episode_time=30.0,
+                show_ui=True,
+                follower_hand_config=Path("config/midas_hand_config.yaml"),
+                follower_hand_port="/dev/follower",
+            )
+            with (
+                patch("collect_hand_only.initialize_worker", return_value=FinishedThread()),
+                patch(
+                    "collect_hand_only.run_follower_contact_ui",
+                    return_value="ui_closed",
+                ) as run_ui,
+                patch("collection.episode._hand_metadata", return_value={}),
+            ):
+                self.assertEqual(run_hand_only(config), 0)
+
+            run_ui.assert_called_once()
+            metadata = json.loads(
+                (Path(temp_dir) / "raw" / "episode_000000" / "metadata.json").read_text()
+            )
+            self.assertEqual(metadata["stop_reason"], "ui_closed")
 
 
 if __name__ == "__main__":

@@ -39,6 +39,7 @@ class HandOnlyCollectionConfig:
     warmup_time: float
     episode_time: float
     mode: str = DATA_COLLECTION_MODE
+    show_ui: bool = False
     active_motors: list[int] = field(
         default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
     )
@@ -100,6 +101,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--follower-config", type=Path)
     parser.add_argument("--follower-port")
+    parser.add_argument(
+        "--show-ui",
+        action="store_true",
+        help="Show the read-only follower MIDAS live-contact visualization.",
+    )
     parser.add_argument(
         "--thumb-model",
         type=Path,
@@ -206,6 +212,56 @@ def stop_episode(recorder: RecordingManager, reason: str) -> EpisodeBuffer | Non
     return session
 
 
+def run_follower_contact_ui(
+    shared: SharedState,
+    *,
+    duration_s: float | None,
+) -> str:
+    """Run the read-only follower contact view until close or shutdown."""
+
+    import tkinter as tk
+
+    from collection.live_contact_widget import LiveContactWidget
+
+    root = tk.Tk()
+    root.title("Follower hand contact")
+    root.minsize(1000, 500)
+    widget = LiveContactWidget(root)
+    widget.pack(fill="both", expand=True, padx=12, pady=12)
+    deadline = None if duration_s is None else time.monotonic() + duration_s
+    exit_reason = "ui_closed"
+
+    def close_window() -> None:
+        nonlocal exit_reason
+        exit_reason = "ui_closed"
+        shared.shutdown.set()
+
+    def refresh() -> None:
+        nonlocal exit_reason
+        snapshot = shared.latest_follower_contact_snapshot()
+        if snapshot is not None:
+            widget.show_by_motor_id(
+                snapshot.motor_ids,
+                snapshot.contact_feedback,
+                snapshot.normalized_joint_difference,
+            )
+        if deadline is not None and time.monotonic() >= deadline:
+            exit_reason = "duration_complete"
+            shared.shutdown.set()
+        if shared.shutdown.is_set():
+            root.destroy()
+            return
+        root.after(30, refresh)
+
+    root.protocol("WM_DELETE_WINDOW", close_window)
+    root.after(0, refresh)
+    try:
+        root.mainloop()
+    finally:
+        shared.shutdown.set()
+    return exit_reason
+
+
 def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     shared = SharedState()
     recorder = RecordingManager()
@@ -226,10 +282,19 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     try:
         if config.mode == RETARGET_ONLY_MODE:
             print("Retarget-only mode active. Press Ctrl-C to stop.")
-            shared.shutdown.wait()
+            if config.show_ui:
+                reason = run_follower_contact_ui(shared, duration_s=None)
+            else:
+                shared.shutdown.wait()
         else:
             start_episode(config, recorder)
-            shared.shutdown.wait(config.episode_time)
+            if config.show_ui:
+                reason = run_follower_contact_ui(
+                    shared,
+                    duration_s=config.episode_time,
+                )
+            else:
+                shared.shutdown.wait(config.episode_time)
         if not errors.empty():
             error = errors.get_nowait()
             session = recorder.current()
@@ -262,6 +327,7 @@ def main() -> int:
         episode_time=args.episode_time,
         warmup_time=args.warmup_time,
         mode=args.mode,
+        show_ui=args.show_ui,
         active_motors=args.active_motors,
         follower_hand_config=(
             args.follower_config.expanduser()
@@ -277,6 +343,8 @@ def main() -> int:
     )
     if (config.follower_hand_config is None) != (config.follower_hand_port is None):
         raise ValueError("--follower-config and --follower-port must be provided together")
+    if config.show_ui and config.follower_hand_config is None:
+        raise ValueError("--show-ui requires --follower-config and --follower-port")
     if config.follower_hand_port == config.hand_port:
         raise ValueError("Primary and follower hand ports must be different")
     return run_hand_only(config)
