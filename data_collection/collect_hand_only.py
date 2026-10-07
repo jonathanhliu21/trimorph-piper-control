@@ -61,12 +61,31 @@ class HandOnlyCollectionConfig:
             4: 0.20,
             5: 0.5,
             6: 1.0,
-            7: 1.0,
-            8: 1.0,
+            7: 0.2,
+            8: 0.5,
             9: 1.0,
-            10: 1.0,
-            11: 1.0,
+            10: 0.2,
+            11: 0.5,
             12: 1.0,
+        }
+    )
+    # MIDAS target, in radians, when the matching TRIMORPH joint is at 0 rad.
+    # Joints 2 and 3 are overridden by the learned thumb model when it is used.
+    follower_joint_command_offsets: dict[int, float] = field(
+        default_factory=lambda: {
+            0: 0.0,
+            1: 0.0,
+            2: 0.0,
+            3: 0.0,
+            4: 0.0,
+            5: 0.0,
+            6: 0.0,
+            7: 0.0,
+            8: 0.0,
+            9: 0.0,
+            10: 0.0,
+            11: 0.0,
+            12: 0.262,
         }
     )
 

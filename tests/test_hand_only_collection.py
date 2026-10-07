@@ -37,6 +37,21 @@ class HandOnlyCollectionTests(unittest.TestCase):
             },
         )
 
+    def test_joint_command_offsets_default_to_zero_midas_pose(self):
+        config = HandOnlyCollectionConfig(
+            dataset_root=Path("data_trimorph"),
+            hand_config=Path("config/hand.yaml"),
+            hand_port="/dev/hand",
+            hand_measure_rate_hz=100.0,
+            warmup_time=0.0,
+            episode_time=30.0,
+        )
+
+        self.assertEqual(
+            config.follower_joint_command_offsets,
+            {motor_id: 0.0 for motor_id in TRIMORPH_MOTOR_IDS},
+        )
+
     def test_cli_modes_default_to_data_collection(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
             self.assertEqual(parse_args().mode, DATA_COLLECTION_MODE)

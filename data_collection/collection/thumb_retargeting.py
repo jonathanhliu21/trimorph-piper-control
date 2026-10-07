@@ -125,15 +125,31 @@ def build_follower_target(
     command_scale: float,
     joint_command_scales: Sequence[float],
     thumb_model: ThumbRetargetModel | None,
+    joint_command_offsets: Sequence[float] | None = None,
 ) -> np.ndarray:
-    """Apply ordinary scaling, then replace only modeled MIDAS joints 2-3."""
+    """Apply an affine joint map, then replace modeled MIDAS joints 2-3.
+
+    Each offset is the MIDAS target when the corresponding TRIMORPH joint is
+    zero: ``midas = trimorph * global_scale * joint_scale + joint_offset``.
+    The learned thumb model owns its own bias, so it replaces both the generic
+    scale and offset for its output joints.
+    """
 
     leader = np.asarray(leader_positions, dtype=np.float64)
     scales = np.asarray(joint_command_scales, dtype=np.float64)
     expected_shape = (len(motor_ids),)
     if leader.shape != expected_shape or scales.shape != expected_shape:
         raise ValueError("Follower target inputs must match the motor ID count")
-    target = leader * float(command_scale) * scales
+    offsets = (
+        np.zeros(expected_shape, dtype=np.float64)
+        if joint_command_offsets is None
+        else np.asarray(joint_command_offsets, dtype=np.float64)
+    )
+    if offsets.shape != expected_shape:
+        raise ValueError("Follower command offsets must match the motor ID count")
+    if not np.isfinite(offsets).all():
+        raise ValueError("Follower command offsets must be finite")
+    target = leader * float(command_scale) * scales + offsets
     if thumb_model is not None:
         retargeted = apply_thumb_retargeting(leader, motor_ids, thumb_model)
         thumb_ids = set(thumb_model.midas_motor_ids)

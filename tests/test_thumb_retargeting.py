@@ -47,6 +47,31 @@ class ThumbRetargetingTests(unittest.TestCase):
 
         np.testing.assert_allclose(target, [0.05, 0.2, 7, 9, 1.25])
 
+    def test_follower_target_adds_midas_zero_offsets_after_scaling(self):
+        target = build_follower_target(
+            [0.0, 2.0, -3.0],
+            [4, 5, 6],
+            command_scale=0.5,
+            joint_command_scales=[0.2, 0.5, 2.0],
+            joint_command_offsets=[0.25, -0.1, 0.4],
+            thumb_model=None,
+        )
+
+        np.testing.assert_allclose(target, [0.25, 0.4, -2.6])
+
+    def test_thumb_model_owns_bias_instead_of_generic_offsets(self):
+        model = ThumbRetargetModel(np.eye(2), np.asarray([0.3, 0.4]))
+        target = build_follower_target(
+            [0.0, 0.0, 1.0, 2.0],
+            [0, 1, 2, 3],
+            command_scale=1.0,
+            joint_command_scales=[1.0] * 4,
+            joint_command_offsets=[0.1, 0.2, 10.0, 20.0],
+            thumb_model=model,
+        )
+
+        np.testing.assert_allclose(target, [0.1, 0.2, 1.3, 2.4])
+
     def test_partial_thumb_selection_is_rejected(self):
         model = ThumbRetargetModel(np.eye(2), np.zeros(2))
         with self.assertRaisesRegex(ValueError, "missing active motor IDs"):

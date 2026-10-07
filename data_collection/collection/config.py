@@ -31,6 +31,14 @@ def joint_command_scales_for_motor_ids(
     return tuple(float(scales.get(int(motor_id), 1.0)) for motor_id in motor_ids)
 
 
+def joint_command_offsets_for_motor_ids(
+    offsets: Mapping[int, float], motor_ids: Sequence[int]
+) -> tuple[float, ...]:
+    """Resolve MIDAS-zero offsets in motor order, defaulting to zero radians."""
+
+    return tuple(float(offsets.get(int(motor_id), 0.0)) for motor_id in motor_ids)
+
+
 @dataclass(frozen=True)
 class CollectionConfig:
     dataset_root: Path

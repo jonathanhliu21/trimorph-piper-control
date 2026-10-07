@@ -16,6 +16,7 @@ from .config import (
     FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
     FOLLOWER_PROFILE_VELOCITY_RAD_S,
     CollectionConfig,
+    joint_command_offsets_for_motor_ids,
     joint_command_scales_for_motor_ids,
 )
 from .episode import EpisodeBuffer, RecordingManager
@@ -113,10 +114,19 @@ def run_follower_hand_worker(
         ),
         dtype=np.float64,
     )
-    if not np.isfinite(config.follower_command_scale) or not np.isfinite(
-        joint_command_scales
-    ).all():
-        raise ValueError("Follower command scales must be finite")
+    joint_command_offsets = np.asarray(
+        joint_command_offsets_for_motor_ids(
+            getattr(config, "follower_joint_command_offsets", {}),
+            hand_config.motor_ids,
+        ),
+        dtype=np.float64,
+    )
+    if (
+        not np.isfinite(config.follower_command_scale)
+        or not np.isfinite(joint_command_scales).all()
+        or not np.isfinite(joint_command_offsets).all()
+    ):
+        raise ValueError("Follower command scales and offsets must be finite")
     thumb_model_path = getattr(config, "thumb_retarget_model", None)
     thumb_model = (
         load_thumb_retarget_model(thumb_model_path)
@@ -175,6 +185,7 @@ def run_follower_hand_worker(
                             hand.motor_ids,
                             command_scale=config.follower_command_scale,
                             joint_command_scales=joint_command_scales,
+                            joint_command_offsets=joint_command_offsets,
                             thumb_model=thumb_model,
                         )
                     )
