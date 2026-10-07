@@ -82,6 +82,7 @@ TEST_FINGER_MOTOR_IDS = {
     "finger-1": (4, 5, 6),
     "finger-2": (7, 8, 9),
     "finger-3": (10, 11, 12),
+    "all": range(0, 13)
 }
 DEFAULT_TEST_FINGER = "finger-1"
 
