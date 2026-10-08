@@ -26,13 +26,19 @@ import sys
 import time
 from pathlib import Path
 
+# Direct script execution places data_collection/ rather than the repository
+# root on sys.path. Add the root so this script can import shared collection
+# helpers through the same package path as the other entry points.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
 import numpy as np
 import yaml
 
+from data_collection.collection.hand_common import is_compatible_dynamixel_model
 from midas_hand_api import HandConfig, MidasHand
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "one_finger_test.yaml"
 MOTOR_IDS = (4, 5)  # PIP, MCP flexion
 
@@ -198,7 +204,9 @@ def verify_bus(hand: MidasHand) -> None:
     wrong_models = {
         motor_id: model_number
         for motor_id, model_number in models.items()
-        if model_number != hand.config.expected_model_number
+        if not is_compatible_dynamixel_model(
+            model_number, hand.config.expected_model_number
+        )
     }
     if missing:
         raise OSError(f"Configured motors did not respond: {missing}")

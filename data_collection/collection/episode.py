@@ -192,6 +192,9 @@ class EpisodeBuffer:
                 "active_motors": list(self.config.active_motors),
                 "hand": _hand_metadata(self.config.hand_config, self.config.hand_port),
                 "measure_rate_hz": self.config.hand_measure_rate_hz,
+                "force_feedback_rate_hz": getattr(
+                    self.config, "force_feedback_rate_hz", None
+                ),
                 "training_uses": "measured positions from leader_hand.csv",
             },
             "follower": {
@@ -206,6 +209,14 @@ class EpisodeBuffer:
                 "command_scale": getattr(self.config, "follower_command_scale", None),
                 "joint_command_scales": getattr(
                     self.config, "follower_joint_command_scales", None
+                ),
+                "joint_command_offsets": getattr(
+                    self.config, "follower_joint_command_offsets", None
+                ),
+                "thumb_retarget_model": (
+                    str(self.config.thumb_retarget_model)
+                    if getattr(self.config, "thumb_retarget_model", None) is not None
+                    else None
                 ),
                 "interpolation_alpha": getattr(
                     self.config, "follower_interpolation_alpha", None

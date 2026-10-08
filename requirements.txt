@@ -1,4 +1,5 @@
 numpy
+matplotlib
 opencv-python
 depthai
 # Install ../trimorph_hand_api in editable mode separately.

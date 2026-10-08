@@ -1,9 +1,9 @@
 """Hardware bring-up CLI for an XL330 or XM335 finger test fixture.
 
 The commands mirror ``xl330_hand_test.py``, but every bus operation is limited
-to the selected motor IDs. By default those are the index-finger PIP and
-MCP-flex motors (IDs 4 and 5 in the full-hand configuration). If a third motor
-is added, it is treated as the MCP AB/AD motor.
+to the motor IDs for the finger selected by ``--test-finger``. Non-homing
+commands default to ``finger-1`` (motor IDs 4, 5, and 6). The ``home`` command
+homes every configured motor when ``--test-finger`` is omitted.
 
 Run from the repository root, for example:
 
@@ -12,14 +12,25 @@ Run from the repository root, for example:
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py profile_move_sequential
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py profile_move --motors 4
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py stream_move --motors 4,5
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_current --motors 4,5
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_position_error --motors 4,5
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py detect_contact --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py home
-    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
-        home --joints 4
 
-Use ``--motor-ids`` before the command if the fixture uses different IDs:
+Use ``--test-finger`` before the command to select the motors under test:
 
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
-        --motor-ids 7,8 record
+        --test-finger thumb record
+
+To home only one finger while preserving every other saved home offset:
+
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
+        --test-finger thumb home
+
+Add ``--joints`` after ``home`` to home only motor IDs from that finger:
+
+    .venv/bin/python scripts/trimorph_api_test/two_joint_test.py \
+        --test-finger thumb home --joints 0 2
 
 The ``motor_model`` in the selected YAML determines whether the fixture uses
 XL330-M077-T or XM335-T323-T motors. Use a model-specific configuration so the
@@ -36,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -43,21 +55,70 @@ from typing import Callable, Optional, Sequence
 import numpy as np
 import yaml
 
+# Direct ``python scripts/.../two_joint_test.py`` execution only places this
+# script's directory on sys.path. Add the repository root for the shared
+# data_collection package.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from data_collection.collection.contact_detection import (
+    CONTACT_ENTER_THRESHOLD,
+    CONTACT_EXIT_THRESHOLD,
+    CONTACT_MAX_VELOCITY_RAD_S,
+    CONTACT_MOTION_CURRENT_THRESHOLD_MA,
+    CONTACT_VIRTUAL_SPRING_STIFFNESS,
+    ContactStateMachine,
+    contact_feedback,
+)
+from data_collection.collection.hand_common import is_compatible_dynamixel_model
 from midas_hand_api import HandConfig, MidasHand, home_hand
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("xl330_test_config.yaml")
 SUPPORTED_MOTOR_MODELS = ("xl330-m077-t", "xm335-t323-t")
-# Joint order is significant: PIP, MCP flexion, then optionally one ABAD motor.
-DEFAULT_MOTOR_IDS = (4, 5, 6)  # Append motor 6 when ABAD is ready.
+TEST_FINGER_MOTOR_IDS = {
+    "thumb": (0, 1, 2, 3),
+    "finger-1": (4, 5, 6),
+    "finger-2": (7, 8, 9),
+    "finger-3": (10, 11, 12),
+    "all": range(0, 13)
+}
+DEFAULT_TEST_FINGER = "finger-1"
 
 # Review these calibrated targets before moving hardware. The YAML joint signs
 # must make these calibrated targets move each joint in the intended direction.
-FLEXION_OPEN_ANGLE_RAD = 0.0
-FLEXION_CLOSE_ANGLE_RAD = -1.35
-AB_AD_OPEN_ANGLE_RAD = 0.35
-AB_AD_CLOSE_ANGLE_RAD = -0.35
+# TODO fix this for trimorph thumb
+OPEN_ANGLES_RAD = (
+    0.0,
+    0.0,
+    0.8,
+    0.0,
+    0.0,
+    0.0,
+    0.35,
+    0.0,
+    0.0,
+    0.35,
+    0.0,
+    0.0,
+    0.35,
+)
+CLOSE_ANGLES_RAD = (
+    -1.4,
+    -1.4,
+    -0.1,
+    1.5,
+    -1.35,
+    -1.35,
+    -0.35,
+    -1.35,
+    -1.35,
+    -0.35,
+    -1.35,
+    -1.35,
+    -0.35,
+)
 
 MOTOR_LABELS = {
     0: "Thumb IP",
@@ -82,8 +143,21 @@ PROFILE_MOVE_TIMEOUT_S = 4.0
 STREAM_MOVE_RATE_HZ = 30.0
 STREAM_MOVE_DURATION_S = 2.0
 STREAM_MOVE_SETTLE_S = 0.5
-
-
+MEASUREMENT_POSITIONS_RAD = {
+    0: 0.0,
+    1: 0.0,
+    2: 0.0,
+    3: 1.0,
+    4: -0.1,  # Index PIP
+    5: -0.5,  # Index MCP flex
+    6: -0.5,  # Index MCP abduct
+    7: -0.1,  # Index PIP
+    8: -0.5,  # Index MCP flex
+    9: -0.5,  # Index MCP abduct
+    10: -0.1,  # Index PIP
+    11: -0.5,  # Index MCP flex
+    12: -0.5,  # Index MCP abduct
+}
 class _CurrentRecorder:
     """Collect selected motor currents only when explicitly sampled."""
 
@@ -98,29 +172,59 @@ class _CurrentRecorder:
         self.currents_ma: list[list[float]] = []
         self.target_positions_rad: list[list[float]] = []
         self.actual_positions_rad: list[list[float]] = []
+        self.target_velocities_rad_s: list[list[float]] = []
+        self.actual_velocities_rad_s: list[list[float]] = []
+        self._previous_time_s: Optional[float] = None
+        self._previous_targets: Optional[np.ndarray] = None
+        self.latest_actual_velocities_rad_s: Optional[np.ndarray] = None
+        self.latest_currents_ma: Optional[np.ndarray] = None
 
     def start_trial(self, trial: int) -> None:
         self._trial = trial
         self._start_time = None
+        self._previous_time_s = None
+        self._previous_targets = None
 
     def sample(
         self,
         target_positions_rad: Sequence[float],
         elapsed_s: Optional[float] = None,
+        target_velocities_rad_s: Optional[Sequence[float]] = None,
     ) -> np.ndarray:
         now = time.monotonic()
         if self._start_time is None:
             self._start_time = now
-        actual_positions, _, currents = self._hand.read_pos_vel_cur()
+        sample_time_s = now - self._start_time if elapsed_s is None else elapsed_s
+        targets = np.asarray(target_positions_rad, dtype=float)
+        if target_velocities_rad_s is None:
+            if self._previous_time_s is None or self._previous_targets is None:
+                target_velocities = np.zeros_like(targets)
+            else:
+                delta_t = sample_time_s - self._previous_time_s
+                target_velocities = (targets - self._previous_targets) / delta_t
+        else:
+            target_velocities = np.asarray(target_velocities_rad_s, dtype=float)
+
+        actual_positions, actual_velocities, currents = self._hand.read_pos_vel_cur()
+        self.latest_actual_velocities_rad_s = np.asarray(actual_velocities, dtype=float)
+        self.latest_currents_ma = np.asarray(currents, dtype=float)
         self.trials.append(self._trial)
-        self.times_s.append(now - self._start_time if elapsed_s is None else elapsed_s)
+        self.times_s.append(sample_time_s)
         self.currents_ma.append([float(currents[index]) for index in self._indices])
         self.target_positions_rad.append(
-            [float(target_positions_rad[index]) for index in self._indices]
+            [float(targets[index]) for index in self._indices]
         )
         self.actual_positions_rad.append(
             [float(actual_positions[index]) for index in self._indices]
         )
+        self.target_velocities_rad_s.append(
+            [float(target_velocities[index]) for index in self._indices]
+        )
+        self.actual_velocities_rad_s.append(
+            [float(actual_velocities[index]) for index in self._indices]
+        )
+        self._previous_time_s = sample_time_s
+        self._previous_targets = np.array(targets, copy=True)
         return actual_positions
 
 
@@ -137,6 +241,8 @@ def _output_current_csv(recorder: _CurrentRecorder, output: Path) -> None:
                 f"motor_{motor_id}_current_ma",
                 f"motor_{motor_id}_target_position_rad",
                 f"motor_{motor_id}_actual_position_rad",
+                f"motor_{motor_id}_target_velocity_rad_s",
+                f"motor_{motor_id}_actual_velocity_rad_s",
             )
         )
 
@@ -151,6 +257,8 @@ def _output_current_csv(recorder: _CurrentRecorder, output: Path) -> None:
                         recorder.currents_ma[sample_index][motor_index],
                         recorder.target_positions_rad[sample_index][motor_index],
                         recorder.actual_positions_rad[sample_index][motor_index],
+                        recorder.target_velocities_rad_s[sample_index][motor_index],
+                        recorder.actual_velocities_rad_s[sample_index][motor_index],
                     )
                 )
             writer.writerow(row)
@@ -171,31 +279,24 @@ def _parse_motor_ids(value: str) -> tuple[int, ...]:
     return result
 
 
-def _parse_fixture_motor_ids(value: str) -> tuple[int, ...]:
-    result = _parse_motor_ids(value)
-    expected_count = len(DEFAULT_MOTOR_IDS)
-    if len(result) != expected_count:
-        raise argparse.ArgumentTypeError(
-            f"exactly {expected_count} motor IDs are required"
-        )
-    return result
-
-
 def _motion_angles(motor_id: int) -> tuple[float, float]:
-    """Return the open and closed targets for a flexion or AB/AD motor."""
+    """Return the joint-specific open and closed targets for a motor."""
 
-    if len(DEFAULT_MOTOR_IDS) > 2 and motor_id == DEFAULT_MOTOR_IDS[2]:
-        return AB_AD_OPEN_ANGLE_RAD, AB_AD_CLOSE_ANGLE_RAD
-    return FLEXION_OPEN_ANGLE_RAD, FLEXION_CLOSE_ANGLE_RAD
+    return OPEN_ANGLES_RAD[motor_id], CLOSE_ANGLES_RAD[motor_id]
 
 
-def _load_config(path: Path, motor_ids: Sequence[int]) -> HandConfig:
+def _load_config(
+    path: Path,
+    motor_ids: Optional[Sequence[int]] = None,
+) -> HandConfig:
     full_config = HandConfig.load(path)
     if full_config.motor_model not in SUPPORTED_MOTOR_MODELS:
         raise ValueError(
             f"This script supports only XL330-M077-T and XM335-T323-T, but "
             f"{path} selects {full_config.motor_model}"
         )
+    if motor_ids is None:
+        return full_config
     return full_config.subset(motor_ids)
 
 
@@ -223,13 +324,30 @@ def _require_homing_entries(config: HandConfig) -> None:
         )
 
 
+def _validate_home_joints(
+    joints: Optional[Sequence[int]],
+    test_finger: Optional[str],
+) -> None:
+    if joints is None or test_finger is None:
+        return
+    allowed_ids = set(TEST_FINGER_MOTOR_IDS[test_finger])
+    invalid_ids = sorted(set(joints) - allowed_ids)
+    if invalid_ids:
+        raise ValueError(
+            f"Home joints {invalid_ids} do not belong to {test_finger}; "
+            f"allowed motor IDs are {sorted(allowed_ids)}"
+        )
+
+
 def _verify_bus(hand: MidasHand) -> None:
     models = hand.ping()
     missing = sorted(set(hand.motor_ids) - set(models))
     wrong_models = {
         motor_id: model_number
         for motor_id, model_number in models.items()
-        if model_number != hand.config.expected_model_number
+        if not is_compatible_dynamixel_model(
+            model_number, hand.config.expected_model_number
+        )
     }
     if missing:
         raise OSError(f"Configured motors did not respond: {missing}")
@@ -250,9 +368,8 @@ def _confirm_motion(action: str, assume_yes: bool) -> None:
 def _run_home(args: argparse.Namespace, config: HandConfig) -> None:
     _require_reviewed_config(args.config)
     _require_homing_entries(config)
-    action = "Homing"
-    if args.joints is not None:
-        action = f"Homing joints {args.joints}"
+    selected_ids = list(config.motor_ids) if args.joints is None else args.joints
+    action = f"Homing motor IDs {selected_ids}"
     _confirm_motion(action, args.yes)
     hand = MidasHand(config, autoconnect=False)
     try:
@@ -266,14 +383,16 @@ def _run_home(args: argparse.Namespace, config: HandConfig) -> None:
             current_threshold_ma=args.current_threshold_ma,
             homing_velocity_rad_s=args.velocity_rad_s,
         )
+        saved_indices = (
+            range(calibrated.n_motors)
+            if args.joints is None
+            else [calibrated.motor_ids.index(motor_id) for motor_id in args.joints]
+        )
         calibrated.save_merged_offsets(
-            range(calibrated.n_motors),
+            saved_indices,
             args.config,
         )
-        if args.joints is None:
-            homed = f"motor IDs {list(calibrated.motor_ids)}"
-        else:
-            homed = f"joints {args.joints}"
+        homed = f"motor IDs {selected_ids}"
         print(f"Homing complete; measured offsets for {homed} merged into {args.config}")
     finally:
         if hand.is_connected:
@@ -332,6 +451,17 @@ def _selected_motor_ids(
     return tuple(selected)
 
 
+def _print_selected_values(
+    elapsed_s: float,
+    values: Sequence[float],
+    selected_indices: Sequence[int],
+) -> None:
+    formatted = "[{}]".format(
+        " ".join(f"{float(values[index]):8.3f}" for index in selected_indices)
+    )
+    print(f"{elapsed_s:8.3f}s {formatted}")
+
+
 def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
     _require_reviewed_config(args.config)
     # if not any(abs(offset) > 1e-9 for offset in config.home_offsets):
@@ -344,12 +474,15 @@ def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
         open_angle, close_angle = _motion_angles(motor_id)
         _check_move_target(config, motor_id, close_angle)
         _check_move_target(config, motor_id, open_angle)
-    print(f"Selected motor IDs = {list(config.motor_ids)}")
-    print(f"FLEXION_OPEN_ANGLE_RAD  = {FLEXION_OPEN_ANGLE_RAD}")
-    print(f"FLEXION_CLOSE_ANGLE_RAD = {FLEXION_CLOSE_ANGLE_RAD}")
-    if len(DEFAULT_MOTOR_IDS) > 2:
-        print(f"AB_AD_OPEN_ANGLE_RAD    = {AB_AD_OPEN_ANGLE_RAD}")
-        print(f"AB_AD_CLOSE_ANGLE_RAD   = {AB_AD_CLOSE_ANGLE_RAD}")
+    print(f"Selected motor IDs = {list(test_motor_ids)}")
+    print(
+        "Open angles (rad)  = "
+        f"{[_motion_angles(motor_id)[0] for motor_id in test_motor_ids]}"
+    )
+    print(
+        "Close angles (rad) = "
+        f"{[_motion_angles(motor_id)[1] for motor_id in test_motor_ids]}"
+    )
     if args.skip_target_safety:
         print("WARNING: target timeout failures will not stop this movement sequence")
     _confirm_motion("Profile move testing", args.yes)
@@ -389,6 +522,11 @@ def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
 
                     target = np.array(hold_position, copy=True)
                     target[motor_index] = close_angle
+                    target_velocity = np.zeros_like(target)
+                    target_velocity[motor_index] = (
+                        np.sign(close_angle - hold_position[motor_index])
+                        * args.profile_velocity_rad_s
+                    )
                     hand.set_positions(target)
                     _wait_for_motor(
                         hand,
@@ -397,12 +535,19 @@ def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
                         args.timeout_s,
                         None
                         if current_recorder is None
-                        else lambda: current_recorder.sample(target),
+                        else lambda: current_recorder.sample(
+                            target,
+                            target_velocities_rad_s=target_velocity,
+                        ),
                         args.skip_target_safety,
                     )
                     time.sleep(args.pause_s)
 
                     target[motor_index] = open_angle
+                    target_velocity[motor_index] = (
+                        np.sign(open_angle - close_angle)
+                        * args.profile_velocity_rad_s
+                    )
                     hand.set_positions(target)
                     _wait_for_motor(
                         hand,
@@ -411,7 +556,10 @@ def _run_profile_move(args: argparse.Namespace, config: HandConfig) -> None:
                         args.timeout_s,
                         None
                         if current_recorder is None
-                        else lambda: current_recorder.sample(target),
+                        else lambda: current_recorder.sample(
+                            target,
+                            target_velocities_rad_s=target_velocity,
+                        ),
                         args.skip_target_safety,
                     )
                     time.sleep(args.pause_s)
@@ -467,6 +615,11 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
             if args.motion_profile
             else "disabled"
         )
+    )
+    print(
+        f"Contact detection  = entry {CONTACT_ENTER_THRESHOLD:g} rad, "
+        f"exit {CONTACT_EXIT_THRESHOLD:g} rad, motion suppressed above "
+        f"{CONTACT_MAX_VELOCITY_RAD_S:g} rad/s"
     )
     _confirm_motion("Stream move testing", args.yes)
 
@@ -530,12 +683,63 @@ def _run_stream_move(args: argparse.Namespace, config: HandConfig) -> None:
             if current_recorder is not None:
                 current_recorder.start_trial(trial)
             target = np.array(open_target, copy=True)
+            previous_target = np.array(target, copy=True)
+            previous_sample_t: Optional[float] = None
+            contact_detectors = {
+                index: ContactStateMachine() for index in selected_indices
+            }
             start_t = time.monotonic()
             for tick, (sample_t, angles_rad) in enumerate(zip(sample_times, samples)):
                 target[selected_indices] = angles_rad
+                commanded_velocities = np.zeros_like(target)
+                if previous_sample_t is not None:
+                    sample_dt = float(sample_t) - previous_sample_t
+                    commanded_velocities = (target - previous_target) / sample_dt
                 hand.set_positions(target)
                 if current_recorder is not None:
-                    current_recorder.sample(target, float(sample_t))
+                    actual_positions = current_recorder.sample(
+                        target,
+                        float(sample_t),
+                        target_velocities_rad_s=commanded_velocities,
+                    )
+                    actual_velocities = (
+                        current_recorder.latest_actual_velocities_rad_s
+                    )
+                    if actual_velocities is None:
+                        raise RuntimeError("Current recorder did not capture velocity")
+                    actual_currents = current_recorder.latest_currents_ma
+                    if actual_currents is None:
+                        raise RuntimeError("Current recorder did not capture current")
+                else:
+                    actual_positions, actual_velocities, actual_currents = (
+                        hand.read_pos_vel_cur()
+                    )
+
+                candidate_feedback = contact_feedback(
+                    target - actual_positions,
+                    thresholds=CONTACT_EXIT_THRESHOLD,
+                )
+                feedback = np.zeros_like(candidate_feedback)
+                now_s = time.monotonic()
+                for index, detector in contact_detectors.items():
+                    feedback[index] = detector.update(
+                        commanded_velocity_rad_s=float(
+                            commanded_velocities[index]
+                        ),
+                        measured_velocity_rad_s=float(actual_velocities[index]),
+                        measured_current_ma=float(actual_currents[index]),
+                        candidate_feedback=float(candidate_feedback[index]),
+                        now_s=now_s,
+                    )
+                if np.any(feedback[selected_indices] != 0.0):
+                    _print_selected_values(
+                        now_s - start_t,
+                        feedback,
+                        selected_indices,
+                    )
+
+                previous_target = np.array(target, copy=True)
+                previous_sample_t = float(sample_t)
 
                 if tick + 1 < len(samples):
                     next_tick_t = start_t + float(sample_times[tick + 1])
@@ -575,13 +779,17 @@ def _run_record(args: argparse.Namespace, config: HandConfig) -> None:
         _verify_bus(hand)
         hand.disable_torque()
         print("Torque is disabled. Move the joints manually; press Ctrl-C to stop.")
-        print(f"Recording calibrated actuator angles to {output}")
+        print(f"Recording calibrated actuator angles and velocities to {output}")
 
         with output.open("w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
             writer.writerow(
                 ["elapsed_s", "unix_time_s"]
                 + [f"motor_{motor_id}_rad" for motor_id in record_motor_ids]
+                + [
+                    f"motor_{motor_id}_velocity_rad_s"
+                    for motor_id in record_motor_ids
+                ]
             )
             next_sample = time.monotonic()
             while (
@@ -592,10 +800,11 @@ def _run_record(args: argparse.Namespace, config: HandConfig) -> None:
                 if now < next_sample:
                     time.sleep(next_sample - now)
                 elapsed = time.monotonic() - start_monotonic
-                positions = hand.read_pos()
+                positions, velocities, _ = hand.read_pos_vel_cur()
                 writer.writerow(
                     [elapsed, time.time()]
                     + [float(positions[index]) for index in record_indices]
+                    + [float(velocities[index]) for index in record_indices]
                 )
                 stream.flush()
                 sample_count += 1
@@ -618,6 +827,146 @@ def _run_record(args: argparse.Namespace, config: HandConfig) -> None:
     print(f"Saved {sample_count} samples to {output}")
 
 
+def _run_continuous_measurement(
+    args: argparse.Namespace,
+    config: HandConfig,
+    *,
+    measurement: str,
+) -> None:
+    """Move selected motors to the measurement pose and print samples until stopped."""
+
+    _require_reviewed_config(args.config)
+    measure_motor_ids = _selected_motor_ids(args, config)
+    missing_target_ids = sorted(
+        set(measure_motor_ids) - MEASUREMENT_POSITIONS_RAD.keys()
+    )
+    if missing_target_ids:
+        raise ValueError(
+            "No measurement position is configured for motor IDs "
+            f"{missing_target_ids}; add them to MEASUREMENT_POSITIONS_RAD"
+        )
+    measure_positions = np.array(
+        [MEASUREMENT_POSITIONS_RAD[motor_id] for motor_id in measure_motor_ids]
+    )
+    for motor_id, position in zip(measure_motor_ids, measure_positions):
+        _check_move_target(config, motor_id, float(position))
+
+    print(f"Selected motor IDs = {list(measure_motor_ids)}")
+    print(f"Measurement positions (rad) = {measure_positions.tolist()}")
+    measurement_names = {
+        "current": "Current",
+        "position_error": "Position error",
+        "contact": "Contact feedback",
+    }
+    measurement_name = measurement_names[measurement]
+    _confirm_motion(f"{measurement_name} measurement", args.yes)
+
+    hand = MidasHand(config, autoconnect=False)
+    try:
+        hand.connect()
+        _verify_bus(hand)
+        hand.configure(enable_torque=False)
+
+        # Establish a non-jumping goal for every configured motor before enabling
+        # only the motors selected for this measurement.
+        target = np.array(hand.read_pos(), copy=True)
+        measure_indices = [
+            hand.motor_ids.index(motor_id) for motor_id in measure_motor_ids
+        ]
+        target[measure_indices] = measure_positions
+        hand.set_positions(target, clip=False)
+        hand.set_motion_profile(
+            profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
+            profile_acceleration_rad_s2=PROFILE_MOVE_ACCELERATION_RAD_S2,
+            motor_ids=measure_motor_ids,
+        )
+        hand.enable_torque(measure_motor_ids)
+        hand.set_positions(target)
+
+        for motor_id, position in zip(measure_motor_ids, measure_positions):
+            _wait_for_motor(
+                hand,
+                motor_id,
+                float(position),
+                args.timeout_s,
+            )
+
+        units = {
+            "current": "mA",
+            "position_error": "rad",
+            "contact": "virtual spring units",
+        }[measurement]
+        print(
+            f"{measurement_name} ({units}), motor IDs {list(measure_motor_ids)}. "
+            "Press Ctrl-C to stop."
+        )
+        if measurement == "contact":
+            print(
+                f"Contact entry/exit thresholds = {CONTACT_ENTER_THRESHOLD:g}/"
+                f"{CONTACT_EXIT_THRESHOLD:g} rad; motion speed threshold = "
+                f"{CONTACT_MAX_VELOCITY_RAD_S:g} rad/s; current entry = "
+                f"{CONTACT_MOTION_CURRENT_THRESHOLD_MA:g} mA; virtual spring "
+                f"stiffness = {CONTACT_VIRTUAL_SPRING_STIFFNESS:g}"
+            )
+        contact_detectors = {
+            index: ContactStateMachine() for index in measure_indices
+        }
+        sample_period = 1.0 / args.rate_hz
+        start_monotonic = time.monotonic()
+        next_sample = start_monotonic
+        while True:
+            now = time.monotonic()
+            if now < next_sample:
+                time.sleep(next_sample - now)
+            elapsed = time.monotonic() - start_monotonic
+            positions, velocities, currents = hand.read_pos_vel_cur()
+            position_errors = target - positions
+            if measurement == "current":
+                values = currents
+            elif measurement == "position_error":
+                values = position_errors
+            else:
+                candidate_feedback = contact_feedback(
+                    position_errors,
+                    thresholds=CONTACT_EXIT_THRESHOLD,
+                )
+                values = np.zeros_like(candidate_feedback)
+                sample_time_s = time.monotonic()
+                for index, detector in contact_detectors.items():
+                    values[index] = detector.update(
+                        commanded_velocity_rad_s=0.0,
+                        measured_velocity_rad_s=float(velocities[index]),
+                        measured_current_ma=float(currents[index]),
+                        candidate_feedback=float(candidate_feedback[index]),
+                        now_s=sample_time_s,
+                    )
+                if not np.any(values[measure_indices] != 0.0):
+                    next_sample += sample_period
+                    continue
+            _print_selected_values(elapsed, values, measure_indices)
+            next_sample += sample_period
+    except KeyboardInterrupt:
+        print(f"\n{measurement_name} measurement stopped by user.")
+    finally:
+        if hand.is_connected:
+            hand.shutdown()
+
+
+def _run_measure_current(args: argparse.Namespace, config: HandConfig) -> None:
+    _run_continuous_measurement(args, config, measurement="current")
+
+
+def _run_measure_position_error(
+    args: argparse.Namespace,
+    config: HandConfig,
+) -> None:
+    _run_continuous_measurement(args, config, measurement="position_error")
+
+
+def _run_detect_contact(args: argparse.Namespace, config: HandConfig) -> None:
+    _run_continuous_measurement(args, config, measurement="contact")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -630,24 +979,32 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--motor-ids",
-        type=_parse_fixture_motor_ids,
-        default=DEFAULT_MOTOR_IDS,
+        "--test-finger",
+        choices=tuple(TEST_FINGER_MOTOR_IDS),
+        default=None,
         help=(
-            f"{len(DEFAULT_MOTOR_IDS)} comma-separated fixture motor IDs "
-            f"(default: {','.join(map(str, DEFAULT_MOTOR_IDS))})"
+            "Finger whose motors may be tested and torque-enabled; for home, "
+            "omit this option to home every configured motor (other commands "
+            f"default to {DEFAULT_TEST_FINGER})"
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    home = commands.add_parser("home", help="Home all or selected configured joints")
+    home = commands.add_parser(
+        "home",
+        help=(
+            "Home every configured motor, or only the finger selected by "
+            "--test-finger"
+        ),
+    )
     home.add_argument(
         "--joints",
         nargs="+",
         type=int,
-        metavar="INDEX",
+        metavar="MOTOR_ID",
         help=(
-            "Configured joint indices to home (default: all configured joints)"
+            "Motor IDs to home (default: all motors selected by --test-finger, "
+            "or all configured motors when --test-finger is omitted)"
         ),
     )
     home.add_argument("--current-threshold-ma", type=float, default=200.0)
@@ -759,7 +1116,62 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Print every Nth sample; use 0 to disable",
     )
+
+    measure_current = commands.add_parser(
+        "measure_current",
+        help=(
+            "Move selected motors to MEASUREMENT_POSITIONS_RAD and print currents"
+        ),
+    )
+    _add_measurement_arguments(measure_current, "Current")
+
+    measure_position_error = commands.add_parser(
+        "measure_position_error",
+        help=(
+            "Move selected motors to MEASUREMENT_POSITIONS_RAD and print "
+            "target-minus-current position errors"
+        ),
+    )
+    _add_measurement_arguments(measure_position_error, "Position error")
+
+    detect_contact = commands.add_parser(
+        "detect_contact",
+        help=(
+            "Move selected motors to MEASUREMENT_POSITIONS_RAD and print "
+            "virtual-spring feedback while contact is detected"
+        ),
+    )
+    _add_measurement_arguments(detect_contact, "Contact")
     return parser
+
+
+def _add_measurement_arguments(
+    parser: argparse.ArgumentParser,
+    quantity: str,
+) -> None:
+    parser.add_argument(
+        "--motors",
+        type=_parse_motor_ids,
+        default=None,
+        help="Fixture motor IDs to measure (default: all configured motors)",
+    )
+    parser.add_argument(
+        "--timeout-s",
+        type=float,
+        default=PROFILE_MOVE_TIMEOUT_S,
+        help="Timeout while moving each selected motor to the measurement position",
+    )
+    parser.add_argument(
+        "--rate-hz",
+        type=float,
+        default=20.0,
+        help=f"{quantity} sampling and print rate (default: 20 Hz)",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the MOVE prompt",
+    )
 
 
 def _add_profile_move_arguments(parser: argparse.ArgumentParser) -> None:
@@ -813,6 +1225,12 @@ def _add_output_current_argument(parser: argparse.ArgumentParser) -> None:
             "optionally provide an output path (default: output/current.csv)"
         ),
     )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Overwrite the --output-current path if it already exists",
+    )
 
 
 def main() -> None:
@@ -823,6 +1241,15 @@ def main() -> None:
     if args.command in ("profile_move", "profile_move_sequential", "stream_move"):
         if args.trials <= 0:
             parser.error("--trials must be positive")
+        if (
+            args.output_current is not None
+            and args.output_current.expanduser().exists()
+            and not args.force
+        ):
+            parser.error(
+                f"output current path already exists: {args.output_current}; "
+                "use -f or --force to overwrite it"
+            )
     if args.command == "record":
         if args.output.expanduser().exists() and not args.force:
             parser.error(
@@ -835,6 +1262,15 @@ def main() -> None:
             parser.error("--duration-s must be positive")
         if args.print_every < 0:
             parser.error("--print-every must be non-negative")
+    elif args.command in (
+        "measure_current",
+        "measure_position_error",
+        "detect_contact",
+    ):
+        if args.timeout_s <= 0:
+            parser.error("--timeout-s must be positive")
+        if args.rate_hz <= 0:
+            parser.error("--rate-hz must be positive")
     elif args.command == "stream_move":
         if args.rate_hz <= 0:
             parser.error("--rate-hz must be positive")
@@ -851,15 +1287,28 @@ def main() -> None:
             parser.error("--pause-s must be non-negative")
 
     try:
-        config = _load_config(args.config, args.motor_ids)
+        if args.command == "home":
+            _validate_home_joints(args.joints, args.test_finger)
+        if args.command == "home" and args.test_finger is None:
+            motor_ids = None
+        else:
+            test_finger = args.test_finger or DEFAULT_TEST_FINGER
+            motor_ids = TEST_FINGER_MOTOR_IDS[test_finger]
+        config = _load_config(args.config, motor_ids)
         if args.command == "home":
             _run_home(args, config)
         elif args.command in ("profile_move", "profile_move_sequential"):
             _run_profile_move(args, config)
         elif args.command == "stream_move":
             _run_stream_move(args, config)
-        else:
+        elif args.command == "record":
             _run_record(args, config)
+        elif args.command == "measure_current":
+            _run_measure_current(args, config)
+        elif args.command == "measure_position_error":
+            _run_measure_position_error(args, config)
+        else:
+            _run_detect_contact(args, config)
     except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
         parser.exit(1, f"error: {exc}\n")
 

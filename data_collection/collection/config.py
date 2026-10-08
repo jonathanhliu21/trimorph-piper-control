@@ -31,6 +31,14 @@ def joint_command_scales_for_motor_ids(
     return tuple(float(scales.get(int(motor_id), 1.0)) for motor_id in motor_ids)
 
 
+def joint_command_offsets_for_motor_ids(
+    offsets: Mapping[int, float], motor_ids: Sequence[int]
+) -> tuple[float, ...]:
+    """Resolve MIDAS-zero offsets in motor order, defaulting to zero radians."""
+
+    return tuple(float(offsets.get(int(motor_id), 0.0)) for motor_id in motor_ids)
+
+
 @dataclass(frozen=True)
 class CollectionConfig:
     dataset_root: Path
@@ -69,6 +77,23 @@ class CollectionConfig:
     follower_joint_command_scales: dict[int, float] = field(
         default_factory=default_follower_joint_command_scales
     )
+    force_feedback_motor_ids: tuple[int, ...] = tuple(range(4, 13))
+    # TRIMORPH motor ID -> MIDAS motor ID; omitted entries use the same ID.
+    force_feedback_source_motor_ids: dict[int, int] = field(default_factory=dict)
+    force_feedback_max_current_ma: float = 100.0
+    force_feedback_rate_hz: float = 50.0
+    force_feedback_full_scale_error_rad: float = 0.01
+    follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
+    follower_profile_acceleration_rad_s2: float = (
+        FOLLOWER_PROFILE_ACCELERATION_RAD_S2
+    )
+    tactile_force_feedback_current_ma: float = 50.0
+    tactile_force_feedback_motor_ids: tuple[tuple[int, ...], ...] = (
+        (4, 5, 6),
+        (7, 8, 9),
+        (10, 11, 12),
+        (0, 1),
+    )
 
 
 def _module_available(name: str) -> bool:
@@ -91,10 +116,10 @@ def build_config() -> CollectionConfig:
         video_codec="mp4v",
         hand_config=Path("config/hand.yaml"),
         hand_port="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND",
-        hand_measure_rate_hz=100.0,
+        hand_measure_rate_hz=50.0,
         follower_hand_config=None,
         follower_hand_port=None,
-        follower_measure_rate_hz=200.0,
+        follower_measure_rate_hz=100.0,
         follower_command_rate_hz=50.0,
         follower_configure_hardware=True,
         follower_command_scale=1.0,
@@ -144,6 +169,7 @@ def validate_config(config: CollectionConfig, *, require_runtime_modules: bool =
     for name, value in {
         "READY_SECONDS": config.ready_seconds,
         "HAND_MEASURE_RATE_HZ": config.hand_measure_rate_hz,
+        "FORCE_FEEDBACK_RATE_HZ": config.force_feedback_rate_hz,
         "PIPER_RATE_HZ": config.piper_rate_hz,
         "TEACHER_MODE_POLL_HZ": config.teacher_mode_poll_hz,
     }.items():
