@@ -306,6 +306,9 @@ class PiperAPI:
     def set_mit_mode(self) -> None:
         self.robot.set_motion_mode(self.robot.OPTIONS.MOTION_MODE.MIT)
 
+    def set_position_mode(self) -> None:
+        self.robot.set_motion_mode(self.robot.OPTIONS.MOTION_MODE.P)
+
     def move_joint(self, joints: Sequence[float], *, mode: str = "exact") -> None:
         move_joint(self.robot, joints, mode=mode)
 

@@ -1,4 +1,5 @@
 import glob
+import fcntl
 import os
 import select
 import struct
@@ -12,6 +13,8 @@ EV_KEY = 0x01
 KEY_PRESS = 1
 KEY_RELEASE = 0
 INPUT_EVENT_STRUCT = struct.Struct("llHHI")
+# Linux input-event ioctl: exclusively route this device to the owning process.
+EVIOCGRAB = 0x40044590
 PEDAL_HINTS = ("pedal", "foot")
 KEYBOARD_HINTS = ("event-kbd", "keyboard")
 MOUSE_HINTS = ("event-mouse", "mouse")
@@ -159,14 +162,17 @@ class FootPedalTrigger:
         *,
         key_code: Optional[int] = None,
         debounce_s: float = 0.5,
+        suppress_keystrokes: bool = True,
     ):
         if debounce_s < 0:
             raise ValueError("debounce_s must be 0 or greater")
         self.device = device
         self.key_code = key_code
         self.debounce_s = debounce_s
+        self.suppress_keystrokes = suppress_keystrokes
 
         self._fd: Optional[int] = None
+        self._grabbed = False
         self._buffer = b""
         self._start_t = 0.0
         self._last_trigger_t = 0.0
@@ -203,8 +209,15 @@ class FootPedalTrigger:
         for path in paths:
             try:
                 self._fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                if self.suppress_keystrokes:
+                    fcntl.ioctl(self._fd, EVIOCGRAB, 1)
+                    self._grabbed = True
             except OSError as exc:
                 failures.append((path, exc))
+                if self._fd is not None:
+                    os.close(self._fd)
+                    self._fd = None
+                self._grabbed = False
                 continue
             self.device = path
             break
@@ -221,7 +234,7 @@ class FootPedalTrigger:
                     "PCsensor FootSwitch, or pass a readable --foot-pedal-device."
                 )
             raise RuntimeError(
-                "Could not open any foot pedal input device:\n"
+                "Could not open and exclusively grab any foot pedal input device:\n"
                 f"{_format_open_failures(failures)}{hint}"
             )
 
@@ -233,6 +246,12 @@ class FootPedalTrigger:
     def stop(self) -> None:
         if self._fd is None:
             return
+        if self._grabbed:
+            try:
+                fcntl.ioctl(self._fd, EVIOCGRAB, 0)
+            except OSError:
+                pass
+            self._grabbed = False
         os.close(self._fd)
         self._fd = None
         self._buffer = b""

@@ -49,8 +49,9 @@ as `midas_hand_api`. The core Python dependencies are NumPy, PyYAML (provided by
 the hand API), and the hand API itself. Matplotlib is required for graph
 generation. OpenCV and DepthAI are needed by the full camera collection
 pipeline. Tkinter is required by the contact UIs and is normally supplied by
-the system Python installation. Install the PiperX `pyAgxArm` package using the
-vendor instructions and configure SocketCAN before using PiperX.
+the system Python installation. The PiperX `pyAgxArm` package is installed
+directly from the vendor's GitHub repository by `requirements.txt`; configure
+SocketCAN before using PiperX.
 
 Optional Paxini tactile operation also requires the Paxini support exposed by
 `midas_hand_api` and a valid sensor serial port.
