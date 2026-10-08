@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ from collect_hand_only import (
     run_hand_only,
     start_episode,
     stop_episode,
+    worker_specs,
 )
 from collection.episode import RecordingManager
 from collection.config import TRIMORPH_MOTOR_IDS
@@ -111,6 +113,28 @@ class HandOnlyCollectionTests(unittest.TestCase):
         with patch("sys.argv", ["collect_hand_only.py", "--show-ui"]):
             self.assertTrue(parse_args().show_ui)
 
+    def test_camera_flag_is_opt_in(self):
+        with patch("sys.argv", ["collect_hand_only.py"]):
+            self.assertFalse(parse_args().add_camera)
+        with patch("sys.argv", ["collect_hand_only.py", "--add-camera"]):
+            self.assertTrue(parse_args().add_camera)
+
+    def test_camera_worker_is_conditional(self):
+        config = HandOnlyCollectionConfig(
+            dataset_root=Path("data_trimorph"),
+            hand_config=Path("config/hand.yaml"),
+            hand_port="/dev/hand",
+            hand_measure_rate_hz=100.0,
+            warmup_time=0.0,
+            episode_time=30.0,
+        )
+        self.assertEqual([name for name, _ in worker_specs(config)], ["leader_hand"])
+        config = replace(config, add_camera=True)
+        self.assertEqual(
+            [name for name, _ in worker_specs(config)],
+            ["task_camera", "leader_hand"],
+        )
+
     def test_tactile_options_are_opt_in(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
             args = parse_args()
@@ -201,6 +225,32 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertEqual(metadata["paths"]["leader_hand_csv"], "leader_hand.csv")
             self.assertIsNone(metadata["camera"]["device"])
             self.assertIsNone(metadata["piper"]["mode"])
+
+    def test_camera_metadata_is_populated_only_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = HandOnlyCollectionConfig(
+                dataset_root=Path(temp_dir),
+                hand_config=Path("config/hand.yaml"),
+                hand_port="/dev/hand",
+                hand_measure_rate_hz=100.0,
+                warmup_time=0.0,
+                episode_time=30.0,
+                add_camera=True,
+            )
+            recorder = RecordingManager()
+            session = start_episode(config, recorder)
+            session.append_camera(
+                {"frame_idx": 0, "monotonic_ns": session.start_ns, "elapsed_s": "0"}
+            )
+            session.video_done.set()
+            with patch("collection.episode._hand_metadata", return_value={}):
+                stop_episode(recorder, "duration_complete")
+
+            metadata = json.loads(session.paths.metadata_path.read_text())
+            self.assertEqual(metadata["camera"]["device"], "oak1_depthai")
+            self.assertEqual(metadata["camera"]["brightness"], 0)
+            self.assertEqual(metadata["camera"]["anti_banding_hz"], "60")
+            self.assertEqual(metadata["counts"]["camera_frames"], 1)
 
     def test_run_hand_only_owns_timing_and_episode_lifecycle(self):
         class FinishedThread:

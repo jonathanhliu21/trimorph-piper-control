@@ -7,7 +7,19 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from collection.config import TRIMORPH_MOTOR_IDS
+from collection.config import (
+    TASK_CAMERA_ANTI_BANDING_HZ,
+    TASK_CAMERA_BRIGHTNESS,
+    TASK_CAMERA_FLIP,
+    TASK_CAMERA_FPS,
+    TASK_CAMERA_HEIGHT,
+    TASK_CAMERA_WIDTH,
+    TASK_VIEW_WINDOW_NAME,
+    TRIMORPH_MOTOR_IDS,
+    VIDEO_CODEC,
+    validate_camera_settings,
+)
+from collection.depthai_task_camera_worker import run_depthai_task_camera_worker
 from collection.episode import (
     EpisodeBuffer,
     RecordingManager,
@@ -19,9 +31,10 @@ from collection.follower_hand_worker import run_follower_hand_worker
 from collection.leader_hand_worker import run_leader_hand_worker
 from collection.shared_state import SharedState
 from collection.tactile_worker import run_tactile_worker
-from collection.utils import WorkerError, worker_wrapper
+from collection.utils import WorkerError, import_cv2, worker_wrapper
 
 WORKER_INIT_TIMEOUT_S = 60.0
+VIDEO_FLUSH_TIMEOUT_S = 5.0
 DEFAULT_DEMONSTRATION_DURATION_S = 30.0
 DEFAULT_WARMUP_TIME_S = 5.0
 DEFAULT_HAND_MEASURE_RATE_HZ = 50.0
@@ -66,6 +79,15 @@ class HandOnlyCollectionConfig:
     episode_time: float
     mode: str = DATA_COLLECTION_MODE
     show_ui: bool = False
+    add_camera: bool = False
+    task_view_window_name: str = TASK_VIEW_WINDOW_NAME
+    task_camera_width: int = TASK_CAMERA_WIDTH
+    task_camera_height: int = TASK_CAMERA_HEIGHT
+    task_camera_fps: int = TASK_CAMERA_FPS
+    task_camera_flip: str = TASK_CAMERA_FLIP
+    task_camera_brightness: int = TASK_CAMERA_BRIGHTNESS
+    task_camera_anti_banding_hz: str = TASK_CAMERA_ANTI_BANDING_HZ
+    video_codec: str = VIDEO_CODEC
     add_tactile: bool = False
     paxini_port: str | None = None
     tactile_debug_log: Path | None = None
@@ -172,6 +194,11 @@ def parse_args() -> argparse.Namespace:
         help="Show the read-only follower MIDAS live-contact visualization.",
     )
     parser.add_argument(
+        "--add-camera",
+        action="store_true",
+        help="record the DepthAI wrist camera and show its live feed",
+    )
+    parser.add_argument(
         "--add-tactile",
         action="store_true",
         help=(
@@ -228,17 +255,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def worker_specs(config: HandOnlyCollectionConfig):
+    specs = [("leader_hand", run_leader_hand_worker)]
+    if config.add_camera:
+        specs.insert(0, ("task_camera", run_depthai_task_camera_worker))
+    if config.follower_hand_config is not None:
+        specs.append(("follower", run_follower_hand_worker))
+    if config.add_tactile:
+        specs.append(("tactile", run_tactile_worker))
+    return specs
+
+
 def initialize_worker(
     config: HandOnlyCollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
     errors: queue.Queue[WorkerError],
 ) -> list[threading.Thread]:
-    specs = [("leader_hand", run_leader_hand_worker)]
-    if config.follower_hand_config is not None:
-        specs.append(("follower", run_follower_hand_worker))
-    if config.add_tactile:
-        specs.append(("tactile", run_tactile_worker))
+    specs = worker_specs(config)
 
     threads: list[threading.Thread] = []
     try:
@@ -295,11 +329,18 @@ def stop_episode(recorder: RecordingManager, reason: str) -> EpisodeBuffer | Non
     session = recorder.stop(reason)
     if session is None:
         return None
+    if session.config.add_camera and not session.video_done.wait(
+        timeout=VIDEO_FLUSH_TIMEOUT_S
+    ):
+        print(
+            f"Warning: camera writer did not finish within {VIDEO_FLUSH_TIMEOUT_S:.1f}s"
+        )
     session.flush()
     print(
         f"Saved episode {session.paths.episode_index:06d}: "
         f"{len(session.leader_hand_rows)} leader-hand samples, "
-        f"{len(session.follower_rows)} follower samples"
+        f"{len(session.follower_rows)} follower samples, "
+        f"{len(session.camera_rows)} camera frames"
     )
     return session
 
@@ -308,6 +349,8 @@ def run_follower_contact_ui(
     shared: SharedState,
     *,
     duration_s: float | None,
+    show_camera: bool = False,
+    camera_window_name: str = TASK_VIEW_WINDOW_NAME,
 ) -> str:
     """Run the read-only follower contact view until close or shutdown."""
 
@@ -320,6 +363,7 @@ def run_follower_contact_ui(
     root.minsize(1000, 500)
     widget = LiveContactWidget(root)
     widget.pack(fill="both", expand=True, padx=12, pady=12)
+    cv2 = import_cv2() if show_camera else None
     deadline = None if duration_s is None else time.monotonic() + duration_s
     exit_reason = "ui_closed"
 
@@ -341,6 +385,16 @@ def run_follower_contact_ui(
             )
         elif tactile_contacts is not None:
             widget.show(tactile_contacts=tactile_contacts)
+        if cv2 is not None:
+            frame = shared.latest_task_frame()
+            if frame is not None:
+                cv2.imshow(camera_window_name, frame)
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                exit_reason = "camera_view_closed"
+                shared.shutdown.set()
+        if shared.shutdown.is_set():
+            root.destroy()
+            return
         if deadline is not None and time.monotonic() >= deadline:
             exit_reason = "duration_complete"
             shared.shutdown.set()
@@ -355,7 +409,43 @@ def run_follower_contact_ui(
         root.mainloop()
     finally:
         shared.shutdown.set()
+        if cv2 is not None:
+            try:
+                cv2.destroyWindow(camera_window_name)
+            except Exception:
+                pass
     return exit_reason
+
+
+def run_camera_view(
+    shared: SharedState,
+    *,
+    duration_s: float | None,
+    window_name: str,
+) -> str:
+    """Show camera frames until the duration expires, shutdown, or q/Escape."""
+
+    cv2 = import_cv2()
+    deadline = None if duration_s is None else time.monotonic() + duration_s
+    reason = "duration_complete"
+    try:
+        while not shared.shutdown.is_set():
+            frame = shared.latest_task_frame()
+            if frame is not None:
+                cv2.imshow(window_name, frame)
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                reason = "camera_view_closed"
+                shared.shutdown.set()
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
+    finally:
+        try:
+            cv2.destroyWindow(window_name)
+        except Exception:
+            pass
+    return reason
 
 
 def run_hand_only(config: HandOnlyCollectionConfig) -> int:
@@ -379,15 +469,43 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
         if config.mode == RETARGET_ONLY_MODE:
             print("Retarget-only mode active. Press Ctrl-C to stop.")
             if config.show_ui:
-                reason = run_follower_contact_ui(shared, duration_s=None)
+                if config.add_camera:
+                    reason = run_follower_contact_ui(
+                        shared,
+                        duration_s=None,
+                        show_camera=True,
+                        camera_window_name=config.task_view_window_name,
+                    )
+                else:
+                    reason = run_follower_contact_ui(shared, duration_s=None)
+            elif config.add_camera:
+                reason = run_camera_view(
+                    shared,
+                    duration_s=None,
+                    window_name=config.task_view_window_name,
+                )
             else:
                 shared.shutdown.wait()
         else:
             start_episode(config, recorder)
             if config.show_ui:
-                reason = run_follower_contact_ui(
+                if config.add_camera:
+                    reason = run_follower_contact_ui(
+                        shared,
+                        duration_s=config.episode_time,
+                        show_camera=True,
+                        camera_window_name=config.task_view_window_name,
+                    )
+                else:
+                    reason = run_follower_contact_ui(
+                        shared,
+                        duration_s=config.episode_time,
+                    )
+            elif config.add_camera:
+                reason = run_camera_view(
                     shared,
                     duration_s=config.episode_time,
+                    window_name=config.task_view_window_name,
                 )
             else:
                 shared.shutdown.wait(config.episode_time)
@@ -429,6 +547,7 @@ def main() -> int:
         warmup_time=args.warmup_time,
         mode=args.mode,
         show_ui=args.show_ui,
+        add_camera=args.add_camera,
         add_tactile=add_tactile,
         paxini_port=args.paxini_port,
         tactile_debug_log=(
@@ -457,6 +576,8 @@ def main() -> int:
         raise ValueError(
             "Tactile sensing requires --show-ui or --tactile-debug-log"
         )
+    if config.add_camera:
+        validate_camera_settings(config)
     if config.follower_hand_port == config.hand_port:
         raise ValueError("Primary and follower hand ports must be different")
     if config.paxini_port is not None and config.paxini_port in {

@@ -11,6 +11,18 @@ TRIMORPH_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
 FOLLOWER_PROFILE_ACCELERATION_RAD_S2 = 50.0
+TASK_CAMERA_WIDTH = 1280
+TASK_CAMERA_HEIGHT = 720
+TASK_CAMERA_FPS = 30
+# One of: "none", "horizontal", "vertical", "both", or "180".
+# "180" is the readable alias for flipping both axes.
+TASK_CAMERA_FLIP = "both"
+# DepthAI brightness compensation, in the device-supported range -10..10.
+TASK_CAMERA_BRIGHTNESS = -1
+# Match the room's AC mains frequency to prevent exposure/flicker banding.
+TASK_CAMERA_ANTI_BANDING_HZ = "60"
+TASK_VIEW_WINDOW_NAME = "trimorph_task_view"
+VIDEO_CODEC = "mp4v"
 
 
 def default_follower_joint_command_scales() -> dict[int, float]:
@@ -49,6 +61,8 @@ class CollectionConfig:
     task_camera_height: int
     task_camera_fps: int
     task_camera_flip: str
+    task_camera_brightness: int
+    task_camera_anti_banding_hz: str
     video_codec: str
     hand_config: Path
     hand_port: str
@@ -103,17 +117,46 @@ def _module_available(name: str) -> bool:
         return False
 
 
+def validate_camera_settings(config) -> None:
+    if (
+        config.task_camera_width <= 0
+        or config.task_camera_height <= 0
+        or config.task_camera_fps <= 0
+    ):
+        raise ValueError("Task camera dimensions and FPS must be greater than 0")
+    if config.task_camera_flip not in {
+        "none",
+        "horizontal",
+        "vertical",
+        "both",
+        "180",
+    }:
+        raise ValueError(
+            "TASK_CAMERA_FLIP must be one of: none, horizontal, vertical, both, 180"
+        )
+    if not -10 <= config.task_camera_brightness <= 10:
+        raise ValueError("TASK_CAMERA_BRIGHTNESS must be in range -10..10")
+    if config.task_camera_anti_banding_hz not in {"off", "50", "60", "auto"}:
+        raise ValueError(
+            "TASK_CAMERA_ANTI_BANDING_HZ must be one of: off, 50, 60, auto"
+        )
+    if len(config.video_codec) != 4:
+        raise ValueError("VIDEO_CODEC must be a 4-character fourcc")
+
+
 def build_config() -> CollectionConfig:
     return CollectionConfig(
         dataset_root=Path("data_trimorph"),
         ready_seconds=0.2,
         show_task_view=True,
-        task_view_window_name="trimorph_task_view",
-        task_camera_width=1280,
-        task_camera_height=720,
-        task_camera_fps=30,
-        task_camera_flip="none",
-        video_codec="mp4v",
+        task_view_window_name=TASK_VIEW_WINDOW_NAME,
+        task_camera_width=TASK_CAMERA_WIDTH,
+        task_camera_height=TASK_CAMERA_HEIGHT,
+        task_camera_fps=TASK_CAMERA_FPS,
+        task_camera_flip=TASK_CAMERA_FLIP,
+        task_camera_brightness=TASK_CAMERA_BRIGHTNESS,
+        task_camera_anti_banding_hz=TASK_CAMERA_ANTI_BANDING_HZ,
+        video_codec=VIDEO_CODEC,
         hand_config=Path("config/hand.yaml"),
         hand_port="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND",
         hand_measure_rate_hz=50.0,
@@ -175,12 +218,7 @@ def validate_config(config: CollectionConfig, *, require_runtime_modules: bool =
     }.items():
         if value <= 0:
             raise ValueError(f"{name} must be greater than 0")
-    if config.task_camera_width <= 0 or config.task_camera_height <= 0 or config.task_camera_fps <= 0:
-        raise ValueError("Task camera dimensions and FPS must be greater than 0")
-    if config.task_camera_flip not in {"none", "horizontal", "vertical", "both"}:
-        raise ValueError("TASK_CAMERA_FLIP must be one of: none, horizontal, vertical, both")
-    if len(config.video_codec) != 4:
-        raise ValueError("VIDEO_CODEC must be a 4-character fourcc")
+    validate_camera_settings(config)
     if config.piper_firmware not in {"default", "v183", "v188"}:
         raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
     if not config.hand_port or "REPLACE_WITH" in config.hand_port:

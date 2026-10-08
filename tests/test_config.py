@@ -79,5 +79,38 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires --follower-config"):
                 validate_config(config, require_runtime_modules=False)
 
+    def test_camera_control_defaults_and_valid_boundaries(self):
+        self.assertEqual(build_config().task_camera_brightness, 0)
+        self.assertEqual(build_config().task_camera_anti_banding_hz, "60")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = self._config(Path(temp_dir), follower=False)
+            for brightness in (-10, 10):
+                validate_config(
+                    replace(base, task_camera_brightness=brightness),
+                    require_runtime_modules=False,
+                )
+
+    def test_rejects_invalid_camera_controls(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = self._config(Path(temp_dir), follower=False)
+            with self.assertRaisesRegex(ValueError, "BRIGHTNESS"):
+                validate_config(
+                    replace(base, task_camera_brightness=11),
+                    require_runtime_modules=False,
+                )
+            with self.assertRaisesRegex(ValueError, "ANTI_BANDING"):
+                validate_config(
+                    replace(base, task_camera_anti_banding_hz="invalid"),
+                    require_runtime_modules=False,
+                )
+
+    def test_accepts_180_degree_camera_flip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = replace(
+                self._config(Path(temp_dir), follower=False),
+                task_camera_flip="180",
+            )
+            validate_config(config, require_runtime_modules=False)
+
 if __name__ == "__main__":
     unittest.main()

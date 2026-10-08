@@ -3,7 +3,12 @@ from __future__ import annotations
 import time
 
 from .config import CollectionConfig
-from .depthai_utils import import_depthai, require_depthai_device, warmup_color_queue
+from .depthai_utils import (
+    apply_camera_control,
+    import_depthai,
+    require_depthai_device,
+    warmup_color_queue,
+)
 from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
 from .utils import import_cv2
@@ -16,7 +21,7 @@ def flip_frame(cv2, frame, mode: str):
         return cv2.flip(frame, 1)
     if mode == "vertical":
         return cv2.flip(frame, 0)
-    if mode == "both":
+    if mode in {"both", "180"}:
         return cv2.flip(frame, -1)
     return frame
 
@@ -39,6 +44,12 @@ def run_depthai_task_camera_worker(
 
     with dai.Pipeline() as pipeline:
         cam = pipeline.create(dai.node.Camera).build()
+        apply_camera_control(
+            dai,
+            cam,
+            brightness=config.task_camera_brightness,
+            anti_banding_hz=config.task_camera_anti_banding_hz,
+        )
         cam_out = cam.requestOutput(
             (config.task_camera_width, config.task_camera_height), dai.ImgFrame.Type.NV12
         )
@@ -102,5 +113,6 @@ def run_depthai_task_camera_worker(
         finally:
             if writer is not None:
                 writer.release()
-                if writer_session is not None:
-                    writer_session.video_done.set()
+            final_session = writer_session or recorder.current()
+            if final_session is not None:
+                final_session.video_done.set()

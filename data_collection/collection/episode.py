@@ -151,7 +151,9 @@ class EpisodeBuffer:
         stop_ns = self.stop_ns or time.monotonic_ns()
         follower_config = getattr(self.config, "follower_hand_config", None)
         follower_port = getattr(self.config, "follower_hand_port", None)
-        has_camera = hasattr(self.config, "task_camera_width")
+        has_camera = hasattr(self.config, "task_camera_width") and bool(
+            getattr(self.config, "add_camera", True)
+        )
         has_piper = hasattr(self.config, "piper_rate_hz")
         return {
             "episode_index": self.paths.episode_index,
@@ -182,10 +184,36 @@ class EpisodeBuffer:
             },
             "camera": {
                 "device": "oak1_depthai" if has_camera else None,
-                "width": getattr(self.config, "task_camera_width", None),
-                "height": getattr(self.config, "task_camera_height", None),
-                "fps": getattr(self.config, "task_camera_fps", None),
-                "flip": getattr(self.config, "task_camera_flip", None),
+                "width": (
+                    getattr(self.config, "task_camera_width", None)
+                    if has_camera
+                    else None
+                ),
+                "height": (
+                    getattr(self.config, "task_camera_height", None)
+                    if has_camera
+                    else None
+                ),
+                "fps": (
+                    getattr(self.config, "task_camera_fps", None)
+                    if has_camera
+                    else None
+                ),
+                "flip": (
+                    getattr(self.config, "task_camera_flip", None)
+                    if has_camera
+                    else None
+                ),
+                "brightness": (
+                    getattr(self.config, "task_camera_brightness", None)
+                    if has_camera
+                    else None
+                ),
+                "anti_banding_hz": (
+                    getattr(self.config, "task_camera_anti_banding_hz", None)
+                    if has_camera
+                    else None
+                ),
             },
             "trimorph": {
                 "motor_ids": list(TRIMORPH_MOTOR_IDS),

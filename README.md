@@ -187,7 +187,8 @@ uses finger-specific rows; without it the output is the three-panel overview.
 ## 4. Collect from TRIMORPH only
 
 [`data_collection/collect_hand_only.py`](data_collection/collect_hand_only.py)
-can record the backdriven TRIMORPH without launching PiperX or a camera:
+can record the backdriven TRIMORPH without launching PiperX. The wrist camera
+is optional:
 
 ```bash
 python3 data_collection/collect_hand_only.py \
@@ -205,6 +206,16 @@ contains populated `leader_hand.csv` and `metadata.json`, plus empty
 written only when a follower is configured, and no camera video is created.
 The older filename `proprioception.csv` is still accepted by replay for
 compatibility.
+
+Add `--add-camera` to start the DepthAI/OAK wrist camera, display its live feed,
+and save `camera.mp4` plus populated `camera_timestamps.csv` and camera metadata
+in the same format as the full collector. Press `q` or Escape in the camera
+window to stop through the normal episode-save path. Camera brightness and
+anti-banding defaults are configured by `TASK_CAMERA_BRIGHTNESS` and
+`TASK_CAMERA_ANTI_BANDING_HZ` in `data_collection/collection/config.py`; the
+default anti-banding mode is `60` Hz.
+Set `TASK_CAMERA_FLIP = "180"` in the same config file to rotate the saved and
+previewed image by 180 degrees.
 
 ## 5. TRIMORPH leader to MIDAS follower with force feedback
 

@@ -24,6 +24,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
 from data_collection.collection.config import build_config
 from data_collection.collection.depthai_task_camera_worker import flip_frame
 from data_collection.collection.depthai_utils import (
+    apply_camera_control,
     import_depthai,
     require_depthai_device,
     warmup_color_queue,
@@ -44,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     flip_group = parser.add_mutually_exclusive_group()
     flip_group.add_argument(
         "--flip",
-        choices=("none", "horizontal", "vertical", "both"),
+        choices=("none", "horizontal", "vertical", "both", "180"),
         default=defaults.task_camera_flip,
     )
     flip_group.add_argument(
@@ -65,10 +66,17 @@ def main() -> int:
     dai = import_depthai()
     require_depthai_device(dai)
     flip_mode = "both" if args.flip_180 else args.flip
+    defaults = build_config()
 
     try:
         with dai.Pipeline() as pipeline:
             camera = pipeline.create(dai.node.Camera).build()
+            apply_camera_control(
+                dai,
+                camera,
+                brightness=defaults.task_camera_brightness,
+                anti_banding_hz=defaults.task_camera_anti_banding_hz,
+            )
             camera_output = camera.requestOutput(
                 (args.width, args.height), dai.ImgFrame.Type.NV12
             )

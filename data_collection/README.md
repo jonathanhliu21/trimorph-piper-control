@@ -50,4 +50,10 @@ joints 2--3. All MIDAS commands are clipped to the configured limits before
 the normal interpolation and maximum-step safety logic is applied.
 
 There is no hand camera or MediaPipe path. The OAK-1 mounted at the
-robot wrist is retained solely as the policy observation camera.
+robot wrist is retained solely as the policy observation camera. It is enabled
+for hand-only collection with `--add-camera`, which also opens a live preview
+and records the standard `camera.mp4` and `camera_timestamps.csv` episode
+artifacts. Press `q` or Escape in the preview to stop and save. Brightness and
+50/60 Hz flicker prevention are controlled by the shared task-camera settings
+in `collection/config.py` and are applied before the DepthAI pipeline starts.
+Set `TASK_CAMERA_FLIP = "180"` there to rotate both the preview and recording.
