@@ -71,31 +71,38 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
             feedback_source_motor_ids=FORCE_FEEDBACK_SOURCE_MOTOR_IDS,
         )
 
-    def test_force_feedback_covers_thumb_and_all_finger_joints(self):
-        self.assertEqual(FORCE_FEEDBACK_MOTOR_IDS, tuple(range(13)))
+    def test_force_feedback_excludes_thumb_joints_two_and_three(self):
+        self.assertEqual(FORCE_FEEDBACK_MOTOR_IDS, (0, 1, *range(4, 13)))
+        self.assertEqual(TACTILE_FORCE_FEEDBACK_MOTOR_IDS[-1], (0, 1))
 
-    def test_thumb_feedback_swaps_midas_joints_two_and_three(self):
+    def test_thumb_feedback_only_configures_joints_zero_and_one(self):
         self.assertEqual(
             FORCE_FEEDBACK_SOURCE_MOTOR_IDS,
-            {0: 0, 1: 1, 2: 3, 3: 2},
+            {0: 0, 1: 1},
         )
 
         hand = FakeThumbHand()
         controller = self.controller(hand)
+        controller.start([0.0, 0.0, 0.0, 0.0])
         controller.update(
-            {0: 0.0, 1: 0.0, 2: 0.01, 3: -0.01},
+            {0: 0.01, 1: -0.01, 2: 0.01, 3: -0.01},
             [0.0, 0.0, 0.0, 0.0],
         )
         goal_writes = [
             (motor_ids, currents)
             for motor_ids, currents, address, _size in hand.dxl_client.sync_writes
-            if address == ct.ADDR_GOAL_CURRENT and currents != [0]
+            if address == ct.ADDR_GOAL_CURRENT and any(currents)
         ]
         self.assertEqual(
             goal_writes,
             [
-                ([2], [FORCE_FEEDBACK_MAX_CURRENT_MA]),
-                ([3], [-FORCE_FEEDBACK_MAX_CURRENT_MA]),
+                (
+                    [0, 1],
+                    [
+                        -FORCE_FEEDBACK_MAX_CURRENT_MA,
+                        FORCE_FEEDBACK_MAX_CURRENT_MA,
+                    ],
+                ),
             ],
         )
 
@@ -118,73 +125,97 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
             -FORCE_FEEDBACK_MAX_CURRENT_MA,
         )
 
-    def test_engages_only_contact_joint_and_applies_joint_sign(self):
+    def test_start_configures_all_feedback_joints_once(self):
         hand = FakeHand()
         controller = self.controller(hand)
+        controller.start([0.4, 0.5, 0.6])
 
-        controller.update({4: 0.03, 5: 0.0}, [0.4, 0.5, 0.6])
-
-        self.assertEqual(hand.disabled, [[4]])
-        self.assertEqual(hand.enabled, [[4]])
-        self.assertIn(
-            ([4], [ct.OPERATING_MODE_CURRENT], ct.ADDR_OPERATING_MODE, 1),
-            hand.dxl_client.sync_writes,
-        )
-        self.assertEqual(
-            hand.dxl_client.sync_writes[-1][0:2],
-            ([4], [-FORCE_FEEDBACK_MAX_CURRENT_MA]),
-        )
-
-        controller.update({4: 0.03, 5: 0.03}, [0.4, 0.5, 0.6])
-        self.assertEqual(hand.disabled, [[4], [5]])
-        # Motor 5 has a negative calibration sign, so its raw current is reversed.
-        self.assertEqual(
-            hand.dxl_client.sync_writes[-1][0:2],
-            ([5], [FORCE_FEEDBACK_MAX_CURRENT_MA]),
-        )
-
-    def test_release_restores_mode_five_and_stays_torque_free(self):
-        hand = FakeHand()
-        controller = self.controller(hand)
-        controller.update({4: 0.03}, [0.4, 0.5, 0.6])
-
-        controller.update({4: 0.0}, [0.45, 0.5, 0.6])
-
-        self.assertEqual(hand.enabled, [[4]])
-        self.assertEqual(hand.disabled, [[4], [4]])
+        self.assertEqual(hand.disabled, [[4, 5, 6]])
+        self.assertEqual(hand.enabled, [[4, 5, 6]])
         self.assertIn(
             (
-                [4],
-                [ct.OPERATING_MODE_CURRENT_BASED_POSITION],
+                [4, 5, 6],
+                [ct.OPERATING_MODE_CURRENT] * 3,
                 ct.ADDR_OPERATING_MODE,
                 ct.LEN_OPERATING_MODE,
             ),
             hand.dxl_client.sync_writes,
         )
-        self.assertEqual(hand.dxl_client.position_writes, [([4], [0.55])])
+
+    def test_contact_currents_are_batched_and_apply_joint_signs(self):
+        hand = FakeHand()
+        controller = self.controller(hand)
+        controller.start([0.4, 0.5, 0.6])
+
+        controller.update({4: 0.03, 5: 0.0}, [0.4, 0.5, 0.6])
+
         self.assertEqual(
-            hand.dxl_client.sync_writes[-1],
+            hand.dxl_client.sync_writes[-1][0:2],
+            ([4, 5, 6], [-FORCE_FEEDBACK_MAX_CURRENT_MA, 0, 0]),
+        )
+
+        controller.update({4: 0.03, 5: 0.03}, [0.4, 0.5, 0.6])
+        # Motor 5 has a negative calibration sign, so its raw current is reversed.
+        self.assertEqual(
+            hand.dxl_client.sync_writes[-1][0:2],
             (
-                [4],
-                [FORCE_FEEDBACK_MAX_CURRENT_MA],
-                ct.ADDR_GOAL_CURRENT,
-                ct.LEN_GOAL_CURRENT,
+                [4, 5, 6],
+                [-FORCE_FEEDBACK_MAX_CURRENT_MA, FORCE_FEEDBACK_MAX_CURRENT_MA, 0],
             ),
         )
 
-    def test_shutdown_restores_every_active_joint(self):
+    def test_unchanged_currents_do_not_repeat_bus_write(self):
         hand = FakeHand()
         controller = self.controller(hand)
+        controller.start([0.4, 0.5, 0.6])
+        controller.update({4: 0.03}, [0.4, 0.5, 0.6])
+        write_count = len(hand.dxl_client.sync_writes)
+
+        controller.update({4: 0.03}, [0.45, 0.5, 0.6])
+
+        self.assertEqual(len(hand.dxl_client.sync_writes), write_count)
+
+    def test_release_writes_zero_but_remains_in_current_mode(self):
+        hand = FakeHand()
+        controller = self.controller(hand)
+        controller.start([0.4, 0.5, 0.6])
+        controller.update({4: 0.03}, [0.4, 0.5, 0.6])
+
+        controller.update({4: 0.0}, [0.45, 0.5, 0.6])
+
+        self.assertEqual(hand.disabled, [[4, 5, 6]])
+        self.assertEqual(hand.enabled, [[4, 5, 6]])
+        self.assertEqual(hand.dxl_client.sync_writes[-1][0:2], ([4, 5, 6], [0, 0, 0]))
+
+    def test_shutdown_restores_all_feedback_joints_in_batches(self):
+        hand = FakeHand()
+        controller = self.controller(hand)
+        controller.start([0.4, 0.5, 0.6])
         controller.update({4: 0.01, 5: -0.01}, [0.4, 0.5, 0.6])
 
         controller.shutdown()
 
-        self.assertEqual(hand.enabled, [[4], [5]])
-        self.assertEqual(hand.disabled, [[4], [5], [4], [5]])
+        self.assertEqual(hand.enabled, [[4, 5, 6]])
+        self.assertEqual(hand.disabled, [[4, 5, 6], [4, 5, 6]])
+        self.assertIn(
+            (
+                [4, 5, 6],
+                [ct.OPERATING_MODE_CURRENT_BASED_POSITION] * 3,
+                ct.ADDR_OPERATING_MODE,
+                ct.LEN_OPERATING_MODE,
+            ),
+            hand.dxl_client.sync_writes,
+        )
+        self.assertEqual(hand.dxl_client.position_writes[0][0], [4, 5, 6])
+        np.testing.assert_allclose(
+            hand.dxl_client.position_writes[0][1],
+            [0.5, -0.3, 0.9],
+        )
 
     def test_tactile_contact_applies_constant_current_to_the_whole_digit(self):
         hand = FakeHand()
         controller = self.controller(hand)
+        controller.start([0.4, 0.5, 0.6])
 
         controller.update(
             {4: 0.03, 5: -0.03},
@@ -195,14 +226,19 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
         goal_writes = [
             (motor_ids, currents)
             for motor_ids, currents, address, _size in hand.dxl_client.sync_writes
-            if address == ct.ADDR_GOAL_CURRENT and currents != [0]
+            if address == ct.ADDR_GOAL_CURRENT and any(currents)
         ]
         self.assertEqual(
             goal_writes,
             [
-                ([4], [TACTILE_FORCE_FEEDBACK_CURRENT_MA]),
-                ([5], [-TACTILE_FORCE_FEEDBACK_CURRENT_MA]),
-                ([6], [TACTILE_FORCE_FEEDBACK_CURRENT_MA]),
+                (
+                    [4, 5, 6],
+                    [
+                        TACTILE_FORCE_FEEDBACK_CURRENT_MA,
+                        -TACTILE_FORCE_FEEDBACK_CURRENT_MA,
+                        TACTILE_FORCE_FEEDBACK_CURRENT_MA,
+                    ],
+                ),
             ],
         )
 

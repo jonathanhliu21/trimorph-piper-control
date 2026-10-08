@@ -192,6 +192,9 @@ class EpisodeBuffer:
                 "active_motors": list(self.config.active_motors),
                 "hand": _hand_metadata(self.config.hand_config, self.config.hand_port),
                 "measure_rate_hz": self.config.hand_measure_rate_hz,
+                "force_feedback_rate_hz": getattr(
+                    self.config, "force_feedback_rate_hz", None
+                ),
                 "training_uses": "measured positions from leader_hand.csv",
             },
             "follower": {

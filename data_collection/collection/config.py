@@ -81,6 +81,7 @@ class CollectionConfig:
     # TRIMORPH motor ID -> MIDAS motor ID; omitted entries use the same ID.
     force_feedback_source_motor_ids: dict[int, int] = field(default_factory=dict)
     force_feedback_max_current_ma: float = 100.0
+    force_feedback_rate_hz: float = 50.0
     force_feedback_full_scale_error_rad: float = 0.01
     follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
     follower_profile_acceleration_rad_s2: float = (
@@ -91,7 +92,7 @@ class CollectionConfig:
         (4, 5, 6),
         (7, 8, 9),
         (10, 11, 12),
-        (0, 1, 2, 3),
+        (0, 1),
     )
 
 
@@ -115,10 +116,10 @@ def build_config() -> CollectionConfig:
         video_codec="mp4v",
         hand_config=Path("config/hand.yaml"),
         hand_port="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND",
-        hand_measure_rate_hz=100.0,
+        hand_measure_rate_hz=50.0,
         follower_hand_config=None,
         follower_hand_port=None,
-        follower_measure_rate_hz=200.0,
+        follower_measure_rate_hz=100.0,
         follower_command_rate_hz=50.0,
         follower_configure_hardware=True,
         follower_command_scale=1.0,
@@ -168,6 +169,7 @@ def validate_config(config: CollectionConfig, *, require_runtime_modules: bool =
     for name, value in {
         "READY_SECONDS": config.ready_seconds,
         "HAND_MEASURE_RATE_HZ": config.hand_measure_rate_hz,
+        "FORCE_FEEDBACK_RATE_HZ": config.force_feedback_rate_hz,
         "PIPER_RATE_HZ": config.piper_rate_hz,
         "TEACHER_MODE_POLL_HZ": config.teacher_mode_poll_hz,
     }.items():

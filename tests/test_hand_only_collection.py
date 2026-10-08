@@ -6,6 +6,9 @@ from unittest.mock import patch
 
 from collect_hand_only import (
     DATA_COLLECTION_MODE,
+    DEFAULT_FOLLOWER_MEASURE_RATE_HZ,
+    DEFAULT_FORCE_FEEDBACK_RATE_HZ,
+    DEFAULT_HAND_MEASURE_RATE_HZ,
     FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
     FORCE_FEEDBACK_MAX_CURRENT_MA,
     RETARGET_ONLY_MODE,
@@ -22,6 +25,22 @@ from collection.config import TRIMORPH_MOTOR_IDS
 
 
 class HandOnlyCollectionTests(unittest.TestCase):
+    def test_bus_rates_default_to_reduced_values(self):
+        config = HandOnlyCollectionConfig(
+            dataset_root=Path("data_trimorph"),
+            hand_config=Path("config/hand.yaml"),
+            hand_port="/dev/hand",
+            hand_measure_rate_hz=DEFAULT_HAND_MEASURE_RATE_HZ,
+            warmup_time=0.0,
+            episode_time=30.0,
+        )
+
+        self.assertEqual(config.hand_measure_rate_hz, 50.0)
+        self.assertEqual(config.force_feedback_rate_hz, 50.0)
+        self.assertEqual(config.follower_measure_rate_hz, 100.0)
+        self.assertEqual(DEFAULT_FORCE_FEEDBACK_RATE_HZ, 50.0)
+        self.assertEqual(DEFAULT_FOLLOWER_MEASURE_RATE_HZ, 100.0)
+
     def test_force_feedback_tuning_lives_in_hand_only_config(self):
         config = HandOnlyCollectionConfig(
             dataset_root=Path("data_trimorph"),

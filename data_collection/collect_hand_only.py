@@ -24,7 +24,9 @@ from collection.utils import WorkerError, worker_wrapper
 WORKER_INIT_TIMEOUT_S = 60.0
 DEFAULT_DEMONSTRATION_DURATION_S = 30.0
 DEFAULT_WARMUP_TIME_S = 5.0
-DEFAULT_HAND_MEASURE_RATE_HZ = 100.0
+DEFAULT_HAND_MEASURE_RATE_HZ = 50.0
+DEFAULT_FOLLOWER_MEASURE_RATE_HZ = 100.0
+DEFAULT_FORCE_FEEDBACK_RATE_HZ = 50.0
 DEFAULT_HAND_CONFIG = Path("config/hand.yaml")
 DEFAULT_HAND_PORT = "/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND"
 FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
@@ -36,14 +38,11 @@ DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
 PIP_SCALE = 0.4
 MCP_SCALE = 0.5
 
-FORCE_FEEDBACK_MOTOR_IDS = tuple(range(13))
-# Map each TRIMORPH feedback joint to the MIDAS joint that supplies its contact
-# error.  The thumb's last two joints are mechanically paired in reverse order.
+FORCE_FEEDBACK_MOTOR_IDS = (0, 1, *range(4, 13))
+# Map each enabled TRIMORPH thumb joint to its MIDAS contact-error source.
 FORCE_FEEDBACK_SOURCE_MOTOR_IDS = {
     0: 0,
     1: 1,
-    2: 3,
-    3: 2,
 }
 FORCE_FEEDBACK_MAX_CURRENT_MA = 100.0
 FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD = 0.01
@@ -52,7 +51,7 @@ TACTILE_FORCE_FEEDBACK_MOTOR_IDS = (
     (4, 5, 6),
     (7, 8, 9),
     (10, 11, 12),
-    (0, 1, 2, 3),
+    (0, 1),
 )
 
 
@@ -75,6 +74,7 @@ class HandOnlyCollectionConfig:
         default_factory=lambda: dict(FORCE_FEEDBACK_SOURCE_MOTOR_IDS)
     )
     force_feedback_max_current_ma: float = FORCE_FEEDBACK_MAX_CURRENT_MA
+    force_feedback_rate_hz: float = DEFAULT_FORCE_FEEDBACK_RATE_HZ
     force_feedback_full_scale_error_rad: float = (
         FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD
     )
@@ -87,7 +87,7 @@ class HandOnlyCollectionConfig:
     )
     follower_hand_config: Path | None = None
     follower_hand_port: str | None = None
-    follower_measure_rate_hz: float = 200.0
+    follower_measure_rate_hz: float = DEFAULT_FOLLOWER_MEASURE_RATE_HZ
     follower_command_rate_hz: float = 50.0
     follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
     follower_profile_acceleration_rad_s2: float = (

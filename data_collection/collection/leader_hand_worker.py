@@ -37,7 +37,7 @@ def force_feedback_current_ma(
 
 
 class TrimorphForceFeedbackController:
-    """Drive selected TRIMORPH joints in current mode while contact is active."""
+    """Keep TRIMORPH joints in current mode and batch their feedback commands."""
 
     def __init__(
         self,
@@ -78,7 +78,8 @@ class TrimorphForceFeedbackController:
             int(trimorph_id): int(midas_id)
             for trimorph_id, midas_id in (feedback_source_motor_ids or {}).items()
         }
-        self._current_mode_ids: set[int] = set()
+        self._current_mode_configured = False
+        self._last_raw_currents: tuple[int, ...] | None = None
         self._latest_positions: np.ndarray | None = None
 
         self._max_current_ma = float(max_current_ma)
@@ -117,16 +118,34 @@ class TrimorphForceFeedbackController:
                 f"exceeds configured motor limit {hand.config.max_current_limit_ma} mA"
             )
 
+    def start(self, positions: Sequence[float]) -> None:
+        """Configure all feedback joints once and leave them in current mode."""
+
+        self._set_latest_positions(positions)
+        motor_ids = list(self._feedback_motor_ids)
+        if not motor_ids:
+            return
+        self.hand.disable_torque(motor_ids)
+        self.client.sync_write(
+            motor_ids,
+            [ct.OPERATING_MODE_CURRENT] * len(motor_ids),
+            ct.ADDR_OPERATING_MODE,
+            ct.LEN_OPERATING_MODE,
+        )
+        self._current_mode_configured = True
+        self._write_raw_currents([0] * len(motor_ids), force=True)
+        self.hand.enable_torque(motor_ids)
+        print(f"TRIMORPH force feedback ready for motors {motor_ids}")
+
     def update(
         self,
         feedback_by_motor_id: Mapping[int, float],
         positions: Sequence[float],
         tactile_contacts: Sequence[bool] | None = None,
     ) -> None:
-        positions_array = np.asarray(positions, dtype=np.float64)
-        if positions_array.shape != (len(self._motor_indices),):
-            raise ValueError("Leader positions do not align with leader motor IDs")
-        self._latest_positions = positions_array.copy()
+        self._set_latest_positions(positions)
+        if self._feedback_motor_ids and not self._current_mode_configured:
+            raise RuntimeError("Force feedback must be started before update")
 
         tactile_feedback_ids: set[int] = set()
         if tactile_contacts is not None:
@@ -141,6 +160,7 @@ class TrimorphForceFeedbackController:
                 for motor_id in digit_ids
             }
 
+        calibrated_currents: list[float] = []
         for motor_id in self._feedback_motor_ids:
             if motor_id in tactile_feedback_ids:
                 current_ma = self._tactile_current_ma
@@ -153,118 +173,93 @@ class TrimorphForceFeedbackController:
                     max_current_ma=self._max_current_ma,
                     full_scale_error_rad=self._full_scale_error_rad,
                 )
-            if current_ma == 0.0:
-                if motor_id in self._current_mode_ids:
-                    self._restore_current_based_position_mode(motor_id)
-                continue
-
-            if motor_id not in self._current_mode_ids:
-                self._enter_current_mode(motor_id)
-            self._write_current_ma(motor_id, current_ma)
+            calibrated_currents.append(current_ma)
+        self._write_calibrated_currents(calibrated_currents)
 
     def shutdown(self) -> None:
         """Make all touched joints torque-free and restore operating mode 5."""
 
-        errors: list[Exception] = []
-        for motor_id in tuple(self._current_mode_ids):
-            try:
-                self._restore_current_based_position_mode(motor_id)
-            except Exception as exc:  # preserve cleanup attempts for other joints
-                errors.append(exc)
-        if errors:
-            raise RuntimeError(
-                "Failed to restore one or more force-feedback joints"
-            ) from errors[0]
-
-    def _enter_current_mode(self, motor_id: int) -> None:
-        self.hand.disable_torque([motor_id])
-        # Mark it before the register write so shutdown still attempts a safe
-        # restoration if communication fails after the mode may have changed.
-        self._current_mode_ids.add(motor_id)
-        self.client.sync_write(
-            [motor_id],
-            [ct.OPERATING_MODE_CURRENT],
-            ct.ADDR_OPERATING_MODE,
-            ct.LEN_OPERATING_MODE,
-        )
-        self._write_current_ma(motor_id, 0.0)
-        self.hand.enable_torque([motor_id])
-        print(f"TRIMORPH force feedback engaged for motor {motor_id}")
-
-    def _restore_current_based_position_mode(self, motor_id: int) -> None:
+        if not self._current_mode_configured:
+            return
+        motor_ids = list(self._feedback_motor_ids)
         errors: list[Exception] = []
         try:
-            self._write_current_ma(motor_id, 0.0)
+            self._write_raw_currents([0] * len(motor_ids), force=True)
         except Exception as exc:
             errors.append(exc)
-
-        torque_disabled = False
         try:
-            self.hand.disable_torque([motor_id])
-            torque_disabled = True
+            self.hand.disable_torque(motor_ids)
         except Exception as exc:
             errors.append(exc)
-
-        mode_restored = False
-        if torque_disabled:
+        try:
+            self.client.sync_write(
+                motor_ids,
+                [ct.OPERATING_MODE_CURRENT_BASED_POSITION] * len(motor_ids),
+                ct.ADDR_OPERATING_MODE,
+                ct.LEN_OPERATING_MODE,
+            )
+            self._current_mode_configured = False
+        except Exception as exc:
+            errors.append(exc)
+        if self._latest_positions is not None:
+            indices = [self._motor_indices[motor_id] for motor_id in motor_ids]
+            raw_positions = (
+                self._latest_positions[indices] * self._joint_signs[indices]
+                + self._home_offsets[indices]
+            )
             try:
-                self.client.sync_write(
-                    [motor_id],
-                    [ct.OPERATING_MODE_CURRENT_BASED_POSITION],
-                    ct.ADDR_OPERATING_MODE,
-                    ct.LEN_OPERATING_MODE,
-                )
-                mode_restored = True
+                self.client.write_desired_pos(motor_ids, raw_positions)
             except Exception as exc:
                 errors.append(exc)
-
-        # Seed the position goal from the current calibrated joint position so a
-        # later torque enable cannot pull the finger toward a stale target.
-        if self._latest_positions is None:
-            raise RuntimeError("Cannot restore force-feedback mode without a position")
-        index = self._motor_indices[motor_id]
-        raw_position = (
-            self._latest_positions[index] * self._joint_signs[index]
-            + self._home_offsets[index]
-        )
-        if mode_restored:
-            try:
-                self.client.write_desired_pos([motor_id], [raw_position])
-            except Exception as exc:
-                errors.append(exc)
-        current_limit_raw = int(self._max_current_ma / self._current_unit_ma)
-        if mode_restored:
-            try:
-                self.client.sync_write(
-                    [motor_id],
-                    [current_limit_raw],
-                    ct.ADDR_GOAL_CURRENT,
-                    ct.LEN_GOAL_CURRENT,
-                )
-            except Exception as exc:
-                errors.append(exc)
-
-        if mode_restored:
-            self._current_mode_ids.discard(motor_id)
+        try:
+            current_limit_raw = int(self._max_current_ma / self._current_unit_ma)
+            self.client.sync_write(
+                motor_ids,
+                [current_limit_raw] * len(motor_ids),
+                ct.ADDR_GOAL_CURRENT,
+                ct.LEN_GOAL_CURRENT,
+            )
+        except Exception as exc:
+            errors.append(exc)
         if errors:
             raise RuntimeError(
-                f"Failed to fully restore force-feedback motor {motor_id}"
+                "Failed to fully restore force-feedback motors"
             ) from errors[0]
-        print(f"TRIMORPH force feedback released for motor {motor_id}")
+        print(f"TRIMORPH force feedback restored for motors {motor_ids}")
 
-    def _write_current_ma(self, motor_id: int, calibrated_current_ma: float) -> None:
-        index = self._motor_indices[motor_id]
-        raw_current = int(
-            float(calibrated_current_ma)
-            * self._joint_signs[index]
-            / self._current_unit_ma
-        )
+    def _set_latest_positions(self, positions: Sequence[float]) -> None:
+        positions_array = np.asarray(positions, dtype=np.float64)
+        if positions_array.shape != (len(self._motor_indices),):
+            raise ValueError("Leader positions do not align with leader motor IDs")
+        if not np.isfinite(positions_array).all():
+            raise ValueError("Leader positions must be finite")
+        self._latest_positions = positions_array.copy()
+
+    def _write_calibrated_currents(self, currents_ma: Sequence[float]) -> None:
+        raw_currents = []
+        for motor_id, current_ma in zip(self._feedback_motor_ids, currents_ma):
+            index = self._motor_indices[motor_id]
+            raw_current = (
+                float(current_ma)
+                * self._joint_signs[index]
+                / self._current_unit_ma
+            )
+            raw_currents.append(int(raw_current))
+        self._write_raw_currents(raw_currents)
+
+    def _write_raw_currents(
+        self, raw_currents: Sequence[int], *, force: bool = False
+    ) -> None:
+        values = tuple(int(value) for value in raw_currents)
+        if not force and values == self._last_raw_currents:
+            return
         self.client.sync_write(
-            [motor_id],
-            [raw_current],
+            self._feedback_motor_ids,
+            values,
             ct.ADDR_GOAL_CURRENT,
             ct.LEN_GOAL_CURRENT,
         )
+        self._last_raw_currents = values
 
 
 def run_leader_hand_worker(
@@ -281,7 +276,6 @@ def run_leader_hand_worker(
     )
     hand = MidasHand(config=hand_config, autoconnect=True)
     verify_connected_hand(hand, role="primary")
-    hand.disable_torque()
     force_feedback = TrimorphForceFeedbackController(
         hand,
         feedback_motor_ids=config.force_feedback_motor_ids,
@@ -293,17 +287,23 @@ def run_leader_hand_worker(
             config, "force_feedback_source_motor_ids", None
         ),
     )
-    print(
-        f"TRIMORPH hand connected on {hand.port}; model={hand.config.motor_model}; "
-        f"baud={hand.config.baudrate}; motor_ids={hand.motor_ids}"
-    )
-    init_done.set()
-
     period_ns = int(round(1_000_000_000 / config.hand_measure_rate_hz))
+    feedback_period_ns = int(
+        round(1_000_000_000 / config.force_feedback_rate_hz)
+    )
     next_read_ns = time.monotonic_ns()
+    next_feedback_ns = next_read_ns
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
     try:
+        initial_positions = np.asarray(hand.read_pos(), dtype=np.float64)
+        force_feedback.start(initial_positions)
+        print(
+            f"TRIMORPH hand connected on {hand.port}; "
+            f"model={hand.config.motor_model}; baud={hand.config.baudrate}; "
+            f"motor_ids={hand.motor_ids}"
+        )
+        init_done.set()
         while not shared.shutdown.is_set():
             now_ns = time.monotonic_ns()
             if now_ns < next_read_ns:
@@ -320,11 +320,15 @@ def run_leader_hand_worker(
             if not np.isfinite(positions).all():
                 raise RuntimeError("Hand read returned NaN or Inf")
             shared.set_hand_target(positions)
-            force_feedback.update(
-                shared.latest_follower_position_error_by_motor_id(),
-                positions,
-                shared.latest_tactile_contacts(),
-            )
+            if sample_ns >= next_feedback_ns:
+                force_feedback.update(
+                    shared.latest_follower_position_error_by_motor_id(),
+                    positions,
+                    shared.latest_tactile_contacts(),
+                )
+                next_feedback_ns += feedback_period_ns
+                while next_feedback_ns < sample_ns:
+                    next_feedback_ns += feedback_period_ns
 
             session = recorder.current()
             if session is not None:
