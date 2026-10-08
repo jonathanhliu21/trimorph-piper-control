@@ -36,7 +36,15 @@ DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
 PIP_SCALE = 0.4
 MCP_SCALE = 0.5
 
-FORCE_FEEDBACK_MOTOR_IDS = tuple(range(4, 13))
+FORCE_FEEDBACK_MOTOR_IDS = tuple(range(13))
+# Map each TRIMORPH feedback joint to the MIDAS joint that supplies its contact
+# error.  The thumb's last two joints are mechanically paired in reverse order.
+FORCE_FEEDBACK_SOURCE_MOTOR_IDS = {
+    0: 0,
+    1: 1,
+    2: 3,
+    3: 2,
+}
 FORCE_FEEDBACK_MAX_CURRENT_MA = 100.0
 FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD = 0.01
 TACTILE_FORCE_FEEDBACK_CURRENT_MA = 50.0
@@ -63,6 +71,9 @@ class HandOnlyCollectionConfig:
     paxini_port: str | None = None
     tactile_debug_log: Path | None = None
     force_feedback_motor_ids: tuple[int, ...] = FORCE_FEEDBACK_MOTOR_IDS
+    force_feedback_source_motor_ids: dict[int, int] = field(
+        default_factory=lambda: dict(FORCE_FEEDBACK_SOURCE_MOTOR_IDS)
+    )
     force_feedback_max_current_ma: float = FORCE_FEEDBACK_MAX_CURRENT_MA
     force_feedback_full_scale_error_rad: float = (
         FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD

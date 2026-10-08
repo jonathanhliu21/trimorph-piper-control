@@ -48,6 +48,7 @@ class TrimorphForceFeedbackController:
         full_scale_error_rad: float,
         tactile_current_ma: float,
         tactile_motor_ids: Sequence[Sequence[int]],
+        feedback_source_motor_ids: Mapping[int, int] | None = None,
     ) -> None:
         self.hand = hand
         self.client = hand.dxl_client
@@ -73,6 +74,10 @@ class TrimorphForceFeedbackController:
             for motor_id in eligible_motor_ids
             if motor_id in self._motor_indices
         )
+        self._feedback_source_motor_ids = {
+            int(trimorph_id): int(midas_id)
+            for trimorph_id, midas_id in (feedback_source_motor_ids or {}).items()
+        }
         self._current_mode_ids: set[int] = set()
         self._latest_positions: np.ndarray | None = None
 
@@ -140,8 +145,11 @@ class TrimorphForceFeedbackController:
             if motor_id in tactile_feedback_ids:
                 current_ma = self._tactile_current_ma
             else:
+                source_motor_id = self._feedback_source_motor_ids.get(
+                    motor_id, motor_id
+                )
                 current_ma = force_feedback_current_ma(
-                    feedback_by_motor_id.get(motor_id, 0.0),
+                    feedback_by_motor_id.get(source_motor_id, 0.0),
                     max_current_ma=self._max_current_ma,
                     full_scale_error_rad=self._full_scale_error_rad,
                 )
@@ -281,6 +289,9 @@ def run_leader_hand_worker(
         full_scale_error_rad=config.force_feedback_full_scale_error_rad,
         tactile_current_ma=config.tactile_force_feedback_current_ma,
         tactile_motor_ids=config.tactile_force_feedback_motor_ids,
+        feedback_source_motor_ids=getattr(
+            config, "force_feedback_source_motor_ids", None
+        ),
     )
     print(
         f"TRIMORPH hand connected on {hand.port}; model={hand.config.motor_model}; "

@@ -8,6 +8,7 @@ from collect_hand_only import (
     FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
     FORCE_FEEDBACK_MAX_CURRENT_MA,
     FORCE_FEEDBACK_MOTOR_IDS,
+    FORCE_FEEDBACK_SOURCE_MOTOR_IDS,
     TACTILE_FORCE_FEEDBACK_CURRENT_MA,
     TACTILE_FORCE_FEEDBACK_MOTOR_IDS,
 )
@@ -49,6 +50,14 @@ class FakeHand:
         self.disabled.append(list(motor_ids))
 
 
+class FakeThumbHand(FakeHand):
+    def __init__(self):
+        super().__init__()
+        self.motor_ids = [0, 1, 2, 3]
+        self.config.joint_signs_array = np.ones(4)
+        self.config.home_offsets_array = np.zeros(4)
+
+
 class ForceFeedbackCurrentTests(unittest.TestCase):
     @staticmethod
     def controller(hand):
@@ -59,10 +68,36 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
             full_scale_error_rad=FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
             tactile_current_ma=TACTILE_FORCE_FEEDBACK_CURRENT_MA,
             tactile_motor_ids=TACTILE_FORCE_FEEDBACK_MOTOR_IDS,
+            feedback_source_motor_ids=FORCE_FEEDBACK_SOURCE_MOTOR_IDS,
         )
 
-    def test_force_feedback_covers_all_finger_joints(self):
-        self.assertEqual(FORCE_FEEDBACK_MOTOR_IDS, tuple(range(4, 13)))
+    def test_force_feedback_covers_thumb_and_all_finger_joints(self):
+        self.assertEqual(FORCE_FEEDBACK_MOTOR_IDS, tuple(range(13)))
+
+    def test_thumb_feedback_swaps_midas_joints_two_and_three(self):
+        self.assertEqual(
+            FORCE_FEEDBACK_SOURCE_MOTOR_IDS,
+            {0: 0, 1: 1, 2: 3, 3: 2},
+        )
+
+        hand = FakeThumbHand()
+        controller = self.controller(hand)
+        controller.update(
+            {0: 0.0, 1: 0.0, 2: 0.01, 3: -0.01},
+            [0.0, 0.0, 0.0, 0.0],
+        )
+        goal_writes = [
+            (motor_ids, currents)
+            for motor_ids, currents, address, _size in hand.dxl_client.sync_writes
+            if address == ct.ADDR_GOAL_CURRENT and currents != [0]
+        ]
+        self.assertEqual(
+            goal_writes,
+            [
+                ([2], [FORCE_FEEDBACK_MAX_CURRENT_MA]),
+                ([3], [-FORCE_FEEDBACK_MAX_CURRENT_MA]),
+            ],
+        )
 
     def test_linear_opposing_current_and_saturation(self):
         kwargs = {

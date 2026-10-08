@@ -60,6 +60,15 @@ class PrepareFollowerHandTests(unittest.TestCase):
         ]
         np.testing.assert_allclose(adjusted, expected)
 
+    def test_contact_error_includes_all_thumb_motors(self):
+        adjusted = adjusted_follower_position_error(
+            motor_ids=(0, 1, 2, 3),
+            target_positions=[0.2] * 4,
+            measured_positions=[0.0] * 4,
+        )
+
+        np.testing.assert_allclose(adjusted, [0.2 - CONTACT_EXIT_THRESHOLD] * 4)
+
     def test_contact_error_is_zero_below_exit_threshold(self):
         adjusted = adjusted_follower_position_error(
             motor_ids=(4, 5, 6),

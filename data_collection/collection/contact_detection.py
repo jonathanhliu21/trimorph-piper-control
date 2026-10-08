@@ -6,8 +6,8 @@ from enum import Enum
 import numpy as np
 
 
-# PIP, MCP, and AB/AD joints for fingers 1, 2, and 3.
-CONTACT_MOTOR_IDS = tuple(range(4, 13))
+# All thumb and finger joints.
+CONTACT_MOTOR_IDS = tuple(range(13))
 CONTACT_ENTER_THRESHOLD = 0.05  # rad
 CONTACT_EXIT_THRESHOLD = 0.03  # rad
 # Compatibility name for callers that use the contact-entry threshold.

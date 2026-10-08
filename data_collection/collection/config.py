@@ -78,6 +78,8 @@ class CollectionConfig:
         default_factory=default_follower_joint_command_scales
     )
     force_feedback_motor_ids: tuple[int, ...] = tuple(range(4, 13))
+    # TRIMORPH motor ID -> MIDAS motor ID; omitted entries use the same ID.
+    force_feedback_source_motor_ids: dict[int, int] = field(default_factory=dict)
     force_feedback_max_current_ma: float = 100.0
     force_feedback_full_scale_error_rad: float = 0.01
     follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
