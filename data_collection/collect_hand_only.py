@@ -28,6 +28,9 @@ DATA_COLLECTION_MODE = "data_collection"
 RETARGET_ONLY_MODE = "retarget_only"
 DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
 
+PIP_SCALE = 0.4
+MCP_SCALE = 0.5
+
 
 @dataclass(frozen=True)
 class HandOnlyCollectionConfig:
@@ -58,14 +61,14 @@ class HandOnlyCollectionConfig:
             1: 1.0,
             2: 1.0,
             3: 1.0,
-            4: 0.20,
-            5: 0.5,
+            4: PIP_SCALE,
+            5: MCP_SCALE,
             6: 1.0,
-            7: 0.2,
-            8: 0.5,
+            7: PIP_SCALE,
+            8: MCP_SCALE,
             9: 1.0,
-            10: 0.2,
-            11: 0.5,
+            10: PIP_SCALE,
+            11: MCP_SCALE,
             12: 1.0,
         }
     )

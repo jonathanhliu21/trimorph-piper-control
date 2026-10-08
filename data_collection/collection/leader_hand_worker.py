@@ -8,12 +8,13 @@ import numpy as np
 from midas_hand_api.actuators import control_table as ct
 
 from .config import CollectionConfig
+from .contact_detection import CONTACT_MOTOR_IDS
 from .episode import EpisodeBuffer, RecordingManager
 from .hand_common import load_hand_config, verify_connected_hand
 from .shared_state import SharedState
 
 
-FORCE_FEEDBACK_MOTOR_IDS = (4, 5)
+FORCE_FEEDBACK_MOTOR_IDS = CONTACT_MOTOR_IDS
 FORCE_FEEDBACK_MAX_CURRENT_MA = 100.0
 FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD = 0.01
 

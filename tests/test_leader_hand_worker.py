@@ -5,6 +5,7 @@ import numpy as np
 from midas_hand_api.actuators import control_table as ct
 
 from collection.leader_hand_worker import (
+    FORCE_FEEDBACK_MOTOR_IDS,
     FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
     FORCE_FEEDBACK_MAX_CURRENT_MA,
     TrimorphForceFeedbackController,
@@ -45,6 +46,9 @@ class FakeHand:
 
 
 class ForceFeedbackCurrentTests(unittest.TestCase):
+    def test_force_feedback_covers_all_finger_joints(self):
+        self.assertEqual(FORCE_FEEDBACK_MOTOR_IDS, tuple(range(4, 13)))
+
     def test_linear_opposing_current_and_saturation(self):
         self.assertEqual(force_feedback_current_ma(0.0), 0.0)
         half_scale_error = FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD / 2.0

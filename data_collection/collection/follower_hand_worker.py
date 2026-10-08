@@ -33,7 +33,7 @@ def adjusted_follower_position_error(
     target_positions,
     measured_positions,
 ) -> np.ndarray:
-    """Return exit-deadband error for motors 4 and 5 in follower order."""
+    """Return exit-deadband error for all finger motors in follower order."""
 
     motor_ids = tuple(int(motor_id) for motor_id in motor_ids)
     targets = np.asarray(target_positions, dtype=np.float64)
@@ -62,7 +62,7 @@ def follower_contact_detection_ready(
     target_positions,
     measured_positions,
 ) -> bool:
-    """Return whether motors 4 and 5 have reached the initial target."""
+    """Return whether all contact-feedback motors reached the initial target."""
 
     motor_ids = tuple(int(motor_id) for motor_id in motor_ids)
     targets = np.asarray(target_positions, dtype=np.float64)

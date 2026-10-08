@@ -27,11 +27,20 @@ from scripts.trimorph_api_test.hand_ui import (
     _threshold_normalized_joint_difference,
     _ui_order_indices,
     _validated_default_targets,
+    contact_feedback as ui_contact_feedback,
 )
 from data_collection.collection.live_contact_widget import contact_vectors_by_motor_id
+from data_collection.collection.follower_hand_worker import (
+    ContactStateMachine as FollowerContactStateMachine,
+    contact_feedback as follower_contact_feedback,
+)
 
 
 class ContactTuningTests(unittest.TestCase):
+    def test_follower_worker_reuses_ui_contact_detection_model(self):
+        self.assertIs(FollowerContactStateMachine, ContactStateMachine)
+        self.assertIs(follower_contact_feedback, ui_contact_feedback)
+
     def test_custom_settings_are_applied_to_all_detectors(self):
         settings = ContactDetectorSettings(
             max_velocity_rad_s=2.0,
