@@ -83,12 +83,18 @@ def follower_contact_detection_ready(
     )
 
 
-def prepare_follower_hand(hand, *, configure_hardware: bool) -> None:
+def prepare_follower_hand(
+    hand,
+    *,
+    configure_hardware: bool,
+    profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S,
+    profile_acceleration_rad_s2: float = FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
+) -> None:
     if configure_hardware:
         hand.configure(enable_torque=False)
     hand.set_motion_profile(
-        profile_velocity_rad_s=FOLLOWER_PROFILE_VELOCITY_RAD_S,
-        profile_acceleration_rad_s2=FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
+        profile_velocity_rad_s=profile_velocity_rad_s,
+        profile_acceleration_rad_s2=profile_acceleration_rad_s2,
     )
 
 
@@ -136,7 +142,12 @@ def run_follower_hand_worker(
     hand = MidasHand(config=hand_config, autoconnect=True)
     verify_connected_hand(hand, role="follower")
     prepare_follower_hand(
-        hand, configure_hardware=config.follower_configure_hardware
+        hand,
+        configure_hardware=config.follower_configure_hardware,
+        profile_velocity_rad_s=config.follower_profile_velocity_rad_s,
+        profile_acceleration_rad_s2=(
+            config.follower_profile_acceleration_rad_s2
+        ),
     )
     last_command = hand.clip_positions(hand.read_pos())
     hand.set_positions(last_command, clip=True)

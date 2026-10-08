@@ -80,6 +80,10 @@ class CollectionConfig:
     force_feedback_motor_ids: tuple[int, ...] = tuple(range(4, 13))
     force_feedback_max_current_ma: float = 100.0
     force_feedback_full_scale_error_rad: float = 0.01
+    follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
+    follower_profile_acceleration_rad_s2: float = (
+        FOLLOWER_PROFILE_ACCELERATION_RAD_S2
+    )
     tactile_force_feedback_current_ma: float = 50.0
     tactile_force_feedback_motor_ids: tuple[tuple[int, ...], ...] = (
         (4, 5, 6),

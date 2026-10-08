@@ -8,7 +8,9 @@ import numpy as np
 
 from collection.thumb_retargeting import ThumbRetargetModel
 from replay_episode import (
+    build_replay_config,
     build_replay_hand_config,
+    config_values_for_motor_ids,
     load_hand_stream,
     load_piper_stream,
     replay_interval,
@@ -21,6 +23,35 @@ from replay_episode import (
 
 
 class ReplayEpisodeTests(unittest.TestCase):
+    def test_replay_uses_hand_only_collection_config(self):
+        with patch(
+            "sys.argv",
+            [
+                "replay_episode.py",
+                "--dataset-root",
+                "dataset",
+                "--hand-config",
+                "midas.yaml",
+                "--hand-port",
+                "/dev/midas",
+            ],
+        ):
+            config = build_replay_config(parse_args(), (4, 5, 12))
+
+        self.assertEqual(config.dataset_root, Path("dataset"))
+        self.assertEqual(config.hand_config, Path("midas.yaml"))
+        self.assertEqual(config.hand_port, "/dev/midas")
+        self.assertEqual(config.active_motors, [4, 5, 12])
+        self.assertEqual(config.follower_joint_command_scales[4], 0.4)
+        self.assertEqual(config.follower_joint_command_offsets[12], 0.262)
+
+    def test_hand_only_offsets_are_resolved_in_recorded_motor_order(self):
+        values = config_values_for_motor_ids(
+            {4: 0.1, 12: 0.262}, (12, 5, 4), default=0.0
+        )
+
+        np.testing.assert_allclose(values, [0.262, 0.0, 0.1])
+
     def test_use_follower_cli_option(self):
         with patch("sys.argv", ["replay_episode.py", "--use-follower"]):
             self.assertTrue(parse_args().use_follower)
@@ -100,6 +131,19 @@ class ReplayEpisodeTests(unittest.TestCase):
 
         self.assertIs(result, stream)
         np.testing.assert_array_equal(result[1], positions)
+
+    def test_midas_replay_applies_joint_offsets(self):
+        _, targets = prepare_hand_stream_for_replay(
+            (np.asarray([0.0]), np.asarray([[0.0, 1.0]])),
+            (12, 4),
+            use_follower=True,
+            command_scale=1.0,
+            joint_command_scales=np.asarray([1.0, 0.4]),
+            joint_command_offsets=np.asarray([0.262, 0.0]),
+            thumb_model=None,
+        )
+
+        np.testing.assert_allclose(targets, [[0.262, 0.4]])
 
     def test_legacy_proprioception_filename_is_still_supported(self):
         with tempfile.TemporaryDirectory() as temp_dir:

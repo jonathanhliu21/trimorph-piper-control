@@ -25,6 +25,10 @@ WORKER_INIT_TIMEOUT_S = 60.0
 DEFAULT_DEMONSTRATION_DURATION_S = 30.0
 DEFAULT_WARMUP_TIME_S = 5.0
 DEFAULT_HAND_MEASURE_RATE_HZ = 100.0
+DEFAULT_HAND_CONFIG = Path("config/hand.yaml")
+DEFAULT_HAND_PORT = "/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND"
+FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
+FOLLOWER_PROFILE_ACCELERATION_RAD_S2 = 50.0
 DATA_COLLECTION_MODE = "data_collection"
 RETARGET_ONLY_MODE = "retarget_only"
 DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
@@ -74,6 +78,10 @@ class HandOnlyCollectionConfig:
     follower_hand_port: str | None = None
     follower_measure_rate_hz: float = 200.0
     follower_command_rate_hz: float = 50.0
+    follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
+    follower_profile_acceleration_rad_s2: float = (
+        FOLLOWER_PROFILE_ACCELERATION_RAD_S2
+    )
     follower_configure_hardware: bool = True
     follower_command_scale: float = 1.0
     follower_max_step_rad: float = 0.15
@@ -141,9 +149,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.set_defaults(mode=DATA_COLLECTION_MODE)
     parser.add_argument("--dataset-root", type=Path, default=Path("data_trimorph"))
-    parser.add_argument("--hand-config", type=Path, default=Path("config/hand.yaml"))
+    parser.add_argument("--hand-config", type=Path, default=DEFAULT_HAND_CONFIG)
     parser.add_argument(
-        "--hand-port", default="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND"
+        "--hand-port", default=DEFAULT_HAND_PORT
     )
     parser.add_argument("--follower-config", type=Path)
     parser.add_argument("--follower-port")

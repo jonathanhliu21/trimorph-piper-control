@@ -11,13 +11,12 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.config import (
-    FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
-    FOLLOWER_PROFILE_VELOCITY_RAD_S,
-    RAW_EEF_FIELDS,
-    apply_overrides,
-    build_config,
-    joint_command_scales_for_motor_ids,
+from collect_hand_only import (
+    DEFAULT_HAND_CONFIG,
+    DEFAULT_HAND_MEASURE_RATE_HZ,
+    DEFAULT_HAND_PORT,
+    DEFAULT_THUMB_MODEL,
+    HandOnlyCollectionConfig,
 )
 from collection.episode import raw_root
 from collection.hand_common import (
@@ -34,12 +33,17 @@ from collection.thumb_retargeting import (
 
 
 DATASET_ROOT = Path("data_trimorph")
+RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 REPLAY_HZ = 30.0
 PREPOSITION_SECONDS = 3.0
 SETTLE_SECONDS = 1.0
 PIPER_PREPOSITION_SPEED_PERCENT = 20
 PIPER_REPLAY_SPEED_PERCENT = 100
-DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
+PIPER_INTERFACE = "socketcan"
+PIPER_CHANNEL = "can0"
+PIPER_FIRMWARE = "v183"
+PIPER_INSTALLATION_POS = "right"
+PIPER_PAYLOAD = "half"
 
 
 def parse_args() -> argparse.Namespace:
@@ -181,6 +185,7 @@ def prepare_hand_stream_for_replay(
     command_scale: float,
     joint_command_scales: np.ndarray,
     thumb_model: ThumbRetargetModel | None,
+    joint_command_offsets: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Retarget a MIDAS replay stream or preserve raw TRIMORPH positions."""
 
@@ -194,6 +199,7 @@ def prepare_hand_stream_for_replay(
                 motor_ids,
                 command_scale=command_scale,
                 joint_command_scales=joint_command_scales,
+                joint_command_offsets=joint_command_offsets,
                 thumb_model=thumb_model,
             )
             for position in positions
@@ -201,6 +207,41 @@ def prepare_hand_stream_for_replay(
         dtype=np.float64,
     )
     return times, targets
+
+
+def config_values_for_motor_ids(
+    values_by_motor_id: dict[int, float],
+    motor_ids: tuple[int, ...],
+    *,
+    default: float,
+) -> np.ndarray:
+    """Resolve motor-ID keyed hand-only tuning in recorded column order."""
+
+    return np.asarray(
+        [values_by_motor_id.get(int(motor_id), default) for motor_id in motor_ids],
+        dtype=np.float64,
+    )
+
+
+def build_replay_config(
+    args: argparse.Namespace,
+    active_motors: tuple[int, ...] | None,
+) -> HandOnlyCollectionConfig:
+    """Build replay settings from the hand-only collection configuration."""
+
+    return HandOnlyCollectionConfig(
+        dataset_root=Path(args.dataset_root).expanduser(),
+        hand_config=(
+            Path(args.hand_config).expanduser()
+            if args.hand_config is not None
+            else DEFAULT_HAND_CONFIG
+        ),
+        hand_port=args.hand_port or DEFAULT_HAND_PORT,
+        hand_measure_rate_hz=DEFAULT_HAND_MEASURE_RATE_HZ,
+        warmup_time=0.0,
+        episode_time=0.0,
+        active_motors=list(active_motors or ()),
+    )
 
 
 def load_piper_stream(
@@ -285,15 +326,18 @@ def main() -> int:
         replay_arm = False
         print("piper.csv is empty; replaying hand only.")
     start_s, end_s = replay_interval(hand_stream, piper_stream)
-    config = apply_overrides(
-        build_config(), hand_config=args.hand_config, hand_port=args.hand_port
-    )
+    config = build_replay_config(args, active_motors)
     if hand_stream is not None:
-        joint_scales = np.asarray(
-            joint_command_scales_for_motor_ids(
-                config.follower_joint_command_scales, active_motors or ()
-            ),
-            dtype=np.float64,
+        replay_motor_ids = active_motors or ()
+        joint_scales = config_values_for_motor_ids(
+            config.follower_joint_command_scales,
+            replay_motor_ids,
+            default=1.0,
+        )
+        joint_offsets = config_values_for_motor_ids(
+            config.follower_joint_command_offsets,
+            replay_motor_ids,
+            default=0.0,
         )
         active_motor_set = set(active_motors or ())
         needs_thumb_model = bool(
@@ -310,6 +354,7 @@ def main() -> int:
             use_follower=args.use_follower,
             command_scale=config.follower_command_scale,
             joint_command_scales=joint_scales,
+            joint_command_offsets=joint_offsets,
             thumb_model=thumb_model,
         )
 
@@ -331,8 +376,10 @@ def main() -> int:
             )
             hand.configure(enable_torque=False)
             hand.set_motion_profile(
-                profile_velocity_rad_s=FOLLOWER_PROFILE_VELOCITY_RAD_S,
-                profile_acceleration_rad_s2=FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
+                profile_velocity_rad_s=config.follower_profile_velocity_rad_s,
+                profile_acceleration_rad_s2=(
+                    config.follower_profile_acceleration_rad_s2
+                ),
             )
             hand.set_positions(hand.read_pos(), clip=True)
             hand.enable_torque()
@@ -345,11 +392,11 @@ def main() -> int:
             from scripts.piper_api.piper_api import PiperAPI
 
             api = PiperAPI(
-                firmware=config.piper_firmware,
-                interface=config.piper_interface,
-                channel=config.piper_channel,
-                installation_pos=config.piper_installation_pos,
-                payload=config.piper_payload,
+                firmware=PIPER_FIRMWARE,
+                interface=PIPER_INTERFACE,
+                channel=PIPER_CHANNEL,
+                installation_pos=PIPER_INSTALLATION_POS,
+                payload=PIPER_PAYLOAD,
             )
             api.connect()
             print("Piper connected:", api.is_ok(), "receive FPS:", api.get_fps())
