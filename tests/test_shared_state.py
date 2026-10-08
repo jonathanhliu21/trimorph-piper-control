@@ -63,6 +63,23 @@ class SharedStateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             shared.set_follower_contact_snapshot((4, 5), [0.1], [2.0, 3.0])
 
+    def test_tactile_contacts_are_published_as_an_immutable_snapshot(self):
+        shared = SharedState()
+        contacts = [True, False, True, False]
+        shared.set_tactile_contacts(contacts)
+        contacts[:] = [False] * 4
+
+        self.assertEqual(
+            shared.latest_tactile_contacts(), (True, False, True, False)
+        )
+        shared.set_tactile_contacts(None)
+        self.assertIsNone(shared.latest_tactile_contacts())
+
+    def test_tactile_contacts_require_four_sensors(self):
+        shared = SharedState()
+        with self.assertRaises(ValueError):
+            shared.set_tactile_contacts((True, False))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -8,30 +9,29 @@ import numpy as np
 from midas_hand_api.actuators import control_table as ct
 
 from .config import CollectionConfig
-from .contact_detection import CONTACT_MOTOR_IDS
 from .episode import EpisodeBuffer, RecordingManager
 from .hand_common import load_hand_config, verify_connected_hand
 from .shared_state import SharedState
 
 
-FORCE_FEEDBACK_MOTOR_IDS = CONTACT_MOTOR_IDS
-FORCE_FEEDBACK_MAX_CURRENT_MA = 100.0
-FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD = 0.01
-
-
-def force_feedback_current_ma(position_error_rad: float) -> float:
+def force_feedback_current_ma(
+    position_error_rad: float,
+    *,
+    max_current_ma: float,
+    full_scale_error_rad: float,
+) -> float:
     """Map follower contact error to an opposing, capped leader current."""
 
     current_ma = (
         -float(position_error_rad)
-        * FORCE_FEEDBACK_MAX_CURRENT_MA
-        / FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD
+        * max_current_ma
+        / full_scale_error_rad
     )
     return float(
         np.clip(
             current_ma,
-            -FORCE_FEEDBACK_MAX_CURRENT_MA,
-            FORCE_FEEDBACK_MAX_CURRENT_MA,
+            -max_current_ma,
+            max_current_ma,
         )
     )
 
@@ -39,7 +39,16 @@ def force_feedback_current_ma(position_error_rad: float) -> float:
 class TrimorphForceFeedbackController:
     """Drive selected TRIMORPH joints in current mode while contact is active."""
 
-    def __init__(self, hand: Any) -> None:
+    def __init__(
+        self,
+        hand: Any,
+        *,
+        feedback_motor_ids: Sequence[int],
+        max_current_ma: float,
+        full_scale_error_rad: float,
+        tactile_current_ma: float,
+        tactile_motor_ids: Sequence[Sequence[int]],
+    ) -> None:
         self.hand = hand
         self.client = hand.dxl_client
         if self.client is None:
@@ -47,13 +56,46 @@ class TrimorphForceFeedbackController:
         self._motor_indices = {
             int(motor_id): index for index, motor_id in enumerate(hand.motor_ids)
         }
+        tactile_motor_ids = tuple(
+            tuple(int(motor_id) for motor_id in digit_ids)
+            for digit_ids in tactile_motor_ids
+        )
+        if len(tactile_motor_ids) != 4:
+            raise ValueError("Tactile feedback mapping must contain four digits")
+        self._tactile_motor_ids = tactile_motor_ids
+        eligible_motor_ids = dict.fromkeys(
+            int(motor_id) for motor_id in feedback_motor_ids
+        )
+        for digit_ids in tactile_motor_ids:
+            eligible_motor_ids.update((motor_id, None) for motor_id in digit_ids)
         self._feedback_motor_ids = tuple(
             motor_id
-            for motor_id in FORCE_FEEDBACK_MOTOR_IDS
+            for motor_id in eligible_motor_ids
             if motor_id in self._motor_indices
         )
         self._current_mode_ids: set[int] = set()
         self._latest_positions: np.ndarray | None = None
+
+        self._max_current_ma = float(max_current_ma)
+        self._full_scale_error_rad = float(full_scale_error_rad)
+        self._tactile_current_ma = float(tactile_current_ma)
+        if not math.isfinite(self._max_current_ma) or self._max_current_ma <= 0.0:
+            raise ValueError(
+                "Force-feedback maximum current must be finite and positive"
+            )
+        if (
+            not math.isfinite(self._full_scale_error_rad)
+            or self._full_scale_error_rad <= 0.0
+        ):
+            raise ValueError(
+                "Force-feedback full-scale error must be finite and positive"
+            )
+        if not math.isfinite(self._tactile_current_ma):
+            raise ValueError("Tactile force-feedback current must be finite")
+        if abs(self._tactile_current_ma) > self._max_current_ma:
+            raise ValueError(
+                "Tactile force-feedback current cannot exceed the maximum current"
+            )
 
         self._joint_signs = np.asarray(
             hand.config.joint_signs_array, dtype=np.float64
@@ -64,11 +106,9 @@ class TrimorphForceFeedbackController:
         self._current_unit_ma = float(hand.config.current_unit_ma)
         if self._current_unit_ma <= 0.0:
             raise ValueError("TRIMORPH current unit must be positive")
-        if FORCE_FEEDBACK_MAX_CURRENT_MA > float(
-            hand.config.max_current_limit_ma
-        ):
+        if self._max_current_ma > float(hand.config.max_current_limit_ma):
             raise ValueError(
-                f"Force-feedback current {FORCE_FEEDBACK_MAX_CURRENT_MA} mA "
+                f"Force-feedback current {self._max_current_ma} mA "
                 f"exceeds configured motor limit {hand.config.max_current_limit_ma} mA"
             )
 
@@ -76,16 +116,35 @@ class TrimorphForceFeedbackController:
         self,
         feedback_by_motor_id: Mapping[int, float],
         positions: Sequence[float],
+        tactile_contacts: Sequence[bool] | None = None,
     ) -> None:
         positions_array = np.asarray(positions, dtype=np.float64)
         if positions_array.shape != (len(self._motor_indices),):
             raise ValueError("Leader positions do not align with leader motor IDs")
         self._latest_positions = positions_array.copy()
 
+        tactile_feedback_ids: set[int] = set()
+        if tactile_contacts is not None:
+            if len(tactile_contacts) != len(self._tactile_motor_ids):
+                raise ValueError("Tactile contacts must contain four digits")
+            tactile_feedback_ids = {
+                motor_id
+                for contact, digit_ids in zip(
+                    tactile_contacts, self._tactile_motor_ids
+                )
+                if contact
+                for motor_id in digit_ids
+            }
+
         for motor_id in self._feedback_motor_ids:
-            current_ma = force_feedback_current_ma(
-                feedback_by_motor_id.get(motor_id, 0.0)
-            )
+            if motor_id in tactile_feedback_ids:
+                current_ma = self._tactile_current_ma
+            else:
+                current_ma = force_feedback_current_ma(
+                    feedback_by_motor_id.get(motor_id, 0.0),
+                    max_current_ma=self._max_current_ma,
+                    full_scale_error_rad=self._full_scale_error_rad,
+                )
             if current_ma == 0.0:
                 if motor_id in self._current_mode_ids:
                     self._restore_current_based_position_mode(motor_id)
@@ -165,9 +224,7 @@ class TrimorphForceFeedbackController:
                 self.client.write_desired_pos([motor_id], [raw_position])
             except Exception as exc:
                 errors.append(exc)
-        current_limit_raw = int(
-            FORCE_FEEDBACK_MAX_CURRENT_MA / self._current_unit_ma
-        )
+        current_limit_raw = int(self._max_current_ma / self._current_unit_ma)
         if mode_restored:
             try:
                 self.client.sync_write(
@@ -217,7 +274,14 @@ def run_leader_hand_worker(
     hand = MidasHand(config=hand_config, autoconnect=True)
     verify_connected_hand(hand, role="primary")
     hand.disable_torque()
-    force_feedback = TrimorphForceFeedbackController(hand)
+    force_feedback = TrimorphForceFeedbackController(
+        hand,
+        feedback_motor_ids=config.force_feedback_motor_ids,
+        max_current_ma=config.force_feedback_max_current_ma,
+        full_scale_error_rad=config.force_feedback_full_scale_error_rad,
+        tactile_current_ma=config.tactile_force_feedback_current_ma,
+        tactile_motor_ids=config.tactile_force_feedback_motor_ids,
+    )
     print(
         f"TRIMORPH hand connected on {hand.port}; model={hand.config.motor_model}; "
         f"baud={hand.config.baudrate}; motor_ids={hand.motor_ids}"
@@ -248,6 +312,7 @@ def run_leader_hand_worker(
             force_feedback.update(
                 shared.latest_follower_position_error_by_motor_id(),
                 positions,
+                shared.latest_tactile_contacts(),
             )
 
             session = recorder.current()

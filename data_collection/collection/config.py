@@ -77,6 +77,16 @@ class CollectionConfig:
     follower_joint_command_scales: dict[int, float] = field(
         default_factory=default_follower_joint_command_scales
     )
+    force_feedback_motor_ids: tuple[int, ...] = tuple(range(4, 13))
+    force_feedback_max_current_ma: float = 100.0
+    force_feedback_full_scale_error_rad: float = 0.01
+    tactile_force_feedback_current_ma: float = 50.0
+    tactile_force_feedback_motor_ids: tuple[tuple[int, ...], ...] = (
+        (4, 5, 6),
+        (7, 8, 9),
+        (10, 11, 12),
+        (0, 1, 2, 3),
+    )
 
 
 def _module_available(name: str) -> bool:

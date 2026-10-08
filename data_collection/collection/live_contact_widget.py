@@ -124,11 +124,13 @@ class LiveContactWidget(ttk.LabelFrame):
         motor_ids: Sequence[int],
         contact_feedback: Sequence[float],
         normalized_joint_difference: Sequence[float],
+        tactile_contacts: Sequence[bool] | None = None,
     ) -> None:
         self.show(
             *contact_vectors_by_motor_id(
                 motor_ids, contact_feedback, normalized_joint_difference
-            )
+            ),
+            tactile_contacts=tactile_contacts,
         )
 
     def _draw(self) -> None:

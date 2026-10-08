@@ -6,7 +6,10 @@ from unittest.mock import patch
 
 from collect_hand_only import (
     DATA_COLLECTION_MODE,
+    FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
+    FORCE_FEEDBACK_MAX_CURRENT_MA,
     RETARGET_ONLY_MODE,
+    TACTILE_FORCE_FEEDBACK_CURRENT_MA,
     HandOnlyCollectionConfig,
     main,
     parse_args,
@@ -19,6 +22,29 @@ from collection.config import TRIMORPH_MOTOR_IDS
 
 
 class HandOnlyCollectionTests(unittest.TestCase):
+    def test_force_feedback_tuning_lives_in_hand_only_config(self):
+        config = HandOnlyCollectionConfig(
+            dataset_root=Path("data_trimorph"),
+            hand_config=Path("config/hand.yaml"),
+            hand_port="/dev/hand",
+            hand_measure_rate_hz=100.0,
+            warmup_time=0.0,
+            episode_time=30.0,
+        )
+
+        self.assertEqual(
+            config.force_feedback_max_current_ma,
+            FORCE_FEEDBACK_MAX_CURRENT_MA,
+        )
+        self.assertEqual(
+            config.force_feedback_full_scale_error_rad,
+            FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
+        )
+        self.assertEqual(
+            config.tactile_force_feedback_current_ma,
+            TACTILE_FORCE_FEEDBACK_CURRENT_MA,
+        )
+
     def test_joint_command_scales_default_to_configured_values(self):
         config = HandOnlyCollectionConfig(
             dataset_root=Path("data_trimorph"),
@@ -65,6 +91,61 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertFalse(parse_args().show_ui)
         with patch("sys.argv", ["collect_hand_only.py", "--show-ui"]):
             self.assertTrue(parse_args().show_ui)
+
+    def test_tactile_options_are_opt_in(self):
+        with patch("sys.argv", ["collect_hand_only.py"]):
+            args = parse_args()
+        self.assertFalse(args.add_tactile)
+        self.assertIsNone(args.paxini_port)
+        self.assertIsNone(args.tactile_debug_log)
+
+        with patch(
+            "sys.argv",
+            [
+                "collect_hand_only.py",
+                "--add-tactile",
+                "--paxini-port",
+                "/dev/paxini",
+                "--tactile-debug-log",
+                "output/tactile.log",
+            ],
+        ):
+            args = parse_args()
+        self.assertTrue(args.add_tactile)
+        self.assertEqual(args.paxini_port, "/dev/paxini")
+        self.assertEqual(args.tactile_debug_log, Path("output/tactile.log"))
+
+    def test_paxini_port_implicitly_enables_tactile_worker(self):
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "collect_hand_only.py",
+                    "--show-ui",
+                    "--follower-config",
+                    "config/midas_hand_config.yaml",
+                    "--follower-port",
+                    "/dev/follower",
+                    "--paxini-port",
+                    "/dev/paxini",
+                ],
+            ),
+            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+
+        config = run.call_args.args[0]
+        self.assertTrue(config.add_tactile)
+        self.assertEqual(config.paxini_port, "/dev/paxini")
+
+    def test_omitted_paxini_port_does_not_conflict_with_omitted_follower(self):
+        with (
+            patch("sys.argv", ["collect_hand_only.py"]),
+            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+
+        self.assertFalse(run.call_args.args[0].add_tactile)
 
     def test_show_ui_requires_follower_configuration(self):
         with patch("sys.argv", ["collect_hand_only.py", "--show-ui"]):

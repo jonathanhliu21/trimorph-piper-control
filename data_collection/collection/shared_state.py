@@ -20,6 +20,7 @@ class SharedState:
         self._latest_follower_position_error: np.ndarray | None = None
         self._latest_follower_motor_ids: tuple[int, ...] | None = None
         self._latest_follower_contact_snapshot: FollowerContactSnapshot | None = None
+        self._latest_tactile_contacts: tuple[bool, ...] | None = None
         self._latest_task_bgr: np.ndarray | None = None
         self.shutdown = threading.Event()
 
@@ -94,6 +95,25 @@ class SharedState:
     ) -> FollowerContactSnapshot | None:
         with self._lock:
             return self._latest_follower_contact_snapshot
+
+    def set_tactile_contacts(
+        self, contacts: tuple[bool, ...] | list[bool] | None
+    ) -> None:
+        """Publish fingertip contacts in index, middle, ring, thumb order."""
+
+        value = (
+            None
+            if contacts is None
+            else tuple(bool(contact) for contact in contacts)
+        )
+        if value is not None and len(value) != 4:
+            raise ValueError("Tactile contacts must contain three fingers and a thumb")
+        with self._lock:
+            self._latest_tactile_contacts = value
+
+    def latest_tactile_contacts(self) -> tuple[bool, ...] | None:
+        with self._lock:
+            return self._latest_tactile_contacts
 
     def set_task_frame(self, bgr: np.ndarray) -> None:
         with self._lock:

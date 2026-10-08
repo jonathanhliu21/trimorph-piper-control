@@ -4,10 +4,14 @@ from types import SimpleNamespace
 import numpy as np
 from midas_hand_api.actuators import control_table as ct
 
-from collection.leader_hand_worker import (
-    FORCE_FEEDBACK_MOTOR_IDS,
+from collect_hand_only import (
     FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
     FORCE_FEEDBACK_MAX_CURRENT_MA,
+    FORCE_FEEDBACK_MOTOR_IDS,
+    TACTILE_FORCE_FEEDBACK_CURRENT_MA,
+    TACTILE_FORCE_FEEDBACK_MOTOR_IDS,
+)
+from collection.leader_hand_worker import (
     TrimorphForceFeedbackController,
     force_feedback_current_ma,
 )
@@ -46,26 +50,42 @@ class FakeHand:
 
 
 class ForceFeedbackCurrentTests(unittest.TestCase):
+    @staticmethod
+    def controller(hand):
+        return TrimorphForceFeedbackController(
+            hand,
+            feedback_motor_ids=FORCE_FEEDBACK_MOTOR_IDS,
+            max_current_ma=FORCE_FEEDBACK_MAX_CURRENT_MA,
+            full_scale_error_rad=FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
+            tactile_current_ma=TACTILE_FORCE_FEEDBACK_CURRENT_MA,
+            tactile_motor_ids=TACTILE_FORCE_FEEDBACK_MOTOR_IDS,
+        )
+
     def test_force_feedback_covers_all_finger_joints(self):
         self.assertEqual(FORCE_FEEDBACK_MOTOR_IDS, tuple(range(4, 13)))
 
     def test_linear_opposing_current_and_saturation(self):
-        self.assertEqual(force_feedback_current_ma(0.0), 0.0)
+        kwargs = {
+            "max_current_ma": FORCE_FEEDBACK_MAX_CURRENT_MA,
+            "full_scale_error_rad": FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
+        }
+        self.assertEqual(force_feedback_current_ma(0.0, **kwargs), 0.0)
         half_scale_error = FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD / 2.0
         half_current = FORCE_FEEDBACK_MAX_CURRENT_MA / 2.0
         self.assertEqual(
-            force_feedback_current_ma(half_scale_error), -half_current
+            force_feedback_current_ma(half_scale_error, **kwargs), -half_current
         )
         self.assertEqual(
-            force_feedback_current_ma(-half_scale_error), half_current
+            force_feedback_current_ma(-half_scale_error, **kwargs), half_current
         )
         self.assertEqual(
-            force_feedback_current_ma(1.0), -FORCE_FEEDBACK_MAX_CURRENT_MA
+            force_feedback_current_ma(1.0, **kwargs),
+            -FORCE_FEEDBACK_MAX_CURRENT_MA,
         )
 
     def test_engages_only_contact_joint_and_applies_joint_sign(self):
         hand = FakeHand()
-        controller = TrimorphForceFeedbackController(hand)
+        controller = self.controller(hand)
 
         controller.update({4: 0.03, 5: 0.0}, [0.4, 0.5, 0.6])
 
@@ -90,7 +110,7 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
 
     def test_release_restores_mode_five_and_stays_torque_free(self):
         hand = FakeHand()
-        controller = TrimorphForceFeedbackController(hand)
+        controller = self.controller(hand)
         controller.update({4: 0.03}, [0.4, 0.5, 0.6])
 
         controller.update({4: 0.0}, [0.45, 0.5, 0.6])
@@ -119,13 +139,37 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
 
     def test_shutdown_restores_every_active_joint(self):
         hand = FakeHand()
-        controller = TrimorphForceFeedbackController(hand)
+        controller = self.controller(hand)
         controller.update({4: 0.01, 5: -0.01}, [0.4, 0.5, 0.6])
 
         controller.shutdown()
 
         self.assertEqual(hand.enabled, [[4], [5]])
         self.assertEqual(hand.disabled, [[4], [5], [4], [5]])
+
+    def test_tactile_contact_applies_constant_current_to_the_whole_digit(self):
+        hand = FakeHand()
+        controller = self.controller(hand)
+
+        controller.update(
+            {4: 0.03, 5: -0.03},
+            [0.4, 0.5, 0.6],
+            (True, False, False, False),
+        )
+
+        goal_writes = [
+            (motor_ids, currents)
+            for motor_ids, currents, address, _size in hand.dxl_client.sync_writes
+            if address == ct.ADDR_GOAL_CURRENT and currents != [0]
+        ]
+        self.assertEqual(
+            goal_writes,
+            [
+                ([4], [TACTILE_FORCE_FEEDBACK_CURRENT_MA]),
+                ([5], [-TACTILE_FORCE_FEEDBACK_CURRENT_MA]),
+                ([6], [TACTILE_FORCE_FEEDBACK_CURRENT_MA]),
+            ],
+        )
 
 
 if __name__ == "__main__":

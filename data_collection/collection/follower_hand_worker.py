@@ -284,22 +284,6 @@ def run_follower_hand_worker(
                     adjusted_error,
                     normalized_joint_difference,
                 )
-                if contact_indices and np.any(
-                    adjusted_error[contact_indices] != 0.0
-                ):
-                    formatted = "[{}]".format(
-                        " ".join(
-                            f"{float(adjusted_error[index]):8.3f}"
-                            for index in contact_indices
-                        )
-                    )
-                    contact_motor_ids = [
-                        int(hand.motor_ids[index]) for index in contact_indices
-                    ]
-                    print(
-                        "Follower contact detected; adjusted position error "
-                        f"for motor IDs {contact_motor_ids}: {formatted}"
-                    )
                 session = recorder.current()
                 if session is not None:
                     if session is not sample_session:

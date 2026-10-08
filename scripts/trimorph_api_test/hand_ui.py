@@ -12,7 +12,6 @@ operation, so rendering and the Stop controls remain responsive.
 from __future__ import annotations
 
 import argparse
-import logging
 import math
 import queue
 import sys
@@ -62,6 +61,10 @@ from data_collection.collection.live_contact_widget import (
 from data_collection.collection.tactile_contact_detection import (
     TactileContactDetector,
 )
+from data_collection.collection.tactile_worker import (
+    TACTILE_SENSOR_NAMES,
+    configure_tactile_debug_log as _configure_tactile_debug_log,
+)
 from midas_hand_api import HandConfig, MidasHand, PaxiniConfig, PaxiniHandSensor
 
 
@@ -79,27 +82,6 @@ THUMB_CLOSE_ANGLES_RAD = (-1.4, -1.4, -0.1, 1.5)
 STREAM_PREPOSITION_TOLERANCE_RAD = 0.1
 STREAM_PREPOSITION_TIMEOUT_S = 4.0
 MIN_STREAM_DURATION_S = 1.0 / CONTROL_RATE_HZ
-TACTILE_SENSOR_NAMES = ("index", "middle", "ring", "thumb")
-TACTILE_CONTACT_LOGGER_NAME = (
-    "data_collection.collection.tactile_contact_detection"
-)
-
-
-def _configure_tactile_debug_log(path: Path) -> None:
-    log_path = path.expanduser().resolve()
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
-    handler.setLevel(logging.DEBUG)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s.%(msecs)03d %(levelname)s %(message)s", "%H:%M:%S")
-    )
-    tactile_logger = logging.getLogger(TACTILE_CONTACT_LOGGER_NAME)
-    tactile_logger.setLevel(logging.DEBUG)
-    tactile_logger.addHandler(handler)
-    tactile_logger.propagate = False
-    tactile_logger.info("TACTILE_CONTACT event=log_started path=%s", log_path)
-
-
 @dataclass(frozen=True)
 class ConnectionSettings:
     config_path: Path

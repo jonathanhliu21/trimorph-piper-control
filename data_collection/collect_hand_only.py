@@ -18,6 +18,7 @@ from collection.episode import (
 from collection.follower_hand_worker import run_follower_hand_worker
 from collection.leader_hand_worker import run_leader_hand_worker
 from collection.shared_state import SharedState
+from collection.tactile_worker import run_tactile_worker
 from collection.utils import WorkerError, worker_wrapper
 
 WORKER_INIT_TIMEOUT_S = 60.0
@@ -31,6 +32,17 @@ DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
 PIP_SCALE = 0.4
 MCP_SCALE = 0.5
 
+FORCE_FEEDBACK_MOTOR_IDS = tuple(range(4, 13))
+FORCE_FEEDBACK_MAX_CURRENT_MA = 100.0
+FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD = 0.01
+TACTILE_FORCE_FEEDBACK_CURRENT_MA = 50.0
+TACTILE_FORCE_FEEDBACK_MOTOR_IDS = (
+    (4, 5, 6),
+    (7, 8, 9),
+    (10, 11, 12),
+    (0, 1, 2, 3),
+)
+
 
 @dataclass(frozen=True)
 class HandOnlyCollectionConfig:
@@ -43,6 +55,18 @@ class HandOnlyCollectionConfig:
     episode_time: float
     mode: str = DATA_COLLECTION_MODE
     show_ui: bool = False
+    add_tactile: bool = False
+    paxini_port: str | None = None
+    tactile_debug_log: Path | None = None
+    force_feedback_motor_ids: tuple[int, ...] = FORCE_FEEDBACK_MOTOR_IDS
+    force_feedback_max_current_ma: float = FORCE_FEEDBACK_MAX_CURRENT_MA
+    force_feedback_full_scale_error_rad: float = (
+        FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD
+    )
+    tactile_force_feedback_current_ma: float = TACTILE_FORCE_FEEDBACK_CURRENT_MA
+    tactile_force_feedback_motor_ids: tuple[tuple[int, ...], ...] = (
+        TACTILE_FORCE_FEEDBACK_MOTOR_IDS
+    )
     active_motors: list[int] = field(
         default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
     )
@@ -129,6 +153,31 @@ def parse_args() -> argparse.Namespace:
         help="Show the read-only follower MIDAS live-contact visualization.",
     )
     parser.add_argument(
+        "--add-tactile",
+        action="store_true",
+        help=(
+            "connect the auto-detected Paxini tactile sensor and show binary "
+            "fingertip contacts in the live-contact UI"
+        ),
+    )
+    parser.add_argument(
+        "--paxini-port",
+        metavar="PORT",
+        help=(
+            "Paxini serial port, for example /dev/cu.usbserial-XXXX; providing "
+            "this option also enables tactile sensing"
+        ),
+    )
+    parser.add_argument(
+        "--tactile-debug-log",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "write structured tactile contact-detector diagnostics to PATH; "
+            "providing this option also enables tactile sensing"
+        ),
+    )
+    parser.add_argument(
         "--thumb-model",
         type=Path,
         default=DEFAULT_THUMB_MODEL,
@@ -169,6 +218,8 @@ def initialize_worker(
     specs = [("leader_hand", run_leader_hand_worker)]
     if config.follower_hand_config is not None:
         specs.append(("follower", run_follower_hand_worker))
+    if config.add_tactile:
+        specs.append(("tactile", run_tactile_worker))
 
     threads: list[threading.Thread] = []
     try:
@@ -261,12 +312,16 @@ def run_follower_contact_ui(
     def refresh() -> None:
         nonlocal exit_reason
         snapshot = shared.latest_follower_contact_snapshot()
+        tactile_contacts = shared.latest_tactile_contacts()
         if snapshot is not None:
             widget.show_by_motor_id(
                 snapshot.motor_ids,
                 snapshot.contact_feedback,
                 snapshot.normalized_joint_difference,
+                tactile_contacts=tactile_contacts,
             )
+        elif tactile_contacts is not None:
+            widget.show(tactile_contacts=tactile_contacts)
         if deadline is not None and time.monotonic() >= deadline:
             exit_reason = "duration_complete"
             shared.shutdown.set()
@@ -341,6 +396,11 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
 
 def main() -> int:
     args = parse_args()
+    add_tactile = (
+        args.add_tactile
+        or args.paxini_port is not None
+        or args.tactile_debug_log is not None
+    )
     config = HandOnlyCollectionConfig(
         dataset_root=args.dataset_root.expanduser(),
         hand_config=args.hand_config.expanduser(),
@@ -350,6 +410,13 @@ def main() -> int:
         warmup_time=args.warmup_time,
         mode=args.mode,
         show_ui=args.show_ui,
+        add_tactile=add_tactile,
+        paxini_port=args.paxini_port,
+        tactile_debug_log=(
+            args.tactile_debug_log.expanduser()
+            if args.tactile_debug_log is not None
+            else None
+        ),
         active_motors=args.active_motors,
         follower_hand_config=(
             args.follower_config.expanduser()
@@ -367,8 +434,17 @@ def main() -> int:
         raise ValueError("--follower-config and --follower-port must be provided together")
     if config.show_ui and config.follower_hand_config is None:
         raise ValueError("--show-ui requires --follower-config and --follower-port")
+    if config.add_tactile and not config.show_ui and config.tactile_debug_log is None:
+        raise ValueError(
+            "Tactile sensing requires --show-ui or --tactile-debug-log"
+        )
     if config.follower_hand_port == config.hand_port:
         raise ValueError("Primary and follower hand ports must be different")
+    if config.paxini_port is not None and config.paxini_port in {
+        config.hand_port,
+        config.follower_hand_port,
+    }:
+        raise ValueError("The Paxini and motor serial ports must be different")
     return run_hand_only(config)
 
 
