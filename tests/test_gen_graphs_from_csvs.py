@@ -4,7 +4,11 @@ from pathlib import Path
 
 import numpy as np
 
-from scripts.trimorph_api_test.gen_graphs_from_csvs import _load_telemetry
+from scripts.trimorph_api_test.gen_graphs_from_csvs import (
+    _build_parser,
+    _finger_plot_groups,
+    _load_telemetry,
+)
 
 
 class GenGraphsFromCsvsTests(unittest.TestCase):
@@ -42,6 +46,22 @@ class GenGraphsFromCsvsTests(unittest.TestCase):
 
         np.testing.assert_allclose(motors[4]["target_velocity"], [2.0, 2.0, 2.0])
         np.testing.assert_allclose(motors[4]["actual_velocity"], [1.0, 1.0, 1.0])
+
+    def test_parses_overlay_and_joint_filter(self):
+        args = _build_parser().parse_args(
+            ["first.csv", "second.csv", "--overlay", "--joints", "4", "7"]
+        )
+
+        self.assertTrue(args.overlay)
+        self.assertEqual(args.joints, [4, 7])
+
+    def test_selected_thumb_joints_are_plotted_in_separate_rows(self):
+        groups = _finger_plot_groups({0, 1, 2, 3})
+
+        self.assertEqual(
+            [motor_ids for _, motor_ids in groups],
+            [(0,), (1,), (2,), (3,)],
+        )
 
 
 if __name__ == "__main__":
