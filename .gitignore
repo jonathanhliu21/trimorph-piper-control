@@ -11,3 +11,4 @@ hand_recording.csv
 output/
 *.csv
 *.json
+!thumb_retarget_model.json
