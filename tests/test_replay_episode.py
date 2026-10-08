@@ -8,6 +8,9 @@ import numpy as np
 
 from collection.thumb_retargeting import ThumbRetargetModel
 from replay_episode import (
+    CURRENT_TELEMETRY_HZ,
+    ReplayCurrentRecorder,
+    advance_current_sample_schedule,
     build_replay_config,
     build_replay_hand_config,
     config_values_for_motor_ids,
@@ -18,8 +21,10 @@ from replay_episode import (
     sample_stream,
     scale_hand_stream,
     parse_args,
+    output_current_csv,
     prepare_hand_stream_for_replay,
 )
+from scripts.trimorph_api_test.gen_graphs_from_csvs import _load_telemetry
 
 
 class ReplayEpisodeTests(unittest.TestCase):
@@ -51,6 +56,59 @@ class ReplayEpisodeTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(values, [0.262, 0.0, 0.1])
+
+    def test_current_sampling_is_downsampled_to_ten_hz(self):
+        replay_times = np.arange(31, dtype=np.float64) / 30.0
+        next_sample_s = 0.0
+        sampled_times = []
+        for elapsed_s in replay_times:
+            due, next_sample_s = advance_current_sample_schedule(
+                float(elapsed_s),
+                next_sample_s,
+                1.0 / CURRENT_TELEMETRY_HZ,
+            )
+            if due:
+                sampled_times.append(elapsed_s)
+
+        np.testing.assert_allclose(sampled_times, np.arange(11) / 10.0)
+
+    def test_output_current_cli_option_is_opt_in_and_requires_a_path(self):
+        with patch("sys.argv", ["replay_episode.py"]):
+            self.assertIsNone(parse_args().output_current)
+        with patch(
+            "sys.argv", ["replay_episode.py", "--output-current", "telemetry.csv"]
+        ):
+            self.assertEqual(parse_args().output_current, Path("telemetry.csv"))
+
+    def test_current_output_is_compatible_with_graph_generator(self):
+        class FakeHand:
+            def __init__(self):
+                self.sample = 0
+
+            def read_pos_vel_cur(self):
+                self.sample += 1
+                return (
+                    np.asarray([0.1, 0.2]) * self.sample,
+                    np.asarray([1.0, 2.0]),
+                    np.asarray([10.0, 20.0]) * self.sample,
+                )
+
+        recorder = ReplayCurrentRecorder((4, 9))
+        hand = FakeHand()
+        recorder.sample(hand, np.asarray([0.0, 0.1]), elapsed_s=0.0)
+        recorder.sample(hand, np.asarray([0.2, 0.5]), elapsed_s=0.1)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "nested" / "replay.csv"
+            output_current_csv(recorder, output)
+            trials, times, motors = _load_telemetry(output)
+
+        np.testing.assert_array_equal(trials, [1, 1])
+        np.testing.assert_allclose(times, [0.0, 0.1])
+        np.testing.assert_allclose(motors[4]["current"], [10.0, 20.0])
+        np.testing.assert_allclose(motors[9]["target"], [0.1, 0.5])
+        np.testing.assert_allclose(motors[9]["target_velocity"], [0.0, 4.0])
+        np.testing.assert_allclose(motors[9]["actual_velocity"], [2.0, 2.0])
 
     def test_use_follower_cli_option(self):
         with patch("sys.argv", ["replay_episode.py", "--use-follower"]):

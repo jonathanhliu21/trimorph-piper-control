@@ -35,6 +35,7 @@ from collection.thumb_retargeting import (
 DATASET_ROOT = Path("data_trimorph")
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 REPLAY_HZ = 30.0
+CURRENT_TELEMETRY_HZ = 10.0
 PREPOSITION_SECONDS = 3.0
 SETTLE_SECONDS = 1.0
 PIPER_PREPOSITION_SPEED_PERCENT = 20
@@ -44,6 +45,106 @@ PIPER_CHANNEL = "can0"
 PIPER_FIRMWARE = "v183"
 PIPER_INSTALLATION_POS = "right"
 PIPER_PAYLOAD = "half"
+
+
+def advance_current_sample_schedule(
+    elapsed_s: float,
+    next_sample_s: float,
+    sample_period_s: float,
+) -> tuple[bool, float]:
+    """Return whether to sample now and the following fixed-rate deadline."""
+
+    if elapsed_s + 1e-12 < next_sample_s:
+        return False, next_sample_s
+    while next_sample_s <= elapsed_s + 1e-12:
+        next_sample_s += sample_period_s
+    return True, next_sample_s
+
+
+class ReplayCurrentRecorder:
+    """Collect replay telemetry in gen_graphs_from_csvs.py's native schema."""
+
+    def __init__(self, motor_ids: tuple[int, ...]) -> None:
+        self.motor_ids = tuple(int(motor_id) for motor_id in motor_ids)
+        self.rows: list[dict[str, float | int]] = []
+        self._previous_time_s: float | None = None
+        self._previous_targets: np.ndarray | None = None
+
+    def sample(
+        self,
+        hand,
+        target_positions_rad: np.ndarray,
+        *,
+        elapsed_s: float,
+    ) -> None:
+        targets = np.asarray(target_positions_rad, dtype=np.float64)
+        actual_positions, actual_velocities, currents = hand.read_pos_vel_cur()
+        actual_positions = np.asarray(actual_positions, dtype=np.float64)
+        actual_velocities = np.asarray(actual_velocities, dtype=np.float64)
+        currents = np.asarray(currents, dtype=np.float64)
+        expected_shape = (len(self.motor_ids),)
+        if any(
+            values.shape != expected_shape
+            for values in (targets, actual_positions, actual_velocities, currents)
+        ):
+            raise RuntimeError("Replay telemetry vectors do not match the motor count")
+        if not all(
+            np.isfinite(values).all()
+            for values in (targets, actual_positions, actual_velocities, currents)
+        ):
+            raise RuntimeError("Replay telemetry contains NaN or Inf")
+
+        if self._previous_time_s is None or self._previous_targets is None:
+            target_velocities = np.zeros_like(targets)
+        else:
+            delta_s = elapsed_s - self._previous_time_s
+            if delta_s <= 0.0:
+                raise RuntimeError("Replay telemetry timestamps must increase")
+            target_velocities = (targets - self._previous_targets) / delta_s
+
+        row: dict[str, float | int] = {"trial": 1, "elapsed_s": elapsed_s}
+        for index, motor_id in enumerate(self.motor_ids):
+            row.update(
+                {
+                    f"motor_{motor_id}_current_ma": float(currents[index]),
+                    f"motor_{motor_id}_target_position_rad": float(targets[index]),
+                    f"motor_{motor_id}_actual_position_rad": float(
+                        actual_positions[index]
+                    ),
+                    f"motor_{motor_id}_target_velocity_rad_s": float(
+                        target_velocities[index]
+                    ),
+                    f"motor_{motor_id}_actual_velocity_rad_s": float(
+                        actual_velocities[index]
+                    ),
+                }
+            )
+        self.rows.append(row)
+        self._previous_time_s = elapsed_s
+        self._previous_targets = targets.copy()
+
+
+def output_current_csv(recorder: ReplayCurrentRecorder, output: Path) -> None:
+    if not recorder.rows:
+        raise RuntimeError("No replay current samples were recorded")
+    output = output.expanduser().resolve()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["trial", "elapsed_s"]
+    for motor_id in recorder.motor_ids:
+        fieldnames.extend(
+            (
+                f"motor_{motor_id}_current_ma",
+                f"motor_{motor_id}_target_position_rad",
+                f"motor_{motor_id}_actual_position_rad",
+                f"motor_{motor_id}_target_velocity_rad_s",
+                f"motor_{motor_id}_actual_velocity_rad_s",
+            )
+        )
+    with output.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(recorder.rows)
+    print(f"Saved replay current telemetry CSV to {output}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,6 +182,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--settle-seconds", type=float, default=SETTLE_SECONDS)
     parser.add_argument("--hand-only", action="store_true")
     parser.add_argument("--arm-only", action="store_true")
+    parser.add_argument(
+        "--output-current",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Measure hand motor current during replay and write graph-compatible "
+            "telemetry to PATH. No telemetry is saved when omitted."
+        ),
+    )
     parser.add_argument(
         "--no-piper-enable",
         action="store_true",
@@ -308,6 +418,8 @@ def main() -> int:
         raise ValueError("Preposition and settle durations must be non-negative")
     if args.hand_only and args.arm_only:
         raise ValueError("--hand-only and --arm-only are mutually exclusive")
+    if args.output_current is not None and args.arm_only:
+        raise ValueError("--output-current cannot be used with --arm-only")
 
     replay_hand = not args.arm_only
     replay_arm = not args.hand_only
@@ -360,6 +472,7 @@ def main() -> int:
 
     hand = None
     api = None
+    current_recorder: ReplayCurrentRecorder | None = None
     try:
         if replay_hand:
             from midas_hand_api import MidasHand
@@ -383,6 +496,8 @@ def main() -> int:
             )
             hand.set_positions(hand.read_pos(), clip=True)
             hand.enable_torque()
+            if args.output_current is not None:
+                current_recorder = ReplayCurrentRecorder(tuple(hand.motor_ids))
             if args.use_follower:
                 print(f"MIDAS hand connected on {hand.port}")
             else:
@@ -408,6 +523,8 @@ def main() -> int:
             api.set_speed_percent(PIPER_REPLAY_SPEED_PERCENT)
 
         period_s = 1.0 / args.rate_hz
+        current_sample_period_s = 1.0 / CURRENT_TELEMETRY_HZ
+        next_current_sample_s = 0.0
         wall_start = time.monotonic()
         tick = 0
         print(
@@ -417,7 +534,24 @@ def main() -> int:
         while True:
             episode_t = min(start_s + tick * period_s, end_s)
             if hand is not None and hand_stream is not None:
-                hand.set_positions(sample_stream(*hand_stream, episode_t), clip=True)
+                hand_target = hand.clip_positions(
+                    sample_stream(*hand_stream, episode_t)
+                )
+                hand.set_positions(hand_target, clip=True)
+                replay_elapsed_s = episode_t - start_s
+                sample_current, next_current_sample_s = (
+                    advance_current_sample_schedule(
+                        replay_elapsed_s,
+                        next_current_sample_s,
+                        current_sample_period_s,
+                    )
+                )
+                if current_recorder is not None and sample_current:
+                    current_recorder.sample(
+                        hand,
+                        hand_target,
+                        elapsed_s=replay_elapsed_s,
+                    )
             if api is not None and piper_stream is not None:
                 api.move_eef(sample_stream(*piper_stream, episode_t))
             if episode_t >= end_s:
@@ -426,9 +560,13 @@ def main() -> int:
             sleep_s = wall_start + tick * period_s - time.monotonic()
             if sleep_s > 0:
                 time.sleep(sleep_s)
+        if current_recorder is not None:
+            output_current_csv(current_recorder, args.output_current)
         print("Replay complete.")
         return 0
     except KeyboardInterrupt:
+        if current_recorder is not None and current_recorder.rows:
+            output_current_csv(current_recorder, args.output_current)
         print("\nReplay interrupted.")
         return 130
     finally:
