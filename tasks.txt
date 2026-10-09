@@ -9,4 +9,4 @@ python3 data_collection/collect_hand_only.py --hand-config scripts/trimorph_api_
 
 replay:
 
-python3 data_collection/replay_episode.py --dataset-root data_trimorph_drill_pick_place/ --hand-config scripts/trimorph_api_test/xl330_test_config.yaml --hand-port /dev/ttyUSB0
+python3 data_collection/replay_episode.py --dataset-root data_trimorph_drill_pick_place/ --hand-config scripts/trimorph_api_test/xl330_test_config.yaml --hand-port /dev/ttyUSB0ad 

@@ -2,11 +2,44 @@ from __future__ import annotations
 
 import time
 
-from scripts.piper_api.teacher_mode import get_teacher_mode
-
 from .config import RAW_EEF_FIELDS, CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
+
+
+PIPER_LIMIT_WARNING_INTERVAL_S = 2.0
+PIPER_KINEMATIC_LIMIT_STATUSES = (
+    "TARGET_POS_EXCEEDS_LIMIT",
+    "NO_SOLUTION",
+    "SINGULARITY_POINT",
+)
+
+
+def piper_workspace_warning(state: dict[str, object]) -> str | None:
+    """Describe Piper workspace/joint-limit feedback, if present."""
+
+    arm_status = str(state.get("arm_status", ""))
+    reasons = [
+        f"arm_status={arm_status}"
+        for status in PIPER_KINEMATIC_LIMIT_STATUSES
+        if status in arm_status
+    ]
+    try:
+        err_code = int(state.get("err_code", 0))
+    except (TypeError, ValueError):
+        err_code = 0
+    limited_joints = [
+        joint for joint in range(1, 7) if err_code & (1 << (joint + 7))
+    ]
+    if limited_joints:
+        reasons.append(f"joint_angle_limit={limited_joints}")
+    if not reasons:
+        return None
+    return (
+        "WARNING: Piper reached a workspace/kinematic limit ("
+        + ", ".join(reasons)
+        + "). Move the arm away from the boundary before recording/replay."
+    )
 
 
 def run_piper_worker(
@@ -53,12 +86,26 @@ def run_piper_worker(
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
     teach_status: object = None
+    last_limit_warning: str | None = None
+    last_limit_warning_t = float("-inf")
     try:
         while not shared.shutdown.is_set():
             now_ns = time.monotonic_ns()
 
             if now_ns >= next_teacher_ns:
-                _active, teach_status = get_teacher_mode(api)
+                state = api.get_state()
+                teach_status = state.get("teach_status")
+                limit_warning = piper_workspace_warning(state)
+                now_s = now_ns / 1e9
+                if limit_warning is not None and (
+                    limit_warning != last_limit_warning
+                    or now_s - last_limit_warning_t >= PIPER_LIMIT_WARNING_INTERVAL_S
+                ):
+                    print(limit_warning, flush=True)
+                    last_limit_warning = limit_warning
+                    last_limit_warning_t = now_s
+                elif limit_warning is None:
+                    last_limit_warning = None
                 next_teacher_ns += teacher_period_ns
                 while next_teacher_ns < now_ns:
                     next_teacher_ns += teacher_period_ns

@@ -9,6 +9,10 @@ import sys
 import time
 from typing import Sequence
 
+from data_collection.collection.piper_worker import (
+    PIPER_LIMIT_WARNING_INTERVAL_S,
+    piper_workspace_warning,
+)
 from scripts.piper_api.piper_api import PiperAPI
 
 
@@ -104,12 +108,25 @@ def run(args: argparse.Namespace) -> int:
     try:
         api.connect()
         period_s = 1.0 / args.rate_hz
+        last_limit_warning: str | None = None
+        last_limit_warning_t = float("-inf")
         while True:
             sample = read_sample(api, args.timeout_s)
             if args.json:
                 print(json.dumps(sample), flush=True)
             else:
                 print(format_sample(sample), flush=True)
+            limit_warning = piper_workspace_warning(api.get_state())
+            now_s = time.monotonic()
+            if limit_warning is not None and (
+                limit_warning != last_limit_warning
+                or now_s - last_limit_warning_t >= PIPER_LIMIT_WARNING_INTERVAL_S
+            ):
+                print(limit_warning, file=sys.stderr, flush=True)
+                last_limit_warning = limit_warning
+                last_limit_warning_t = now_s
+            elif limit_warning is None:
+                last_limit_warning = None
             if args.once:
                 return 0
             time.sleep(period_s)
