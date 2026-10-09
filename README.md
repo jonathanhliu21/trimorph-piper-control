@@ -327,8 +327,11 @@ python3 data_collection/replay_episode.py 42 \
 ```
 
 The `ACTION_SCALE` constant in `data_collection/replay_episode.py` multiplies
-every final hand target angle before joint-limit clipping. Useful switches
-include `--no-preposition`, `--arm-only`, and `--no-piper-enable`.
+every final hand target angle before joint-limit clipping. The
+`FINGER_1_ACTION_SCALE` and `FINGER_2_ACTION_SCALE` constants add another
+multiplier only to each finger's PIP and MCP-flex joints (motors 4–5 and 7–8,
+respectively); both default to `1.0`. Useful switches include
+`--no-preposition`, `--arm-only`, and `--no-piper-enable`.
 `--hand-only` and `--arm-only` are mutually exclusive in practice, and current
 logging cannot be used with `--arm-only`.
 

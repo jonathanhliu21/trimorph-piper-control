@@ -11,6 +11,8 @@ from collection.thumb_retargeting import ThumbRetargetModel
 from replay_episode import (
     ACTION_SCALE,
     CURRENT_TELEMETRY_HZ,
+    FINGER_1_ACTION_SCALE,
+    FINGER_2_ACTION_SCALE,
     ReplayCurrentRecorder,
     advance_current_sample_schedule,
     build_replay_config,
@@ -31,7 +33,9 @@ from scripts.trimorph_api_test.gen_graphs_from_csvs import _load_telemetry
 
 class ReplayEpisodeTests(unittest.TestCase):
     def test_action_scale_is_a_module_constant(self):
-        self.assertEqual(ACTION_SCALE, 1.05)
+        self.assertEqual(ACTION_SCALE, 1.0)
+        self.assertEqual(FINGER_1_ACTION_SCALE, 1.0)
+        self.assertEqual(FINGER_2_ACTION_SCALE, 1.0)
 
     def test_replay_uses_hand_only_collection_config(self):
         with patch(
@@ -52,7 +56,7 @@ class ReplayEpisodeTests(unittest.TestCase):
         self.assertEqual(config.hand_config, Path("midas.yaml"))
         self.assertEqual(config.hand_port, "/dev/midas")
         self.assertEqual(config.active_motors, [4, 5, 12])
-        self.assertEqual(config.follower_joint_command_scales[4], 0.4)
+        self.assertEqual(config.follower_joint_command_scales[4], 0.6)
         self.assertEqual(config.follower_joint_command_offsets[12], 0.262)
 
     def test_hand_only_offsets_are_resolved_in_recorded_motor_order(self):
@@ -238,6 +242,34 @@ class ReplayEpisodeTests(unittest.TestCase):
         np.testing.assert_array_equal(raw_times, times)
         np.testing.assert_allclose(raw_targets, [[1.5, 3.0]])
         np.testing.assert_allclose(follower_targets, [[1.2, 4.4]])
+
+    def test_finger_2_action_scale_only_multiplies_pip_and_mcp(self):
+        _, targets = prepare_hand_stream_for_replay(
+            (np.asarray([0.0]), np.asarray([[1.0, 2.0, 3.0, 4.0]])),
+            (6, 7, 8, 9),
+            use_follower=False,
+            command_scale=1.0,
+            joint_command_scales=np.ones(4),
+            thumb_model=None,
+            action_scale=2.0,
+            finger_2_action_scale=1.5,
+        )
+
+        np.testing.assert_allclose(targets, [[2.0, 6.0, 9.0, 8.0]])
+
+    def test_finger_1_action_scale_only_multiplies_pip_and_mcp(self):
+        _, targets = prepare_hand_stream_for_replay(
+            (np.asarray([0.0]), np.asarray([[1.0, 2.0, 3.0, 4.0]])),
+            (3, 4, 5, 6),
+            use_follower=False,
+            command_scale=1.0,
+            joint_command_scales=np.ones(4),
+            thumb_model=None,
+            action_scale=2.0,
+            finger_1_action_scale=1.5,
+        )
+
+        np.testing.assert_allclose(targets, [[2.0, 6.0, 9.0, 8.0]])
 
     def test_legacy_proprioception_filename_is_still_supported(self):
         with tempfile.TemporaryDirectory() as temp_dir:

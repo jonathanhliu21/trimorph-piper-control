@@ -47,7 +47,11 @@ PIPER_FIRMWARE = "v183"
 PIPER_INSTALLATION_POS = "right"
 PIPER_PAYLOAD = "half"
 PURE_POSITION_OPERATING_MODE = 3
-ACTION_SCALE = 1.1
+ACTION_SCALE = 1.0
+FINGER_1_ACTION_SCALE = 1.3
+FINGER_1_PIP_MCP_MOTOR_IDS = frozenset((4, 5))
+FINGER_2_ACTION_SCALE = 1.3
+FINGER_2_PIP_MCP_MOTOR_IDS = frozenset((7, 8))
 
 
 def advance_current_sample_schedule(
@@ -300,8 +304,10 @@ def prepare_hand_stream_for_replay(
     thumb_model: ThumbRetargetModel | None,
     joint_command_offsets: np.ndarray | None = None,
     action_scale: float = 1.0,
+    finger_1_action_scale: float = 1.0,
+    finger_2_action_scale: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Build replay targets and apply the global action scale to every joint."""
+    """Build targets and apply global plus finger-specific PIP/MCP scales."""
 
     if not use_follower:
         targets = stream
@@ -322,7 +328,23 @@ def prepare_hand_stream_for_replay(
             dtype=np.float64,
         )
         targets = times, retargeted_positions
-    return scale_hand_stream(targets, action_scale)
+    per_joint_scales = np.asarray(
+        [
+            action_scale
+            * (
+                finger_1_action_scale
+                if motor_id in FINGER_1_PIP_MCP_MOTOR_IDS
+                else (
+                    finger_2_action_scale
+                    if motor_id in FINGER_2_PIP_MCP_MOTOR_IDS
+                    else 1.0
+                )
+            )
+            for motor_id in motor_ids
+        ],
+        dtype=np.float64,
+    )
+    return scale_hand_stream(targets, per_joint_scales)
 
 
 def config_values_for_motor_ids(
@@ -481,6 +503,8 @@ def main() -> int:
             joint_command_offsets=joint_offsets,
             thumb_model=thumb_model,
             action_scale=ACTION_SCALE,
+            finger_1_action_scale=FINGER_1_ACTION_SCALE,
+            finger_2_action_scale=FINGER_2_ACTION_SCALE,
         )
 
     hand = None
