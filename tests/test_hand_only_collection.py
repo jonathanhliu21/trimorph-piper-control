@@ -107,6 +107,56 @@ class HandOnlyCollectionTests(unittest.TestCase):
         with patch("sys.argv", ["collect_hand_only.py", "--data-collection"]):
             self.assertEqual(parse_args().mode, DATA_COLLECTION_MODE)
 
+    def test_cli_parses_disabled_force_feedback_motors(self):
+        with patch(
+            "sys.argv",
+            [
+                "collect_hand_only.py",
+                "--disable-force-feedback-motors",
+                "8",
+                "11",
+            ],
+        ):
+            args = parse_args()
+
+        self.assertEqual(args.disable_force_feedback_motors, [8, 11])
+
+    def test_main_copies_disabled_force_feedback_motors_to_config(self):
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "collect_hand_only.py",
+                    "--disable-force-feedback-motors",
+                    "8",
+                    "8",
+                    "11",
+                ],
+            ),
+            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+
+        self.assertEqual(
+            run.call_args.args[0].disabled_force_feedback_motor_ids,
+            (8, 11),
+        )
+
+    def test_disabled_force_feedback_motor_must_be_active(self):
+        with patch(
+            "sys.argv",
+            [
+                "collect_hand_only.py",
+                "--active-motors",
+                "4",
+                "5",
+                "--disable-force-feedback-motors",
+                "8",
+            ],
+        ):
+            with self.assertRaisesRegex(ValueError, "not active: \\[8\\]"):
+                main()
+
     def test_show_ui_flag_is_opt_in(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
             self.assertFalse(parse_args().show_ui)

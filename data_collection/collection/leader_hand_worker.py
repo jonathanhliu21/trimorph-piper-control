@@ -49,6 +49,7 @@ class TrimorphForceFeedbackController:
         tactile_current_ma: float,
         tactile_motor_ids: Sequence[Sequence[int]],
         feedback_source_motor_ids: Mapping[int, int] | None = None,
+        disabled_motor_ids: Sequence[int] = (),
     ) -> None:
         self.hand = hand
         self.client = hand.dxl_client
@@ -69,10 +70,18 @@ class TrimorphForceFeedbackController:
         )
         for digit_ids in tactile_motor_ids:
             eligible_motor_ids.update((motor_id, None) for motor_id in digit_ids)
+        disabled_motor_ids = frozenset(
+            int(motor_id) for motor_id in disabled_motor_ids
+        )
+        self._disabled_motor_ids = tuple(
+            motor_id
+            for motor_id in self._motor_indices
+            if motor_id in disabled_motor_ids
+        )
         self._feedback_motor_ids = tuple(
             motor_id
             for motor_id in eligible_motor_ids
-            if motor_id in self._motor_indices
+            if motor_id in self._motor_indices and motor_id not in disabled_motor_ids
         )
         self._feedback_source_motor_ids = {
             int(trimorph_id): int(midas_id)
@@ -122,6 +131,8 @@ class TrimorphForceFeedbackController:
         """Configure all feedback joints once and leave them in current mode."""
 
         self._set_latest_positions(positions)
+        if self._disabled_motor_ids:
+            self.hand.disable_torque(list(self._disabled_motor_ids))
         motor_ids = list(self._feedback_motor_ids)
         if not motor_ids:
             return
@@ -285,6 +296,9 @@ def run_leader_hand_worker(
         tactile_motor_ids=config.tactile_force_feedback_motor_ids,
         feedback_source_motor_ids=getattr(
             config, "force_feedback_source_motor_ids", None
+        ),
+        disabled_motor_ids=getattr(
+            config, "disabled_force_feedback_motor_ids", ()
         ),
     )
     period_ns = int(round(1_000_000_000 / config.hand_measure_rate_hz))

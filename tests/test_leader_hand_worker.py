@@ -142,6 +142,34 @@ class ForceFeedbackCurrentTests(unittest.TestCase):
             hand.dxl_client.sync_writes,
         )
 
+    def test_disabled_motor_is_excluded_from_all_force_feedback_sources(self):
+        hand = FakeHand()
+        controller = TrimorphForceFeedbackController(
+            hand,
+            feedback_motor_ids=(4, 5, 6),
+            max_current_ma=FORCE_FEEDBACK_MAX_CURRENT_MA,
+            full_scale_error_rad=FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
+            tactile_current_ma=TACTILE_FORCE_FEEDBACK_CURRENT_MA,
+            tactile_motor_ids=((4, 5, 6), (), (), ()),
+            disabled_motor_ids=(5,),
+        )
+
+        controller.start([0.4, 0.5, 0.6])
+        controller.update(
+            {4: 0.03, 5: 0.03, 6: 0.03},
+            [0.4, 0.5, 0.6],
+            (True, False, False, False),
+        )
+
+        self.assertEqual(hand.disabled, [[5], [4, 6]])
+        self.assertEqual(hand.enabled, [[4, 6]])
+        self.assertTrue(
+            all(
+                motor_ids == [4, 6]
+                for motor_ids, _values, _address, _size in hand.dxl_client.sync_writes
+            )
+        )
+
     def test_contact_currents_are_batched_and_apply_joint_signs(self):
         hand = FakeHand()
         controller = self.controller(hand)

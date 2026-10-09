@@ -103,6 +103,7 @@ class HandOnlyCollectionConfig:
     paxini_port: str | None = None
     tactile_debug_log: Path | None = None
     force_feedback_motor_ids: tuple[int, ...] = FORCE_FEEDBACK_MOTOR_IDS
+    disabled_force_feedback_motor_ids: tuple[int, ...] = ()
     force_feedback_source_motor_ids: dict[int, int] = field(
         default_factory=lambda: dict(FORCE_FEEDBACK_SOURCE_MOTOR_IDS)
     )
@@ -280,6 +281,17 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Motor IDs to read, command, and record. The hand and follower YAML "
             "files may contain additional motor IDs."
+        ),
+    )
+    parser.add_argument(
+        "--disable-force-feedback-motors",
+        nargs="+",
+        type=int,
+        default=[],
+        metavar="MOTOR_ID",
+        help=(
+            "Keep these active TRIMORPH motors torque-disabled while retaining "
+            "their position readings and retargeting (for example: 8 or 7 8 9)."
         ),
     )
     args = parser.parse_args()
@@ -676,6 +688,17 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
 
 def main() -> int:
     args = parse_args()
+    disabled_force_feedback_motor_ids = tuple(
+        dict.fromkeys(args.disable_force_feedback_motors)
+    )
+    inactive_disabled_ids = sorted(
+        set(disabled_force_feedback_motor_ids) - set(args.active_motors)
+    )
+    if inactive_disabled_ids:
+        raise ValueError(
+            "--disable-force-feedback-motors contains IDs that are not active: "
+            f"{inactive_disabled_ids}"
+        )
     add_tactile = (
         args.add_tactile
         or args.paxini_port is not None
@@ -704,6 +727,7 @@ def main() -> int:
             else None
         ),
         active_motors=args.active_motors,
+        disabled_force_feedback_motor_ids=disabled_force_feedback_motor_ids,
         follower_hand_config=(
             args.follower_config.expanduser()
             if args.follower_config is not None

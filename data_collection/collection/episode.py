@@ -223,6 +223,9 @@ class EpisodeBuffer:
                 "force_feedback_rate_hz": getattr(
                     self.config, "force_feedback_rate_hz", None
                 ),
+                "disabled_force_feedback_motor_ids": list(
+                    getattr(self.config, "disabled_force_feedback_motor_ids", ())
+                ),
                 "training_uses": "measured positions from leader_hand.csv",
             },
             "follower": {

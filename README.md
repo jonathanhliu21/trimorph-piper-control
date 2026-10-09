@@ -243,6 +243,20 @@ as capped current-mode force feedback. `--show-ui` requires a follower. Add
 fingertip contacts with force feedback, or use `--tactile-debug-log PATH` for
 headless tactile diagnostics.
 
+Use `--disable-force-feedback-motors` to leave selected TRIMORPH motors
+torque-disabled without removing them from position reading or retargeting. The
+exclusion applies to both MIDAS contact feedback and Paxini tactile feedback:
+
+```bash
+python3 data_collection/collect_hand_only.py \
+  --retarget-only \
+  --hand-config config/hand.yaml \
+  --hand-port /dev/serial/by-id/TRIMORPH \
+  --follower-config config/midas_hand_config.yaml \
+  --follower-port /dev/serial/by-id/MIDAS \
+  --disable-force-feedback-motors 8
+```
+
 ## 6. Episode replay and current logging
 
 Replay the latest episode on TRIMORPH and PiperX (or supply an episode number,
