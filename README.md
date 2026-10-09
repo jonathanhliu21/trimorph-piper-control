@@ -53,6 +53,15 @@ the system Python installation. The PiperX `pyAgxArm` package is installed
 directly from the vendor's GitHub repository by `requirements.txt`; configure
 SocketCAN before using PiperX.
 
+Bring up the default `can0` interface at 1 Mbit/s with the checked-in helper:
+
+```bash
+./setup_arm_can.sh
+```
+
+Use `./setup_arm_can.sh --help` to select another interface or bitrate. The
+script uses `sudo` for the link changes and prints the resulting CAN status.
+
 Optional Paxini tactile operation also requires the Paxini support exposed by
 `midas_hand_api` and a valid sensor serial port.
 
@@ -189,7 +198,17 @@ uses finger-specific rows; without it the output is the three-panel overview.
 
 [`data_collection/collect_hand_only.py`](data_collection/collect_hand_only.py)
 can record the backdriven TRIMORPH without launching PiperX. The wrist camera
-is optional:
+is optional. Collection is foot-pedal controlled by default: one press starts
+an episode after the ready delay, and pressing and releasing again saves it.
+Holding the pedal for the displayed delete interval discards the active
+episode. The pedal is auto-detected from Linux `/dev/input/event*` devices and
+is exclusively grabbed while the collector runs so its keystroke is not sent
+to other applications. If detection fails, run `python3
+scripts/piper_api/record_trajectory.py --list-input-devices` and ensure the
+desired event device is readable by the current user.
+
+For unattended or fixed-duration collection, pass `--episode-s` (the older
+`--episode-time` spelling remains supported):
 
 ```bash
 python3 data_collection/collect_hand_only.py \
@@ -198,10 +217,12 @@ python3 data_collection/collect_hand_only.py \
   --hand-config config/hand.yaml \
   --hand-port /dev/serial/by-id/TRIMORPH \
   --active-motors 0 1 2 3 4 5 6 7 8 9 10 11 12 \
-  --warmup-time 5 --episode-time 30
+  --warmup-time 5 --episode-s 30
 ```
 
-It warms up, records one fixed-duration episode, and exits. A hand-only episode
+This example warms up, records one 30-second episode, and exits. Without
+`--episode-s`, the collector continues creating pedal-controlled episodes until
+`q`, Escape (when a camera preview is open), or Ctrl-C. A hand-only episode
 contains populated `leader_hand.csv` and `metadata.json`, plus empty
 `camera_timestamps.csv` and `piper.csv` bookkeeping files. `follower.csv` is
 written only when a follower is configured, and no camera video is created.
@@ -217,6 +238,13 @@ anti-banding defaults are configured by `TASK_CAMERA_BRIGHTNESS` and
 default anti-banding mode is `60` Hz.
 Set `TASK_CAMERA_FLIP = "180"` in the same config file to rotate the saved and
 previewed image by 180 degrees.
+
+To check the camera and its configured brightness, anti-banding, resolution,
+and flip before collection, run:
+
+```bash
+python3 scripts/camera/test_wrist_camera.py
+```
 
 ## 5. TRIMORPH leader to MIDAS follower with force feedback
 
@@ -303,6 +331,38 @@ every final hand target angle before joint-limit clipping. Useful switches
 include `--no-preposition`, `--arm-only`, and `--no-piper-enable`.
 `--hand-only` and `--arm-only` are mutually exclusive in practice, and current
 logging cannot be used with `--arm-only`.
+
+### Record and replay a Piper trajectory
+
+[`scripts/piper_api/record_trajectory.py`](scripts/piper_api/record_trajectory.py)
+records a passively drag-taught Piper end-effector trajectory. First enable the
+arm's drag-teach mode, then press the pedal once to begin and again to stop and
+save:
+
+```bash
+python3 scripts/piper_api/record_trajectory.py \
+  --output trajectories/piper_pick.csv \
+  --foot-pedal-device /dev/input/by-id/FOOT_PEDAL
+```
+
+Use `--episode-s 10` to stop automatically after ten seconds, `--force` to
+replace an existing output, and `--list-input-devices` to locate the pedal.
+The recorder leaves Piper passive and stores timestamped end-effector
+`x,y,z,roll,pitch,yaw` samples in CSV.
+
+Replay that CSV in Piper position mode with automatic movement to its first
+pose followed by time-based interpolation at the requested command rate:
+
+```bash
+python3 scripts/piper_api/replay_trajectory.py \
+  trajectories/piper_pick.csv \
+  --rate-hz 30
+```
+
+The replay command also accepts an episode directory containing
+`trajectory.csv` or `piper.csv`. Use `--debug` for controller state and
+commanded-versus-measured pose diagnostics, or `--no-preposition` only when the
+arm is already safely positioned at the first pose.
 
 ### Alternating manual replay
 
