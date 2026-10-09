@@ -9,6 +9,7 @@ import numpy as np
 
 from collection.thumb_retargeting import ThumbRetargetModel
 from replay_episode import (
+    ACTION_SCALE,
     CURRENT_TELEMETRY_HZ,
     ReplayCurrentRecorder,
     advance_current_sample_schedule,
@@ -29,6 +30,9 @@ from scripts.trimorph_api_test.gen_graphs_from_csvs import _load_telemetry
 
 
 class ReplayEpisodeTests(unittest.TestCase):
+    def test_action_scale_is_a_module_constant(self):
+        self.assertEqual(ACTION_SCALE, 1.05)
+
     def test_replay_uses_hand_only_collection_config(self):
         with patch(
             "sys.argv",
@@ -191,7 +195,7 @@ class ReplayEpisodeTests(unittest.TestCase):
             thumb_model=ThumbRetargetModel(np.eye(2) * 100.0, np.ones(2)),
         )
 
-        self.assertIs(result, stream)
+        np.testing.assert_array_equal(result[0], times)
         np.testing.assert_array_equal(result[1], positions)
 
     def test_midas_replay_applies_joint_offsets(self):
@@ -206,6 +210,34 @@ class ReplayEpisodeTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(targets, [[0.262, 0.4]])
+
+    def test_action_scale_multiplies_all_final_replay_targets(self):
+        times = np.asarray([0.0])
+        positions = np.asarray([[1.0, 2.0]])
+
+        raw_times, raw_targets = prepare_hand_stream_for_replay(
+            (times, positions),
+            (4, 12),
+            use_follower=False,
+            command_scale=1.0,
+            joint_command_scales=np.ones(2),
+            thumb_model=None,
+            action_scale=1.5,
+        )
+        _, follower_targets = prepare_hand_stream_for_replay(
+            (times, positions),
+            (4, 12),
+            use_follower=True,
+            command_scale=1.0,
+            joint_command_scales=np.asarray([0.5, 1.0]),
+            joint_command_offsets=np.asarray([0.1, 0.2]),
+            thumb_model=None,
+            action_scale=2.0,
+        )
+
+        np.testing.assert_array_equal(raw_times, times)
+        np.testing.assert_allclose(raw_targets, [[1.5, 3.0]])
+        np.testing.assert_allclose(follower_targets, [[1.2, 4.4]])
 
     def test_legacy_proprioception_filename_is_still_supported(self):
         with tempfile.TemporaryDirectory() as temp_dir:

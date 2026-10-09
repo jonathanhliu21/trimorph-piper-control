@@ -47,6 +47,7 @@ PIPER_FIRMWARE = "v183"
 PIPER_INSTALLATION_POS = "right"
 PIPER_PAYLOAD = "half"
 PURE_POSITION_OPERATING_MODE = 3
+ACTION_SCALE = 1.05
 
 
 def advance_current_sample_schedule(
@@ -298,27 +299,30 @@ def prepare_hand_stream_for_replay(
     joint_command_scales: np.ndarray,
     thumb_model: ThumbRetargetModel | None,
     joint_command_offsets: np.ndarray | None = None,
+    action_scale: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Retarget a MIDAS replay stream or preserve raw TRIMORPH positions."""
+    """Build replay targets and apply the global action scale to every joint."""
 
     if not use_follower:
-        return stream
-    times, positions = stream
-    targets = np.asarray(
-        [
-            build_follower_target(
-                position,
-                motor_ids,
-                command_scale=command_scale,
-                joint_command_scales=joint_command_scales,
-                joint_command_offsets=joint_command_offsets,
-                thumb_model=thumb_model,
-            )
-            for position in positions
-        ],
-        dtype=np.float64,
-    )
-    return times, targets
+        targets = stream
+    else:
+        times, positions = stream
+        retargeted_positions = np.asarray(
+            [
+                build_follower_target(
+                    position,
+                    motor_ids,
+                    command_scale=command_scale,
+                    joint_command_scales=joint_command_scales,
+                    joint_command_offsets=joint_command_offsets,
+                    thumb_model=thumb_model,
+                )
+                for position in positions
+            ],
+            dtype=np.float64,
+        )
+        targets = times, retargeted_positions
+    return scale_hand_stream(targets, action_scale)
 
 
 def config_values_for_motor_ids(
@@ -476,6 +480,7 @@ def main() -> int:
             joint_command_scales=joint_scales,
             joint_command_offsets=joint_offsets,
             thumb_model=thumb_model,
+            action_scale=ACTION_SCALE,
         )
 
     hand = None

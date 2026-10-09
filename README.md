@@ -255,6 +255,10 @@ python3 data_collection/replay_episode.py \
   --hand-port /dev/serial/by-id/TRIMORPH
 ```
 
+Hand replay always selects Dynamixel pure position-control mode (`3`) for
+faithful pose tracking. This is an in-memory replay override; it does not alter
+the hand YAML or the current-based position mode used during collection.
+
 Replay just episode 42's hand stream and record graph-compatible current
 telemetry at the replay logger's fixed 10 Hz sampling rate:
 
@@ -280,7 +284,9 @@ python3 data_collection/replay_episode.py 42 \
   --output-current output/episode_42_midas_current.csv
 ```
 
-Useful switches are `--no-preposition`, `--arm-only`, and `--no-piper-enable`.
+The `ACTION_SCALE` constant in `data_collection/replay_episode.py` multiplies
+every final hand target angle before joint-limit clipping. Useful switches
+include `--no-preposition`, `--arm-only`, and `--no-piper-enable`.
 `--hand-only` and `--arm-only` are mutually exclusive in practice, and current
 logging cannot be used with `--arm-only`.
 
