@@ -7,6 +7,7 @@ import argparse
 import csv
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +46,7 @@ PIPER_CHANNEL = "can0"
 PIPER_FIRMWARE = "v183"
 PIPER_INSTALLATION_POS = "right"
 PIPER_PAYLOAD = "half"
+PURE_POSITION_OPERATING_MODE = 3
 
 
 def advance_current_sample_schedule(
@@ -385,10 +387,16 @@ def build_replay_hand_config(
     *,
     use_follower: bool,
 ):
-    """Load either hand configuration narrowed to the recorded motor columns."""
+    """Load a narrowed hand configuration using pure position control.
+
+    Collection and teleoperation retain the configured operating mode, while
+    replay deliberately uses Dynamixel mode 3 so the recorded positions are
+    not softened by the goal-current limit used in mode 5.
+    """
 
     loader = load_follower_config if use_follower else load_hand_config
-    return loader(hand_config, hand_port, active_motors)
+    config = loader(hand_config, hand_port, active_motors)
+    return replace(config, operating_mode=PURE_POSITION_OPERATING_MODE)
 
 
 def move_to_first_pose(hand, api, hand_stream, piper_stream, start_s: float, args) -> None:
@@ -488,6 +496,7 @@ def main() -> int:
                 hand, role="follower" if args.use_follower else "replay"
             )
             hand.configure(enable_torque=False)
+            print("Hand operating mode: pure position control (mode 3)")
             hand.set_motion_profile(
                 profile_velocity_rad_s=config.follower_profile_velocity_rad_s,
                 profile_acceleration_rad_s2=(

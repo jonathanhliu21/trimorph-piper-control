@@ -1,6 +1,7 @@
 import csv
 import tempfile
 import unittest
+from dataclasses import make_dataclass
 from pathlib import Path
 from unittest.mock import patch
 
@@ -115,10 +116,11 @@ class ReplayEpisodeTests(unittest.TestCase):
             self.assertTrue(parse_args().use_follower)
 
     def test_follower_config_is_subset_to_recorded_motor_ids(self):
-        expected = object()
+        ReplayConfig = make_dataclass("ReplayConfig", [("operating_mode", int)])
+        loaded = ReplayConfig(operating_mode=5)
         path = Path("midas.yaml")
         with patch(
-            "replay_episode.load_follower_config", return_value=expected
+            "replay_episode.load_follower_config", return_value=loaded
         ) as loader:
             actual = build_replay_hand_config(
                 path,
@@ -127,7 +129,9 @@ class ReplayEpisodeTests(unittest.TestCase):
                 use_follower=True,
             )
 
-        self.assertIs(actual, expected)
+        self.assertIsNot(actual, loaded)
+        self.assertEqual(actual.operating_mode, 3)
+        self.assertEqual(loaded.operating_mode, 5)
         loader.assert_called_once_with(path, "/dev/midas", (0, 1, 2, 3))
 
     def test_follower_scale_is_applied_to_all_hand_positions(self):
