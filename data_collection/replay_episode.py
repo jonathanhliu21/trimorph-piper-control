@@ -47,7 +47,7 @@ PIPER_FIRMWARE = "v183"
 PIPER_INSTALLATION_POS = "right"
 PIPER_PAYLOAD = "half"
 PURE_POSITION_OPERATING_MODE = 3
-ACTION_SCALE = 1.05
+ACTION_SCALE = 1.1
 
 
 def advance_current_sample_schedule(

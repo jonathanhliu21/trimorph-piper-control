@@ -6,6 +6,7 @@ position_d_gain: 500
 # position_p_gain: 500
 # position_i_gain: 0
 # position_d_gain: 300
+goal_current_limit_ma: 2000
 motor_ids:
 - 0
 - 1

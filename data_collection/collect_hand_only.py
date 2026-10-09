@@ -53,7 +53,7 @@ DATA_COLLECTION_MODE = "data_collection"
 RETARGET_ONLY_MODE = "retarget_only"
 DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
 
-PIP_SCALE = 0.4
+PIP_SCALE = 0.6
 MCP_SCALE = 0.5
 
 FORCE_FEEDBACK_MOTOR_IDS = (0, 1, *range(4, 13))
