@@ -1,0 +1,5 @@
+/home/grasswonder/Jonathan/trimorph-piper-control/data_trimorph_cubepickplacesimple/arm/gothere.csv
+/home/grasswonder/Jonathan/trimorph-piper-control/data_trimorph_cubepickplacesimple/raw/close/leader_hand.csv
+/home/grasswonder/Jonathan/trimorph-piper-control/data_trimorph_cubepickplacesimple/arm/trasnfer.csv
+/home/grasswonder/Jonathan/trimorph-piper-control/data_trimorph_cubepickplacesimple/raw/open/leader_hand.csv
+/home/grasswonder/Jonathan/trimorph-piper-control/data_trimorph_cubepickplacesimple/arm/goaway.csv

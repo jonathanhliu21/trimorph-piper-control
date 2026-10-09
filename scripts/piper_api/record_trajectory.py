@@ -39,16 +39,24 @@ CSV_FIELDS = (
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Record a passively drag-taught Piper EEF trajectory. Press the foot "
-            "pedal once to start and again to stop."
+            "Record a passively drag-taught Piper EEF trajectory using a foot "
+            "pedal."
         )
     )
     parser.add_argument(
-        "--output-dir",
+        "--output",
         type=Path,
-        help="Directory in which trajectory.csv will be saved.",
+        help="Destination CSV path.",
     )
     parser.add_argument("--rate-hz", type=float, default=200.0)
+    parser.add_argument(
+        "--episode-s",
+        type=float,
+        help=(
+            "Record for this many seconds after the first pedal press, then "
+            "stop and save automatically. By default, a second press stops recording."
+        ),
+    )
     parser.add_argument("--teacher-mode-poll-hz", type=float, default=20.0)
     parser.add_argument("--foot-pedal-device")
     parser.add_argument("--foot-pedal-key-code", type=int)
@@ -72,7 +80,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Replace an existing trajectory.csv in the output directory.",
+        help="Replace the output CSV if it already exists.",
     )
     return parser.parse_args(argv)
 
@@ -93,16 +101,18 @@ def write_trajectory(path: Path, rows: list[dict[str, object]], *, force: bool) 
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.output_dir is None:
-        raise ValueError("--output-dir is required")
+    if args.output is None:
+        raise ValueError("--output is required")
     if args.rate_hz <= 0:
         raise ValueError("--rate-hz must be greater than 0")
+    if args.episode_s is not None and args.episode_s <= 0:
+        raise ValueError("--episode-s must be greater than 0")
     if args.teacher_mode_poll_hz <= 0:
         raise ValueError("--teacher-mode-poll-hz must be greater than 0")
     if args.foot_pedal_debounce_seconds < 0:
         raise ValueError("--foot-pedal-debounce-seconds must be non-negative")
 
-    output_path = args.output_dir.expanduser().resolve() / "trajectory.csv"
+    output_path = args.output.expanduser().resolve()
     if output_path.exists() and not args.force:
         raise FileExistsError(
             f"Trajectory already exists: {output_path} (pass --force to replace it)"
@@ -123,6 +133,7 @@ def run(args: argparse.Namespace) -> int:
     rows: list[dict[str, object]] = []
     recording = False
     start_ns = 0
+    recording_deadline_ns: int | None = None
     next_sample_ns = 0
     sample_period_ns = int(round(1_000_000_000 / args.rate_hz))
     teacher_period_ns = int(round(1_000_000_000 / args.teacher_mode_poll_hz))
@@ -144,12 +155,25 @@ def run(args: argparse.Namespace) -> int:
         while True:
             if pedal.poll():
                 if recording:
-                    break
+                    if args.episode_s is None:
+                        break
+                    continue
                 recording = True
                 start_ns = time.monotonic_ns()
+                recording_deadline_ns = (
+                    start_ns + max(1, int(round(args.episode_s * 1_000_000_000)))
+                    if args.episode_s is not None
+                    else None
+                )
                 next_sample_ns = start_ns
                 next_teacher_ns = start_ns
-                print("Recording started. Press the pedal again to stop and save.")
+                if args.episode_s is None:
+                    print("Recording started. Press the pedal again to stop and save.")
+                else:
+                    print(
+                        f"Recording started for {args.episode_s:g}s; "
+                        "it will stop and save automatically."
+                    )
 
             now_ns = time.monotonic_ns()
             if recording and now_ns >= next_teacher_ns:
@@ -182,11 +206,21 @@ def run(args: argparse.Namespace) -> int:
                 while next_sample_ns < sample_ns:
                     next_sample_ns += sample_period_ns
 
+            if (
+                recording_deadline_ns is not None
+                and time.monotonic_ns() >= recording_deadline_ns
+            ):
+                print(f"Reached the {args.episode_s:g}s episode duration.")
+                break
+
             wait_s = 0.005
             if recording:
+                next_wake_ns = next_sample_ns
+                if recording_deadline_ns is not None:
+                    next_wake_ns = min(next_wake_ns, recording_deadline_ns)
                 wait_s = max(
                     0.0,
-                    min(wait_s, (next_sample_ns - time.monotonic_ns()) / 1e9),
+                    min(wait_s, (next_wake_ns - time.monotonic_ns()) / 1e9),
                 )
             if wait_s:
                 time.sleep(wait_s)

@@ -284,6 +284,39 @@ Useful switches are `--no-preposition`, `--arm-only`, and `--no-piper-enable`.
 `--hand-only` and `--arm-only` are mutually exclusive in practice, and current
 logging cannot be used with `--arm-only`.
 
+### Alternating manual replay
+
+[`scripts/replay_corl_workshop/manual_replay.py`](scripts/replay_corl_workshop/manual_replay.py)
+replays separate Piper and TRIMORPH trajectories one at a time. Create a text
+file whose non-comment lines alternate from Piper to TRIMORPH; relative paths
+are resolved from the text file's directory:
+
+```text
+# workshop_sequence.txt
+trajectories/piper_pick.csv
+trajectories/trimorph_close.csv
+trajectories/piper_place.csv
+trajectories/trimorph_open.csv
+```
+
+Then run:
+
+```bash
+python3 scripts/replay_corl_workshop/manual_replay.py workshop_sequence.txt \
+  --hand-config config/hand.yaml \
+  --hand-port /dev/serial/by-id/TRIMORPH \
+  --foot-pedal-device /dev/input/by-id/FOOT_PEDAL
+```
+
+Both devices are checked before motion. The first fresh pedal press moves the
+hand to the initial joint-angle constant defined in the script. After that move
+settles, a second fresh press starts the first Piper trajectory. After each CSV
+finishes, press and release the foot pedal to advance; a press made during
+motion is discarded. The inactive controller stays enabled at its last target,
+and no trajectory commands are sent to it until its next turn. Use
+`--list-input-devices` to find the pedal event device and `--help` for
+replay-rate, preposition, hardware, and motion-profile options.
+
 ## 7. Thumb IK/retarget calibration
 
 [`data_collection/retarget_thumb.py`](data_collection/retarget_thumb.py)

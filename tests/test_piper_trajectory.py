@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import call, patch
 
-from scripts.piper_api.record_trajectory import EEF_FIELDS, write_trajectory
+from scripts.piper_api.record_trajectory import (
+    EEF_FIELDS,
+    parse_args as parse_record_args,
+    run as run_record,
+    write_trajectory,
+)
 from scripts.piper_api.piper_api import PiperAPI
 from scripts.piper_api.replay_trajectory import (
     load_trajectory,
@@ -16,6 +21,22 @@ from scripts.piper_api.replay_trajectory import (
 
 
 class PiperTrajectoryTest(unittest.TestCase):
+    def test_record_episode_duration_cli(self):
+        args = parse_record_args(
+            ["--output", "output/example.csv", "--episode-s", "4.5"]
+        )
+
+        self.assertEqual(args.episode_s, 4.5)
+        self.assertEqual(args.output, Path("output/example.csv"))
+
+    def test_record_episode_duration_must_be_positive(self):
+        args = parse_record_args(
+            ["--output", "output/example.csv", "--episode-s", "0"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "--episode-s"):
+            run_record(args)
+
     def test_piper_api_sets_position_mode(self):
         class MotionMode:
             P = object()
