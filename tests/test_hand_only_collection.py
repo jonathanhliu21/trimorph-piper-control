@@ -169,6 +169,12 @@ class HandOnlyCollectionTests(unittest.TestCase):
         with patch("sys.argv", ["collect_hand_only.py", "--add-camera"]):
             self.assertTrue(parse_args().add_camera)
 
+    def test_piper_flag_is_opt_in(self):
+        with patch("sys.argv", ["collect_hand_only.py"]):
+            self.assertFalse(parse_args().use_piper)
+        with patch("sys.argv", ["collect_hand_only.py", "--use-piper"]):
+            self.assertTrue(parse_args().use_piper)
+
     def test_camera_worker_is_conditional(self):
         config = HandOnlyCollectionConfig(
             dataset_root=Path("data_trimorph"),
@@ -184,6 +190,31 @@ class HandOnlyCollectionTests(unittest.TestCase):
             [name for name, _ in worker_specs(config)],
             ["task_camera", "leader_hand"],
         )
+
+    def test_piper_worker_is_conditional(self):
+        config = HandOnlyCollectionConfig(
+            dataset_root=Path("data_trimorph"),
+            hand_config=Path("config/hand.yaml"),
+            hand_port="/dev/hand",
+            hand_measure_rate_hz=100.0,
+            warmup_time=0.0,
+            episode_time=30.0,
+        )
+        self.assertNotIn("piper", [name for name, _ in worker_specs(config)])
+        config = replace(config, use_piper=True)
+        self.assertEqual(
+            [name for name, _ in worker_specs(config)],
+            ["piper", "leader_hand"],
+        )
+
+    def test_main_copies_piper_flag_to_config(self):
+        with (
+            patch("sys.argv", ["collect_hand_only.py", "--use-piper"]),
+            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+
+        self.assertTrue(run.call_args.args[0].use_piper)
 
     def test_tactile_options_are_opt_in(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
@@ -275,6 +306,31 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertEqual(metadata["paths"]["leader_hand_csv"], "leader_hand.csv")
             self.assertIsNone(metadata["camera"]["device"])
             self.assertIsNone(metadata["piper"]["mode"])
+            self.assertIsNone(metadata["piper"]["target_rate_hz"])
+
+    def test_piper_metadata_is_populated_only_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = HandOnlyCollectionConfig(
+                dataset_root=Path(temp_dir),
+                hand_config=Path("config/hand.yaml"),
+                hand_port="/dev/hand",
+                hand_measure_rate_hz=100.0,
+                warmup_time=0.0,
+                episode_time=30.0,
+                use_piper=True,
+            )
+            recorder = RecordingManager()
+            session = start_episode(config, recorder)
+            session.append_piper(
+                {"sample_idx": 0, "monotonic_ns": session.start_ns, "elapsed_s": "0"}
+            )
+            with patch("collection.episode._hand_metadata", return_value={}):
+                stop_episode(recorder, "duration_complete")
+
+            metadata = json.loads(session.paths.metadata_path.read_text())
+            self.assertEqual(metadata["piper"]["mode"], "passive_drag_teach_logging")
+            self.assertEqual(metadata["piper"]["target_rate_hz"], 200.0)
+            self.assertEqual(metadata["counts"]["piper_samples"], 1)
 
     def test_camera_metadata_is_populated_only_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:

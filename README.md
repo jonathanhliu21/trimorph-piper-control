@@ -229,6 +229,11 @@ written only when a follower is configured, and no camera video is created.
 The older filename `proprioception.csv` is still accepted by replay for
 compatibility.
 
+Add `--use-piper` to passively record the Piper EEF pose and drag-teach state
+to `piper.csv`, synchronized with the hand samples. This uses the same Piper
+settings and passive logger as the full collector; it does not enable or send
+motion commands to the arm. Move the arm with its built-in drag-teach control.
+
 Add `--add-camera` to start the DepthAI/OAK wrist camera, display its live feed,
 and save `camera.mp4` plus populated `camera_timestamps.csv` and camera metadata
 in the same format as the full collector. Press `q` or Escape in the camera

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sys
 import time
 from dataclasses import replace
@@ -46,11 +47,12 @@ PIPER_CHANNEL = "can0"
 PIPER_FIRMWARE = "v183"
 PIPER_INSTALLATION_POS = "right"
 PIPER_PAYLOAD = "half"
+PIPER_DIAG_INTERVAL_S = 0.5
 PURE_POSITION_OPERATING_MODE = 3
 ACTION_SCALE = 1.0
-FINGER_1_ACTION_SCALE = 1.3
+FINGER_1_ACTION_SCALE = 1.0
 FINGER_1_PIP_MCP_MOTOR_IDS = frozenset((4, 5))
-FINGER_2_ACTION_SCALE = 1.3
+FINGER_2_ACTION_SCALE = 1.0
 FINGER_2_PIP_MCP_MOTOR_IDS = frozenset((7, 8))
 
 
@@ -202,6 +204,20 @@ def parse_args() -> argparse.Namespace:
         "--no-piper-enable",
         action="store_true",
         help="Do not enable Piper; also permits replay of episodes with an empty piper.csv.",
+    )
+    parser.add_argument(
+        "--arm-diag",
+        action="store_true",
+        help=(
+            "Print Piper controller status, limit faults, motor-enable state, "
+            "and commanded-versus-measured EEF error during replay."
+        ),
+    )
+    parser.add_argument(
+        "--arm-diag-interval-s",
+        type=float,
+        default=PIPER_DIAG_INTERVAL_S,
+        help="Seconds between --arm-diag samples (default: %(default)s).",
     )
     return parser.parse_args()
 
@@ -395,6 +411,75 @@ def sample_stream(times: np.ndarray, values: np.ndarray, query_t: float) -> np.n
     )
 
 
+def decode_piper_error_code(err_code: int) -> tuple[list[int], list[int]]:
+    """Return joints reporting angle-limit and communication faults."""
+
+    angle_limits = [joint for joint in range(1, 7) if err_code & (1 << (joint + 7))]
+    communication = [joint for joint in range(1, 7) if err_code & (1 << (joint - 1))]
+    return angle_limits, communication
+
+
+def _format_piper_vector(values) -> str:
+    return "[" + ", ".join(f"{float(value):+.6f}" for value in values) + "]"
+
+
+def log_piper_diagnostics(api, label: str, target=None) -> None:
+    """Print actionable Piper feedback without interrupting replay."""
+
+    state = api.get_state()
+    try:
+        enabled = list(api.robot.get_joints_enable_status_list())
+    except Exception as exc:  # Diagnostics must not stop an otherwise valid replay.
+        enabled = [f"unavailable:{exc}"]
+
+    try:
+        err_code = int(state.get("err_code", 0))
+    except (TypeError, ValueError):
+        err_code = 0
+    angle_limits, communication = decode_piper_error_code(err_code)
+
+    alerts = []
+    if "CAN_CTRL" not in str(state.get("ctrl_mode", "")):
+        alerts.append("control_mode_not_CAN")
+    if "NORMAL" not in str(state.get("arm_status", "")):
+        alerts.append(f"arm_status={state.get('arm_status')}")
+    if "FAILED" in str(state.get("motion_status", "")):
+        alerts.append("target_not_reached")
+    if angle_limits:
+        alerts.append(f"joint_angle_limit={angle_limits}")
+    if communication:
+        alerts.append(f"joint_communication={communication}")
+
+    print(
+        f"[piper-diag:{label}] ok={state.get('is_ok')} "
+        f"fps={state.get('receive_fps')} ctrl={state.get('ctrl_mode')} "
+        f"arm={state.get('arm_status')} mode={state.get('mode_feedback')} "
+        f"teach={state.get('teach_status')} motion={state.get('motion_status')} "
+        f"err_code={err_code} enabled={enabled} "
+        f"alerts={alerts or ['none']}"
+    )
+
+    if target is None:
+        return
+    try:
+        measured = np.asarray(
+            [float(state[field]) for field in RAW_EEF_FIELDS], dtype=np.float64
+        )
+        commanded = np.asarray(target, dtype=np.float64)
+    except (KeyError, TypeError, ValueError):
+        print(f"[piper-diag:{label}] EEF feedback unavailable")
+        return
+
+    position_error_m = float(np.linalg.norm(commanded[:3] - measured[:3]))
+    rpy_error = (commanded[3:] - measured[3:] + math.pi) % (2.0 * math.pi) - math.pi
+    print(
+        f"[piper-diag:{label}] target={_format_piper_vector(commanded)} "
+        f"measured={_format_piper_vector(measured)} "
+        f"position_error_m={position_error_m:.6f} "
+        f"rpy_error_rad={_format_piper_vector(rpy_error)}"
+    )
+
+
 def replay_interval(*streams: tuple[np.ndarray, np.ndarray] | None) -> tuple[float, float]:
     active = [stream for stream in streams if stream is not None]
     if not active:
@@ -448,6 +533,8 @@ def main() -> int:
     args = parse_args()
     if args.rate_hz <= 0:
         raise ValueError("--rate-hz must be greater than 0")
+    if args.arm_diag_interval_s <= 0:
+        raise ValueError("--arm-diag-interval-s must be greater than 0")
     if args.preposition_seconds < 0 or args.settle_seconds < 0:
         raise ValueError("Preposition and settle durations must be non-negative")
     if args.hand_only and args.arm_only:
@@ -553,16 +640,27 @@ def main() -> int:
             )
             api.connect()
             print("Piper connected:", api.is_ok(), "receive FPS:", api.get_fps())
+            if args.arm_diag:
+                log_piper_diagnostics(api, "connected")
             if not args.no_piper_enable and not api.enable():
                 raise RuntimeError("Timed out while enabling Piper")
+            if args.arm_diag:
+                log_piper_diagnostics(api, "after-enable")
 
         move_to_first_pose(hand, api, hand_stream, piper_stream, start_s, args)
+        if args.arm_diag and api is not None and piper_stream is not None:
+            log_piper_diagnostics(
+                api,
+                "after-preposition",
+                sample_stream(*piper_stream, start_s),
+            )
         if api is not None:
             api.set_speed_percent(PIPER_REPLAY_SPEED_PERCENT)
 
         period_s = 1.0 / args.rate_hz
         current_sample_period_s = 1.0 / CURRENT_TELEMETRY_HZ
         next_current_sample_s = 0.0
+        next_arm_diag_s = 0.0
         wall_start = time.monotonic()
         tick = 0
         print(
@@ -591,7 +689,15 @@ def main() -> int:
                         elapsed_s=replay_elapsed_s,
                     )
             if api is not None and piper_stream is not None:
-                api.move_eef(sample_stream(*piper_stream, episode_t))
+                piper_target = sample_stream(*piper_stream, episode_t)
+                api.move_eef(piper_target)
+                replay_elapsed_s = episode_t - start_s
+                if args.arm_diag and replay_elapsed_s + 1e-12 >= next_arm_diag_s:
+                    log_piper_diagnostics(
+                        api, f"replay-{replay_elapsed_s:.3f}s", piper_target
+                    )
+                    while next_arm_diag_s <= replay_elapsed_s + 1e-12:
+                        next_arm_diag_s += args.arm_diag_interval_s
             if episode_t >= end_s:
                 break
             tick += 1

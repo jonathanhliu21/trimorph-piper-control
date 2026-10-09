@@ -154,7 +154,11 @@ class EpisodeBuffer:
         has_camera = hasattr(self.config, "task_camera_width") and bool(
             getattr(self.config, "add_camera", True)
         )
-        has_piper = hasattr(self.config, "piper_rate_hz")
+        # CollectionConfig always includes Piper. HandOnlyCollectionConfig has
+        # the same settings, but gates the worker behind the opt-in flag.
+        has_piper = hasattr(self.config, "piper_rate_hz") and bool(
+            getattr(self.config, "use_piper", True)
+        )
         return {
             "episode_index": self.paths.episode_index,
             "status": "complete" if not self.errors else "error",
@@ -256,7 +260,11 @@ class EpisodeBuffer:
             },
             "piper": {
                 "mode": "passive_drag_teach_logging" if has_piper else None,
-                "target_rate_hz": getattr(self.config, "piper_rate_hz", None),
+                "target_rate_hz": (
+                    getattr(self.config, "piper_rate_hz", None)
+                    if has_piper
+                    else None
+                ),
                 "raw_eef_fields": list(RAW_EEF_FIELDS),
             },
             "errors": self.errors,

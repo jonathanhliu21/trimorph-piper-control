@@ -30,6 +30,7 @@ from collection.episode import (
 )
 from collection.follower_hand_worker import run_follower_hand_worker
 from collection.leader_hand_worker import run_leader_hand_worker
+from collection.piper_worker import run_piper_worker
 from collection.shared_state import SharedState
 from collection.tactile_worker import run_tactile_worker
 from collection.utils import WorkerError, import_cv2, worker_wrapper
@@ -42,6 +43,13 @@ DEFAULT_WARMUP_TIME_S = 5.0
 DEFAULT_HAND_MEASURE_RATE_HZ = 50.0
 DEFAULT_FOLLOWER_MEASURE_RATE_HZ = 100.0
 DEFAULT_FORCE_FEEDBACK_RATE_HZ = 50.0
+DEFAULT_PIPER_RATE_HZ = 200.0
+DEFAULT_PIPER_INTERFACE = "socketcan"
+DEFAULT_PIPER_CHANNEL = "can0"
+DEFAULT_PIPER_FIRMWARE = "v183"
+DEFAULT_PIPER_INSTALLATION_POS = "right"
+DEFAULT_PIPER_PAYLOAD = "half"
+DEFAULT_TEACHER_MODE_POLL_HZ = 20.0
 DEFAULT_HOLD_DELETE_S = 2.0
 DEFAULT_READY_SECONDS = 0.2
 DEFAULT_FOOT_PEDAL_DEBOUNCE_S = 0.5
@@ -91,6 +99,14 @@ class HandOnlyCollectionConfig:
     mode: str = DATA_COLLECTION_MODE
     show_ui: bool = False
     add_camera: bool = False
+    use_piper: bool = False
+    piper_rate_hz: float = DEFAULT_PIPER_RATE_HZ
+    piper_interface: str = DEFAULT_PIPER_INTERFACE
+    piper_channel: str = DEFAULT_PIPER_CHANNEL
+    piper_firmware: str = DEFAULT_PIPER_FIRMWARE
+    piper_installation_pos: str | None = DEFAULT_PIPER_INSTALLATION_POS
+    piper_payload: str | None = DEFAULT_PIPER_PAYLOAD
+    teacher_mode_poll_hz: float = DEFAULT_TEACHER_MODE_POLL_HZ
     task_view_window_name: str = TASK_VIEW_WINDOW_NAME
     task_camera_width: int = TASK_CAMERA_WIDTH
     task_camera_height: int = TASK_CAMERA_HEIGHT
@@ -214,6 +230,14 @@ def parse_args() -> argparse.Namespace:
         help="record the DepthAI wrist camera and show its live feed",
     )
     parser.add_argument(
+        "--use-piper",
+        action="store_true",
+        help=(
+            "passively record Piper EEF and drag-teach state alongside the hand; "
+            "the collector never commands or enables the arm"
+        ),
+    )
+    parser.add_argument(
         "--add-tactile",
         action="store_true",
         help=(
@@ -301,9 +325,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def worker_specs(config: HandOnlyCollectionConfig):
-    specs = [("leader_hand", run_leader_hand_worker)]
+    specs = []
     if config.add_camera:
-        specs.insert(0, ("task_camera", run_depthai_task_camera_worker))
+        specs.append(("task_camera", run_depthai_task_camera_worker))
+    if config.use_piper:
+        specs.append(("piper", run_piper_worker))
+    specs.append(("leader_hand", run_leader_hand_worker))
     if config.follower_hand_config is not None:
         specs.append(("follower", run_follower_hand_worker))
     if config.add_tactile:
@@ -391,7 +418,8 @@ def stop_episode(recorder: RecordingManager, reason: str) -> EpisodeBuffer | Non
         f"Saved episode {session.paths.episode_index:06d}: "
         f"{len(session.leader_hand_rows)} leader-hand samples, "
         f"{len(session.follower_rows)} follower samples, "
-        f"{len(session.camera_rows)} camera frames"
+        f"{len(session.camera_rows)} camera frames, "
+        f"{len(session.piper_rows)} Piper samples"
     )
     return session
 
@@ -578,6 +606,11 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     elif config.mode != RETARGET_ONLY_MODE:
         raise ValueError(f"Unknown hand-only mode: {config.mode!r}")
 
+    if config.use_piper:
+        print(
+            "Piper logging is passive: use the arm's built-in drag-teach control."
+        )
+
     if config.use_foot_pedal and config.mode == DATA_COLLECTION_MODE:
         pedal = FootPedalTrigger(
             config.foot_pedal_device,
@@ -719,6 +752,7 @@ def main() -> int:
         mode=args.mode,
         show_ui=args.show_ui,
         add_camera=args.add_camera,
+        use_piper=args.use_piper,
         add_tactile=add_tactile,
         paxini_port=args.paxini_port,
         tactile_debug_log=(
@@ -750,6 +784,13 @@ def main() -> int:
         )
     if config.add_camera:
         validate_camera_settings(config)
+    if config.use_piper:
+        if config.piper_rate_hz <= 0:
+            raise ValueError("PIPER_RATE_HZ must be greater than 0")
+        if config.teacher_mode_poll_hz <= 0:
+            raise ValueError("TEACHER_MODE_POLL_HZ must be greater than 0")
+        if config.piper_firmware not in {"default", "v183", "v188"}:
+            raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
     if config.follower_hand_port == config.hand_port:
         raise ValueError("Primary and follower hand ports must be different")
     if config.paxini_port is not None and config.paxini_port in {

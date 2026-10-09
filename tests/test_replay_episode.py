@@ -1,6 +1,8 @@
 import csv
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from dataclasses import make_dataclass
 from pathlib import Path
 from unittest.mock import patch
@@ -18,8 +20,10 @@ from replay_episode import (
     build_replay_config,
     build_replay_hand_config,
     config_values_for_motor_ids,
+    decode_piper_error_code,
     load_hand_stream,
     load_piper_stream,
+    log_piper_diagnostics,
     replay_interval,
     resolve_leader_hand_path,
     sample_stream,
@@ -88,6 +92,68 @@ class ReplayEpisodeTests(unittest.TestCase):
             "sys.argv", ["replay_episode.py", "--output-current", "telemetry.csv"]
         ):
             self.assertEqual(parse_args().output_current, Path("telemetry.csv"))
+
+    def test_arm_diagnostics_cli_is_opt_in(self):
+        with patch("sys.argv", ["replay_episode.py"]):
+            args = parse_args()
+            self.assertFalse(args.arm_diag)
+            self.assertEqual(args.arm_diag_interval_s, 0.5)
+        with patch(
+            "sys.argv",
+            [
+                "replay_episode.py",
+                "--arm-diag",
+                "--arm-diag-interval-s",
+                "0.25",
+            ],
+        ):
+            args = parse_args()
+            self.assertTrue(args.arm_diag)
+            self.assertEqual(args.arm_diag_interval_s, 0.25)
+
+    def test_piper_diagnostics_report_limit_and_tracking_errors(self):
+        class FakeRobot:
+            @staticmethod
+            def get_joints_enable_status_list():
+                return [True] * 6
+
+        class FakeAPI:
+            robot = FakeRobot()
+
+            @staticmethod
+            def get_state():
+                return {
+                    "is_ok": "True",
+                    "receive_fps": "200.0",
+                    "ctrl_mode": "TEACHING_MODE(0x2)",
+                    "arm_status": "TARGET_POS_EXCEEDS_LIMIT(0x4)",
+                    "mode_feedback": "MOVE_P(0x0)",
+                    "teach_status": "STOP_RECORDING(0x2)",
+                    "motion_status": "REACH_TARGET_POS_FAILED(0x1)",
+                    "err_code": (1 << 10) | (1 << 4),
+                    "x": "0.0",
+                    "y": "0.0",
+                    "z": "0.0",
+                    "roll": "0.0",
+                    "pitch": "0.0",
+                    "yaw": "0.0",
+                }
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            log_piper_diagnostics(FakeAPI(), "test", np.ones(6))
+
+        text = output.getvalue()
+        self.assertIn("control_mode_not_CAN", text)
+        self.assertIn("joint_angle_limit=[3]", text)
+        self.assertIn("joint_communication=[5]", text)
+        self.assertIn("position_error_m=1.732051", text)
+
+    def test_piper_error_code_decodes_joint_bits(self):
+        self.assertEqual(
+            decode_piper_error_code((1 << 8) | (1 << 13) | (1 << 1)),
+            ([1, 6], [2]),
+        )
 
     def test_current_output_is_compatible_with_graph_generator(self):
         class FakeHand:
