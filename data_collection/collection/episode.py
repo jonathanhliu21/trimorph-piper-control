@@ -260,12 +260,22 @@ class EpisodeBuffer:
             },
             "piper": {
                 "mode": "passive_drag_teach_logging" if has_piper else None,
+                "joint_level_recording": (
+                    bool(getattr(self.config, "piper_joint_level", False))
+                    if has_piper
+                    else False
+                ),
                 "target_rate_hz": (
                     getattr(self.config, "piper_rate_hz", None)
                     if has_piper
                     else None
                 ),
                 "raw_eef_fields": list(RAW_EEF_FIELDS),
+                "raw_joint_fields": (
+                    [f"joint_{joint}" for joint in range(1, 7)]
+                    if has_piper and getattr(self.config, "piper_joint_level", False)
+                    else []
+                ),
             },
             "errors": self.errors,
         }

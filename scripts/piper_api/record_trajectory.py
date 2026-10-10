@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Record a drag-taught Piper end-effector trajectory with a foot pedal."""
+"""Record a drag-taught Piper EEF and optional joint trajectory."""
 
 from __future__ import annotations
 
 import argparse
 import csv
+import math
 import sys
 import time
 from pathlib import Path
@@ -24,6 +25,9 @@ from scripts.piper_api.teacher_mode import get_teacher_mode  # noqa: E402
 
 
 EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
+JOINT_FIELDS = tuple(f"joint_{joint}" for joint in range(1, 7))
+JOINT_LIMIT_WARNING_MARGIN_RAD = math.radians(2.0)
+JOINT_LIMIT_WARNING_REPEAT_NS = 5_000_000_000
 CSV_FIELDS = (
     "sample_idx",
     "monotonic_ns",
@@ -48,7 +52,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="Destination CSV path.",
     )
-    parser.add_argument("--rate-hz", type=float, default=200.0)
+    parser.add_argument("--rate-hz", type=float, default=250.0)
+    parser.add_argument(
+        "--joint-level",
+        "--joint-position",
+        dest="joint_level",
+        action="store_true",
+        help="Also record measured joint angles for joint-space replay; recording remains passive.",
+    )
     parser.add_argument(
         "--episode-s",
         type=float,
@@ -95,9 +106,61 @@ def write_trajectory(path: Path, rows: list[dict[str, object]], *, force: bool) 
             f"Trajectory already exists: {path} (pass --force to replace it)"
         )
     with path.open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=CSV_FIELDS)
+        fields = CSV_FIELDS + JOINT_FIELDS if all(
+            all(field in row for field in JOINT_FIELDS) for row in rows
+        ) else CSV_FIELDS
+        if any(any(field in row for field in JOINT_FIELDS) for row in rows) and fields == CSV_FIELDS:
+            raise ValueError("Joint samples must be present in every trajectory row")
+        writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def read_joint_limits(api: PiperAPI) -> dict[int, tuple[float, float]]:
+    """Read controller limits for recording warnings without changing them."""
+
+    limits: dict[int, tuple[float, float]] = {}
+    for joint in range(1, 7):
+        try:
+            feedback = api.robot.get_joint_angle_vel_limits(
+                joint, timeout=1.0, min_interval=0.0
+            )
+            if feedback is None:
+                raise RuntimeError("no controller reply")
+            low = float(feedback.msg.min_angle_limit)
+            high = float(feedback.msg.max_angle_limit)
+            if not math.isfinite(low) or not math.isfinite(high) or low >= high:
+                raise ValueError(f"invalid range [{low}, {high}]")
+            limits[joint] = (low, high)
+        except Exception as exc:
+            print(
+                f"Warning: cannot monitor J{joint} limit during recording: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+    return limits
+
+
+def joint_limit_warning(
+    joint: int, angle: float, low: float, high: float
+) -> tuple[str, str] | None:
+    """Return a stable warning state and message near or beyond a limit."""
+
+    if angle < low:
+        state = "below minimum"
+    elif angle > high:
+        state = "above maximum"
+    elif angle - low <= JOINT_LIMIT_WARNING_MARGIN_RAD:
+        state = "near minimum"
+    elif high - angle <= JOINT_LIMIT_WARNING_MARGIN_RAD:
+        state = "near maximum"
+    else:
+        return None
+    return (
+        state,
+        f"[warning:joint-limit] J{joint} {state}: measured {angle:+.6f} rad; "
+        f"controller limits [{low:+.6f}, {high:+.6f}] rad",
+    )
 
 
 def run(args: argparse.Namespace) -> int:
@@ -139,6 +202,9 @@ def run(args: argparse.Namespace) -> int:
     teacher_period_ns = int(round(1_000_000_000 / args.teacher_mode_poll_hz))
     next_teacher_ns = 0
     teach_status: object = None
+    joint_limits: dict[int, tuple[float, float]] = {}
+    last_limit_state: dict[int, str] = {}
+    last_limit_warning_ns: dict[int, int] = {}
 
     try:
         pedal.start()
@@ -147,6 +213,8 @@ def run(args: argparse.Namespace) -> int:
         print(f"Piper connected: {api.is_ok()} (receive FPS: {api.get_fps():.1f})")
         if not api.is_ok():
             raise RuntimeError("Piper is not responding on the CAN bus")
+        if args.joint_level:
+            joint_limits = read_joint_limits(api)
         print(
             "Piper remains passive. Enable its drag-teach mode, then press the "
             "pedal to start recording."
@@ -184,8 +252,9 @@ def run(args: argparse.Namespace) -> int:
 
             if recording and now_ns >= next_sample_ns:
                 eef = api.get_eef_state()
+                joints = api.get_joint_state() if args.joint_level else None
                 sample_ns = time.monotonic_ns()
-                if eef is not None:
+                if eef is not None and (not args.joint_level or joints is not None):
                     row: dict[str, object] = {
                         "sample_idx": len(rows),
                         "monotonic_ns": sample_ns,
@@ -201,6 +270,31 @@ def run(args: argparse.Namespace) -> int:
                             for field, value in zip(EEF_FIELDS, eef.pose)
                         }
                     )
+                    if joints is not None:
+                        for joint, angle in enumerate(joints.joints, start=1):
+                            if joint not in joint_limits:
+                                continue
+                            warning = joint_limit_warning(
+                                joint, float(angle), *joint_limits[joint]
+                            )
+                            if warning is None:
+                                last_limit_state.pop(joint, None)
+                                continue
+                            state, message = warning
+                            if (
+                                state != last_limit_state.get(joint)
+                                or sample_ns - last_limit_warning_ns.get(joint, 0)
+                                >= JOINT_LIMIT_WARNING_REPEAT_NS
+                            ):
+                                print(message, file=sys.stderr, flush=True)
+                                last_limit_warning_ns[joint] = sample_ns
+                            last_limit_state[joint] = state
+                        row.update(
+                            {
+                                field: f"{float(value):.9f}"
+                                for field, value in zip(JOINT_FIELDS, joints.joints)
+                            }
+                        )
                     rows.append(row)
                 next_sample_ns += sample_period_ns
                 while next_sample_ns < sample_ns:

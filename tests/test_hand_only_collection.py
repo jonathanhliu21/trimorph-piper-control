@@ -107,6 +107,29 @@ class HandOnlyCollectionTests(unittest.TestCase):
         with patch("sys.argv", ["collect_hand_only.py", "--data-collection"]):
             self.assertEqual(parse_args().mode, DATA_COLLECTION_MODE)
 
+    def test_joint_level_piper_settings_are_exposed(self):
+        with (
+            patch(
+                "sys.argv",
+                ["collect_hand_only.py", "--use-piper", "--joint-level",
+                 "--piper-rate-hz", "300", "--piper-channel", "can1"],
+            ),
+            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+        config = run.call_args.args[0]
+        self.assertTrue(config.piper_joint_level)
+        self.assertEqual(config.piper_rate_hz, 300.0)
+        self.assertEqual(config.piper_channel, "can1")
+
+    def test_joint_position_alias_enables_piper_joint_recording(self):
+        with (
+            patch("sys.argv", ["collect_hand_only.py", "--use-piper", "--joint-position"]),
+            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+        self.assertTrue(run.call_args.args[0].piper_joint_level)
+
     def test_cli_parses_disabled_force_feedback_motors(self):
         with patch(
             "sys.argv",
@@ -329,7 +352,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
 
             metadata = json.loads(session.paths.metadata_path.read_text())
             self.assertEqual(metadata["piper"]["mode"], "passive_drag_teach_logging")
-            self.assertEqual(metadata["piper"]["target_rate_hz"], 200.0)
+            self.assertEqual(metadata["piper"]["target_rate_hz"], 250.0)
             self.assertEqual(metadata["counts"]["piper_samples"], 1)
 
     def test_camera_metadata_is_populated_only_when_enabled(self):

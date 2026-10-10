@@ -43,7 +43,7 @@ DEFAULT_WARMUP_TIME_S = 5.0
 DEFAULT_HAND_MEASURE_RATE_HZ = 50.0
 DEFAULT_FOLLOWER_MEASURE_RATE_HZ = 100.0
 DEFAULT_FORCE_FEEDBACK_RATE_HZ = 50.0
-DEFAULT_PIPER_RATE_HZ = 200.0
+DEFAULT_PIPER_RATE_HZ = 250.0
 DEFAULT_PIPER_INTERFACE = "socketcan"
 DEFAULT_PIPER_CHANNEL = "can0"
 DEFAULT_PIPER_FIRMWARE = "v183"
@@ -100,6 +100,7 @@ class HandOnlyCollectionConfig:
     show_ui: bool = False
     add_camera: bool = False
     use_piper: bool = False
+    piper_joint_level: bool = False
     piper_rate_hz: float = DEFAULT_PIPER_RATE_HZ
     piper_interface: str = DEFAULT_PIPER_INTERFACE
     piper_channel: str = DEFAULT_PIPER_CHANNEL
@@ -236,6 +237,41 @@ def parse_args() -> argparse.Namespace:
             "passively record Piper EEF and drag-teach state alongside the hand; "
             "the collector never commands or enables the arm"
         ),
+    )
+    parser.add_argument(
+        "--piper-joint-level", "--joint-level", "--joint-position",
+        dest="piper_joint_level",
+        action="store_true",
+        help="Record measured Piper joint angles alongside EEF poses for joint-space replay (still passive).",
+    )
+    parser.add_argument(
+        "--piper-rate-hz",
+        type=float,
+        default=DEFAULT_PIPER_RATE_HZ,
+        help="Piper sampling rate in Hz (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--piper-teacher-mode-poll-hz",
+        type=float,
+        default=DEFAULT_TEACHER_MODE_POLL_HZ,
+        help="Piper status polling rate in Hz (default: %(default)s).",
+    )
+    parser.add_argument("--piper-channel", default=DEFAULT_PIPER_CHANNEL)
+    parser.add_argument("--piper-interface", default=DEFAULT_PIPER_INTERFACE)
+    parser.add_argument(
+        "--piper-firmware",
+        choices=("default", "v183", "v188"),
+        default=DEFAULT_PIPER_FIRMWARE,
+    )
+    parser.add_argument(
+        "--piper-installation-pos",
+        choices=("unchanged", "horizontal", "left", "right"),
+        default=DEFAULT_PIPER_INSTALLATION_POS,
+    )
+    parser.add_argument(
+        "--piper-payload",
+        choices=("unchanged", "empty", "half", "full"),
+        default=DEFAULT_PIPER_PAYLOAD,
     )
     parser.add_argument(
         "--add-tactile",
@@ -753,6 +789,14 @@ def main() -> int:
         show_ui=args.show_ui,
         add_camera=args.add_camera,
         use_piper=args.use_piper,
+        piper_joint_level=args.piper_joint_level,
+        piper_rate_hz=args.piper_rate_hz,
+        teacher_mode_poll_hz=args.piper_teacher_mode_poll_hz,
+        piper_channel=args.piper_channel,
+        piper_interface=args.piper_interface,
+        piper_firmware=args.piper_firmware,
+        piper_installation_pos=args.piper_installation_pos,
+        piper_payload=args.piper_payload,
         add_tactile=add_tactile,
         paxini_port=args.paxini_port,
         tactile_debug_log=(
@@ -784,6 +828,8 @@ def main() -> int:
         )
     if config.add_camera:
         validate_camera_settings(config)
+    if config.piper_joint_level and not config.use_piper:
+        raise ValueError("--piper-joint-level requires --use-piper")
     if config.use_piper:
         if config.piper_rate_hz <= 0:
             raise ValueError("PIPER_RATE_HZ must be greater than 0")

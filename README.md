@@ -233,6 +233,22 @@ Add `--use-piper` to passively record the Piper EEF pose and drag-teach state
 to `piper.csv`, synchronized with the hand samples. This uses the same Piper
 settings and passive logger as the full collector; it does not enable or send
 motion commands to the arm. Move the arm with its built-in drag-teach control.
+Add `--joint-level` to include measured `joint_1`–`joint_6` in each Piper row,
+then use `--joint-level` with `data_collection/replay_episode.py` to replay
+those angles using smooth joint commands instead of firmware EEF IK. This only
+works for episodes newly recorded with joint columns. `--joint-position` is an
+alias for collection. While recording joint angles, the Piper worker warns
+within 2° of a controller limit or when a measured angle is beyond it; it does
+not interrupt recording. Episode joint replay shares the trajectory replayer's
+bounded-step control and accepts the same `--max-joint-step-rad`,
+`--preposition-seconds`, `--settle-seconds`,
+`--preposition-speed-percent`, and `--replay-speed-percent` tuning options.
+Edit `JOINT_ACTION_SCALES` in `data_collection/replay_episode.py` to set the
+final-position multiplier for each hand motor ID 0–12.
+Piper sampling defaults
+to 250 Hz; `--piper-rate-hz`, `--piper-teacher-mode-poll-hz`,
+`--piper-channel`, `--piper-interface`, `--piper-firmware`,
+`--piper-installation-pos`, and `--piper-payload` configure the Piper worker.
 
 Add `--add-camera` to start the DepthAI/OAK wrist camera, display its live feed,
 and save `camera.mp4` plus populated `camera_timestamps.csv` and camera metadata
@@ -333,9 +349,9 @@ python3 data_collection/replay_episode.py 42 \
 
 The `ACTION_SCALE` constant in `data_collection/replay_episode.py` multiplies
 every final hand target angle before joint-limit clipping. The
-`FINGER_1_ACTION_SCALE` and `FINGER_2_ACTION_SCALE` constants add another
-multiplier only to each finger's PIP and MCP-flex joints (motors 4–5 and 7–8,
-respectively); both default to `1.0`. Useful switches include
+`JOINT_ACTION_SCALES` dictionary adds a multiplier by motor ID for all IDs
+0–12; IDs 4–5 and 7–8 currently use `1.3`, and the others use `1.0`.
+Useful switches include
 `--no-preposition`, `--arm-only`, and `--no-piper-enable`.
 `--hand-only` and `--arm-only` are mutually exclusive in practice, and current
 logging cannot be used with `--arm-only`.
@@ -350,13 +366,18 @@ save:
 ```bash
 python3 scripts/piper_api/record_trajectory.py \
   --output trajectories/piper_pick.csv \
+  --joint-level \
   --foot-pedal-device /dev/input/by-id/FOOT_PEDAL
 ```
 
 Use `--episode-s 10` to stop automatically after ten seconds, `--force` to
 replace an existing output, and `--list-input-devices` to locate the pedal.
 The recorder leaves Piper passive and stores timestamped end-effector
-`x,y,z,roll,pitch,yaw` samples in CSV.
+`x,y,z,roll,pitch,yaw` samples in CSV. With `--joint-level`, it also stores
+measured `joint_1`–`joint_6` angles. The default sampling request is 250 Hz;
+actual distinct samples are limited by the controller's feedback rate. In
+`--joint-level` mode, the recorder prints a warning when a measured joint is
+within 2° of, or beyond, a controller-reported limit; recording continues.
 
 Replay that CSV in Piper position mode with automatic movement to its first
 pose followed by time-based interpolation at the requested command rate:
@@ -364,13 +385,25 @@ pose followed by time-based interpolation at the requested command rate:
 ```bash
 python3 scripts/piper_api/replay_trajectory.py \
   trajectories/piper_pick.csv \
-  --rate-hz 30
+  --joint-level --rate-hz 60
 ```
 
 The replay command also accepts an episode directory containing
 `trajectory.csv` or `piper.csv`. Use `--debug` for controller state and
 commanded-versus-measured pose diagnostics, or `--no-preposition` only when the
 arm is already safely positioned at the first pose.
+Joint-level replay uses smooth `move_j` commands, not the unsmoothed `move_js`
+mode. It does not preflight recorded angles against controller limits; the
+controller may reject out-of-range targets during replay. Omit `--joint-level`
+for the original EEF replay.
+Higher sampling or command rates do not guarantee lower physical tracking lag.
+For joint-level replay, prepositioning ramps linearly from the arm's measured
+joint angles to the first recorded point. Each subsequent command is capped at
+`--max-joint-step-rad` (default 0.02 rad) from measured feedback. If the start
+is too far to reach in `--preposition-seconds`, replay aborts before that move;
+increase the preposition time only after checking the physical path is clear.
+After prepositioning, joint-level replay warns if the largest start error is
+over 0.10 rad and aborts only above 0.15 rad.
 
 ### Alternating manual replay
 
