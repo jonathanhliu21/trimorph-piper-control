@@ -147,6 +147,14 @@ class ReplayEpisodeTests(unittest.TestCase):
         ):
             self.assertEqual(parse_args().output_current, Path("telemetry.csv"))
 
+    def test_output_video_cli_option_is_opt_in_and_requires_a_path(self):
+        with patch("sys.argv", ["replay_episode.py"]):
+            self.assertIsNone(parse_args().output_video)
+        with patch(
+            "sys.argv", ["replay_episode.py", "--output-video", "replay.mp4"]
+        ):
+            self.assertEqual(parse_args().output_video, Path("replay.mp4"))
+
     def test_arm_diagnostics_cli_is_opt_in(self):
         with patch("sys.argv", ["replay_episode.py"]):
             args = parse_args()

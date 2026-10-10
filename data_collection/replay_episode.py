@@ -23,6 +23,13 @@ from collect_hand_only import (
     DEFAULT_THUMB_MODEL,
     HandOnlyCollectionConfig,
 )
+from collection.depthai_task_camera_worker import flip_frame
+from collection.depthai_utils import (
+    apply_camera_control,
+    import_depthai,
+    require_depthai_device,
+    warmup_color_queue,
+)
 from collection.episode import raw_root
 from collection.hand_common import (
     load_follower_config,
@@ -35,6 +42,7 @@ from collection.thumb_retargeting import (
     build_follower_target,
     load_thumb_retarget_model,
 )
+from collection.utils import import_cv2
 
 
 DATASET_ROOT = Path("data_trimorph")
@@ -55,20 +63,136 @@ PIPER_DIAG_INTERVAL_S = 0.5
 PURE_POSITION_OPERATING_MODE = 3
 ACTION_SCALE = 1.0
 JOINT_ACTION_SCALES: dict[int, float] = {
-    0: 1.3,
-    1: 1.3,
+    0: 1.1,
+    1: 1.1,
     2: 1.0,
     3: 1.0,
-    4: 1.3,
-    5: 1.3,
+    4: 1.1,
+    5: 1.1,
     6: 1.0,
-    7: 1.0,
-    8: 1.0,
-    9: 1.3,
-    10: 1.0,
-    11: 1.0,
-    12: 1.3,
+    7: 1.1,
+    8: 1.1,
+    9: 1.0,
+    10: 1.1,
+    11: 1.1,
+    12: 1.0,
 }
+CAMERA_WARMUP_ATTEMPTS = 60
+
+
+class ReplayVideoRecorder:
+    """Keep an OAK pipeline warm and record frames during the replay interval."""
+
+    def __init__(self, output: Path, config: HandOnlyCollectionConfig) -> None:
+        self.output = output.expanduser().resolve()
+        self.config = config
+        self._ready = threading.Event()
+        self._begin = threading.Event()
+        self._stop = threading.Event()
+        self._wall_start = 0.0
+        self._duration_s = 0.0
+        self._error: Exception | None = None
+        self._frames_written = 0
+        self._thread = threading.Thread(
+            target=self._run,
+            name="oak-replay-video",
+        )
+
+    def prepare(self) -> None:
+        """Connect and warm up the camera without recording pre-replay frames."""
+
+        self.output.parent.mkdir(parents=True, exist_ok=True)
+        self._thread.start()
+        self._ready.wait()
+        self.raise_if_failed()
+
+    def start(self, wall_start: float, duration_s: float) -> None:
+        self._wall_start = wall_start
+        self._duration_s = duration_s
+        self._begin.set()
+
+    def finish(self) -> None:
+        self._thread.join()
+        self.raise_if_failed()
+        print(
+            f"Saved replay OAK video to {self.output} "
+            f"({self._frames_written} frames)"
+        )
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._begin.set()
+        if self._thread.is_alive():
+            self._thread.join()
+
+    def raise_if_failed(self) -> None:
+        if self._error is not None:
+            raise RuntimeError(
+                f"OAK video recording failed: {self._error}"
+            ) from self._error
+
+    def _run(self) -> None:
+        writer = None
+        try:
+            cv2 = import_cv2()
+            dai = import_depthai()
+            require_depthai_device(dai)
+            with dai.Pipeline() as pipeline:
+                camera = pipeline.create(dai.node.Camera).build()
+                apply_camera_control(
+                    dai,
+                    camera,
+                    brightness=self.config.task_camera_brightness,
+                    anti_banding_hz=self.config.task_camera_anti_banding_hz,
+                )
+                camera_output = camera.requestOutput(
+                    (
+                        self.config.task_camera_width,
+                        self.config.task_camera_height,
+                    ),
+                    dai.ImgFrame.Type.NV12,
+                )
+                queue = camera_output.createOutputQueue()
+                pipeline.start()
+                size = warmup_color_queue(queue, CAMERA_WARMUP_ATTEMPTS)
+                if size is None:
+                    raise RuntimeError("OAK camera produced no frames during warmup")
+                actual_width, actual_height = size
+                fourcc = cv2.VideoWriter_fourcc(*self.config.video_codec)
+                writer = cv2.VideoWriter(
+                    str(self.output),
+                    fourcc,
+                    float(self.config.task_camera_fps),
+                    (actual_width, actual_height),
+                )
+                if not writer.isOpened():
+                    raise RuntimeError(f"Could not open video writer: {self.output}")
+                print(
+                    f"Replay camera (DepthAI/OAK): {actual_width}x{actual_height} "
+                    f"@{self.config.task_camera_fps}fps"
+                )
+                self._ready.set()
+                self._begin.wait()
+                end_time = self._wall_start + self._duration_s
+                while (
+                    not self._stop.is_set()
+                    and pipeline.isRunning()
+                    and time.monotonic() < end_time
+                ):
+                    frame = queue.get().getCvFrame()
+                    if frame is None:
+                        continue
+                    if time.monotonic() >= end_time:
+                        break
+                    frame = flip_frame(cv2, frame, self.config.task_camera_flip)
+                    writer.write(frame)
+                    self._frames_written += 1
+        except Exception as exc:
+            self._error = exc
+        finally:
+            if writer is not None:
+                writer.release()
+            self._ready.set()
 
 
 def advance_current_sample_schedule(
@@ -248,6 +372,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Measure hand motor current during replay and write graph-compatible "
             "telemetry to PATH. No telemetry is saved when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--output-video",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Record the OAK camera view during replay and save the video to PATH. "
+            "No camera is opened when omitted."
         ),
     )
     parser.add_argument(
@@ -721,6 +854,7 @@ def main() -> int:
     arm_stop = threading.Event()
     arm_thread: threading.Thread | None = None
     arm_errors: list[Exception] = []
+    video_recorder: ReplayVideoRecorder | None = None
     try:
         if replay_hand:
             from midas_hand_api import MidasHand
@@ -794,10 +928,16 @@ def main() -> int:
         if api is not None:
             api.set_speed_percent(args.replay_speed_percent)
 
+        if args.output_video is not None:
+            video_recorder = ReplayVideoRecorder(args.output_video, config)
+            video_recorder.prepare()
+
         hand_period_s = 1.0 / args.rate_hz
         current_sample_period_s = 1.0 / CURRENT_TELEMETRY_HZ
         next_current_sample_s = 0.0
         wall_start = time.monotonic()
+        if video_recorder is not None:
+            video_recorder.start(wall_start, end_s - start_s)
         print(
             f"Replaying {episode_dir} from {start_s:.3f}s to {end_s:.3f}s "
             f"(hand {args.rate_hz:.1f} Hz, Piper {args.piper_rate_hz:.1f} Hz)."
@@ -819,6 +959,8 @@ def main() -> int:
             tick = 0
             duration_s = end_s - start_s
             while True:
+                if video_recorder is not None:
+                    video_recorder.raise_if_failed()
                 if arm_errors:
                     raise arm_errors[0]
                 deadline = wall_start + tick * hand_period_s
@@ -855,8 +997,12 @@ def main() -> int:
         if arm_thread is not None:
             while arm_thread.is_alive():
                 arm_thread.join(timeout=0.05)
+                if video_recorder is not None:
+                    video_recorder.raise_if_failed()
             if arm_errors:
                 raise arm_errors[0]
+        if video_recorder is not None:
+            video_recorder.finish()
         if current_recorder is not None:
             output_current_csv(current_recorder, args.output_current)
         print("Replay complete.")
@@ -868,6 +1014,8 @@ def main() -> int:
         return 130
     finally:
         arm_stop.set()
+        if video_recorder is not None:
+            video_recorder.stop()
         if arm_thread is not None:
             arm_thread.join()
         if api is not None:
