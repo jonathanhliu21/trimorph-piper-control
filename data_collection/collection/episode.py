@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from .config import RAW_EEF_FIELDS, TRIMORPH_MOTOR_IDS
+from .config import QUEST_PACKET_FIELDS, RAW_EEF_FIELDS, TRIMORPH_MOTOR_IDS
 from .utils import WorkerError, utc_stamp, write_csv, write_json
 
 
@@ -27,6 +27,7 @@ class EpisodePaths:
     leader_hand_path: Path
     follower_path: Path
     piper_path: Path
+    quest_path: Path
     metadata_path: Path
 
 
@@ -54,6 +55,7 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
         leader_hand_path=episode_dir / "leader_hand.csv",
         follower_path=episode_dir / "follower.csv",
         piper_path=episode_dir / "piper.csv",
+        quest_path=episode_dir / "quest.csv",
         metadata_path=episode_dir / "metadata.json",
     )
 
@@ -93,6 +95,7 @@ class EpisodeBuffer:
         self.leader_hand_rows: list[dict[str, object]] = []
         self.follower_rows: list[dict[str, object]] = []
         self.piper_rows: list[dict[str, object]] = []
+        self.quest_rows: list[dict[str, object]] = []
         self.video_done = threading.Event()
 
     def elapsed_s(self, sample_ns: int) -> float:
@@ -114,6 +117,10 @@ class EpisodeBuffer:
         with self.lock:
             self.piper_rows.append(row)
 
+    def append_quest(self, row: dict[str, object]) -> None:
+        with self.lock:
+            self.quest_rows.append(row)
+
     def mark_stopped(self, reason: str) -> None:
         self.stop_ns = time.monotonic_ns()
         self.stopped_utc = utc_stamp()
@@ -131,14 +138,23 @@ class EpisodeBuffer:
             leader_hand_rows = list(self.leader_hand_rows)
             follower_rows = list(self.follower_rows)
             piper_rows = list(self.piper_rows)
+            quest_rows = list(self.quest_rows)
         write_csv(self.paths.camera_timestamps_path, camera_rows)
         write_csv(self.paths.leader_hand_path, leader_hand_rows)
         if getattr(self.config, "follower_hand_config", None) is not None:
             write_csv(self.paths.follower_path, follower_rows)
         write_csv(self.paths.piper_path, piper_rows)
+        if getattr(self.config, "use_quest", False):
+            write_csv(self.paths.quest_path, quest_rows)
         write_json(
             self.paths.metadata_path,
-            self._metadata(camera_rows, leader_hand_rows, follower_rows, piper_rows),
+            self._metadata(
+                camera_rows,
+                leader_hand_rows,
+                follower_rows,
+                piper_rows,
+                quest_rows,
+            ),
         )
 
     def _metadata(
@@ -147,6 +163,7 @@ class EpisodeBuffer:
         leader_hand_rows: list[dict[str, object]],
         follower_rows: list[dict[str, object]],
         piper_rows: list[dict[str, object]],
+        quest_rows: list[dict[str, object]],
     ) -> dict[str, Any]:
         stop_ns = self.stop_ns or time.monotonic_ns()
         follower_config = getattr(self.config, "follower_hand_config", None)
@@ -159,6 +176,7 @@ class EpisodeBuffer:
         has_piper = hasattr(self.config, "piper_rate_hz") and bool(
             getattr(self.config, "use_piper", True)
         )
+        has_quest = bool(getattr(self.config, "use_quest", False))
         return {
             "episode_index": self.paths.episode_index,
             "status": "complete" if not self.errors else "error",
@@ -179,12 +197,14 @@ class EpisodeBuffer:
                     else None
                 ),
                 "piper_csv": self.paths.piper_path.name,
+                "quest_csv": self.paths.quest_path.name if has_quest else None,
             },
             "counts": {
                 "camera_frames": len(camera_rows),
                 "leader_hand_samples": len(leader_hand_rows),
                 "follower_samples": len(follower_rows),
                 "piper_samples": len(piper_rows),
+                "quest_samples": len(quest_rows),
             },
             "camera": {
                 "device": "oak1_depthai" if has_camera else None,
@@ -276,6 +296,21 @@ class EpisodeBuffer:
                     if has_piper and getattr(self.config, "piper_joint_level", False)
                     else []
                 ),
+            },
+            "quest": {
+                "mode": "udp_pose_logging" if has_quest else None,
+                "bind_host": (
+                    getattr(self.config, "quest_host", None) if has_quest else None
+                ),
+                "port": (
+                    getattr(self.config, "quest_port", None) if has_quest else None
+                ),
+                "startup_timeout_s": (
+                    getattr(self.config, "quest_startup_timeout_s", None)
+                    if has_quest
+                    else None
+                ),
+                "raw_fields": list(QUEST_PACKET_FIELDS) if has_quest else [],
             },
             "errors": self.errors,
         }

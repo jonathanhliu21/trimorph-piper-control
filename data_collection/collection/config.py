@@ -9,6 +9,7 @@ from typing import Mapping, Sequence
 
 TRIMORPH_MOTOR_IDS = tuple(range(13))
 RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
+QUEST_PACKET_FIELDS = ("seq", "px", "py", "pz", "qx", "qy", "qz", "qw")
 FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
 FOLLOWER_PROFILE_ACCELERATION_RAD_S2 = 50.0
 TASK_CAMERA_WIDTH = 1280

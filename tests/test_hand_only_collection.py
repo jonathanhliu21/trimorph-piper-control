@@ -198,6 +198,17 @@ class HandOnlyCollectionTests(unittest.TestCase):
         with patch("sys.argv", ["collect_hand_only.py", "--use-piper"]):
             self.assertTrue(parse_args().use_piper)
 
+    def test_quest_flag_is_opt_in_and_mutually_exclusive_with_piper(self):
+        with patch("sys.argv", ["collect_hand_only.py"]):
+            self.assertFalse(parse_args().use_quest)
+        with patch("sys.argv", ["collect_hand_only.py", "--use-quest"]):
+            self.assertTrue(parse_args().use_quest)
+        with patch(
+            "sys.argv", ["collect_hand_only.py", "--use-piper", "--use-quest"]
+        ):
+            with self.assertRaises(SystemExit):
+                parse_args()
+
     def test_camera_worker_is_conditional(self):
         config = HandOnlyCollectionConfig(
             dataset_root=Path("data_trimorph"),
@@ -229,6 +240,35 @@ class HandOnlyCollectionTests(unittest.TestCase):
             [name for name, _ in worker_specs(config)],
             ["piper", "leader_hand"],
         )
+
+    def test_quest_worker_is_conditional(self):
+        config = HandOnlyCollectionConfig(
+            dataset_root=Path("data_trimorph"),
+            hand_config=Path("config/hand.yaml"),
+            hand_port="/dev/hand",
+            hand_measure_rate_hz=100.0,
+            warmup_time=0.0,
+            episode_time=30.0,
+        )
+        self.assertNotIn("quest", [name for name, _ in worker_specs(config)])
+        config = replace(config, use_quest=True)
+        self.assertEqual(
+            [name for name, _ in worker_specs(config)],
+            ["quest", "leader_hand"],
+        )
+
+    def test_main_copies_quest_flag_and_defaults_to_config(self):
+        with (
+            patch("sys.argv", ["collect_hand_only.py", "--use-quest"]),
+            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+
+        config = run.call_args.args[0]
+        self.assertTrue(config.use_quest)
+        self.assertEqual(config.quest_host, "0.0.0.0")
+        self.assertEqual(config.quest_port, 5005)
+        self.assertEqual(config.quest_startup_timeout_s, 5.0)
 
     def test_main_copies_piper_flag_to_config(self):
         with (
@@ -354,6 +394,71 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertEqual(metadata["piper"]["mode"], "passive_drag_teach_logging")
             self.assertEqual(metadata["piper"]["target_rate_hz"], 250.0)
             self.assertEqual(metadata["counts"]["piper_samples"], 1)
+
+    def test_quest_csv_and_metadata_are_written_only_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = HandOnlyCollectionConfig(
+                dataset_root=Path(temp_dir),
+                hand_config=Path("config/hand.yaml"),
+                hand_port="/dev/hand",
+                hand_measure_rate_hz=100.0,
+                warmup_time=0.0,
+                episode_time=30.0,
+                use_quest=True,
+            )
+            recorder = RecordingManager()
+            session = start_episode(config, recorder)
+            session.append_quest(
+                {
+                    "sample_idx": 0,
+                    "monotonic_ns": session.start_ns,
+                    "wall_time_s": "1.0",
+                    "elapsed_s": "0.0",
+                    "seq": 1,
+                    "px": 0.1,
+                    "py": 0.2,
+                    "pz": 0.3,
+                    "qx": 0.0,
+                    "qy": 0.0,
+                    "qz": 0.0,
+                    "qw": 1.0,
+                }
+            )
+            with patch("collection.episode._hand_metadata", return_value={}):
+                stop_episode(recorder, "duration_complete")
+
+            self.assertTrue(session.paths.quest_path.read_text())
+            metadata = json.loads(session.paths.metadata_path.read_text())
+            self.assertEqual(metadata["paths"]["quest_csv"], "quest.csv")
+            self.assertEqual(metadata["counts"]["quest_samples"], 1)
+            self.assertEqual(metadata["quest"]["mode"], "udp_pose_logging")
+            self.assertEqual(metadata["quest"]["bind_host"], "0.0.0.0")
+            self.assertEqual(metadata["quest"]["port"], 5005)
+            self.assertEqual(metadata["quest"]["startup_timeout_s"], 5.0)
+            self.assertEqual(
+                metadata["quest"]["raw_fields"],
+                ["seq", "px", "py", "pz", "qx", "qy", "qz", "qw"],
+            )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = HandOnlyCollectionConfig(
+                dataset_root=Path(temp_dir),
+                hand_config=Path("config/hand.yaml"),
+                hand_port="/dev/hand",
+                hand_measure_rate_hz=100.0,
+                warmup_time=0.0,
+                episode_time=30.0,
+            )
+            recorder = RecordingManager()
+            session = start_episode(config, recorder)
+            with patch("collection.episode._hand_metadata", return_value={}):
+                stop_episode(recorder, "duration_complete")
+
+            self.assertFalse(session.paths.quest_path.exists())
+            metadata = json.loads(session.paths.metadata_path.read_text())
+            self.assertIsNone(metadata["paths"]["quest_csv"])
+            self.assertEqual(metadata["counts"]["quest_samples"], 0)
+            self.assertIsNone(metadata["quest"]["mode"])
 
     def test_camera_metadata_is_populated_only_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -31,6 +31,7 @@ from collection.episode import (
 from collection.follower_hand_worker import run_follower_hand_worker
 from collection.leader_hand_worker import run_leader_hand_worker
 from collection.piper_worker import run_piper_worker
+from collection.quest_worker import run_quest_worker
 from collection.shared_state import SharedState
 from collection.tactile_worker import run_tactile_worker
 from collection.utils import WorkerError, import_cv2, worker_wrapper
@@ -50,6 +51,9 @@ DEFAULT_PIPER_FIRMWARE = "v183"
 DEFAULT_PIPER_INSTALLATION_POS = "right"
 DEFAULT_PIPER_PAYLOAD = "half"
 DEFAULT_TEACHER_MODE_POLL_HZ = 20.0
+DEFAULT_QUEST_HOST = "0.0.0.0"
+DEFAULT_QUEST_PORT = 5005
+DEFAULT_QUEST_STARTUP_TIMEOUT_S = 5.0
 DEFAULT_HOLD_DELETE_S = 2.0
 DEFAULT_READY_SECONDS = 0.2
 DEFAULT_FOOT_PEDAL_DEBOUNCE_S = 0.5
@@ -100,6 +104,10 @@ class HandOnlyCollectionConfig:
     show_ui: bool = False
     add_camera: bool = False
     use_piper: bool = False
+    use_quest: bool = False
+    quest_host: str = DEFAULT_QUEST_HOST
+    quest_port: int = DEFAULT_QUEST_PORT
+    quest_startup_timeout_s: float = DEFAULT_QUEST_STARTUP_TIMEOUT_S
     piper_joint_level: bool = False
     piper_rate_hz: float = DEFAULT_PIPER_RATE_HZ
     piper_interface: str = DEFAULT_PIPER_INTERFACE
@@ -230,12 +238,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="record the DepthAI wrist camera and show its live feed",
     )
-    parser.add_argument(
+    pose_source_group = parser.add_mutually_exclusive_group()
+    pose_source_group.add_argument(
         "--use-piper",
         action="store_true",
         help=(
             "passively record Piper EEF and drag-teach state alongside the hand; "
             "the collector never commands or enables the arm"
+        ),
+    )
+    pose_source_group.add_argument(
+        "--use-quest",
+        action="store_true",
+        help=(
+            "record raw Quest position and quaternion packets received over UDP "
+            "alongside the hand"
         ),
     )
     parser.add_argument(
@@ -366,6 +383,8 @@ def worker_specs(config: HandOnlyCollectionConfig):
         specs.append(("task_camera", run_depthai_task_camera_worker))
     if config.use_piper:
         specs.append(("piper", run_piper_worker))
+    if config.use_quest:
+        specs.append(("quest", run_quest_worker))
     specs.append(("leader_hand", run_leader_hand_worker))
     if config.follower_hand_config is not None:
         specs.append(("follower", run_follower_hand_worker))
@@ -455,7 +474,8 @@ def stop_episode(recorder: RecordingManager, reason: str) -> EpisodeBuffer | Non
         f"{len(session.leader_hand_rows)} leader-hand samples, "
         f"{len(session.follower_rows)} follower samples, "
         f"{len(session.camera_rows)} camera frames, "
-        f"{len(session.piper_rows)} Piper samples"
+        f"{len(session.piper_rows)} Piper samples, "
+        f"{len(session.quest_rows)} Quest samples"
     )
     return session
 
@@ -646,6 +666,11 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
         print(
             "Piper logging is passive: use the arm's built-in drag-teach control."
         )
+    if config.use_quest:
+        print(
+            f"Waiting for Quest UDP poses on {config.quest_host}:"
+            f"{config.quest_port}."
+        )
 
     if config.use_foot_pedal and config.mode == DATA_COLLECTION_MODE:
         pedal = FootPedalTrigger(
@@ -789,6 +814,7 @@ def main() -> int:
         show_ui=args.show_ui,
         add_camera=args.add_camera,
         use_piper=args.use_piper,
+        use_quest=args.use_quest,
         piper_joint_level=args.piper_joint_level,
         piper_rate_hz=args.piper_rate_hz,
         teacher_mode_poll_hz=args.piper_teacher_mode_poll_hz,
@@ -837,6 +863,13 @@ def main() -> int:
             raise ValueError("TEACHER_MODE_POLL_HZ must be greater than 0")
         if config.piper_firmware not in {"default", "v183", "v188"}:
             raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
+    if config.use_quest:
+        if not config.quest_host:
+            raise ValueError("QUEST_HOST must not be empty")
+        if not 1 <= config.quest_port <= 65535:
+            raise ValueError("QUEST_PORT must be in range 1..65535")
+        if config.quest_startup_timeout_s <= 0:
+            raise ValueError("QUEST_STARTUP_TIMEOUT_S must be greater than 0")
     if config.follower_hand_port == config.hand_port:
         raise ValueError("Primary and follower hand ports must be different")
     if config.paxini_port is not None and config.paxini_port in {
