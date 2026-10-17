@@ -20,7 +20,7 @@ operating_mode: 5
 position_p_gain: 2000
 position_i_gain: 0
 position_d_gain: 400
-goal_current_limit_ma: 1470
+goal_current_limit_ma: 1700
 home_offsets:
   0: 2.292446912858861
   1: 6.030699843178682
@@ -58,7 +58,7 @@ joint_lower_limits:
   5: -2.73
   6: -3.14
   7: -1.5
-  8: -2.73
+  8: -2.8
   9: -3.14
   10: -1.5
   11: -2.73

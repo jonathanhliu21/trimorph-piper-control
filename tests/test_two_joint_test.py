@@ -15,6 +15,7 @@ from data_collection.collection.contact_detection import (
     contact_feedback as shared_contact_feedback,
 )
 from scripts.trimorph_api_test.joint_test import (
+    GOTO_JOINTS,
     TEST_FINGER_MOTOR_IDS,
     _CurrentRecorder,
     _build_parser,
@@ -22,6 +23,7 @@ from scripts.trimorph_api_test.joint_test import (
     _motion_angles,
     _output_current_csv,
     _run_home,
+    _run_goto,
     _validate_home_joints,
     contact_feedback,
     main,
@@ -116,6 +118,71 @@ class TwoJointConfigTests(unittest.TestCase):
         args = _build_parser().parse_args(["home", "--joints", "0", "2"])
 
         self.assertEqual(args.joints, [0, 2])
+
+    def test_goto_parser_defaults(self):
+        args = _build_parser().parse_args(["goto"])
+
+        self.assertEqual(args.command, "goto")
+        self.assertEqual(args.timeout_s, 4.0)
+        self.assertFalse(args.yes)
+
+    def test_goto_enables_torque_at_recorded_positions(self):
+        config = _load_config(
+            Path("scripts/trimorph_api_test/xl330_test_config.yaml"),
+        )
+        config = replace(config, joint_lower_limits=(-3.14,) * config.n_motors)
+        calls = []
+
+        class FakeHand:
+            def __init__(self, hand_config, autoconnect=False):
+                self.config = hand_config
+                self.motor_ids = hand_config.motor_ids
+                self.is_connected = False
+
+            def connect(self):
+                self.is_connected = True
+
+            def ping(self):
+                return {motor_id: 1190 for motor_id in self.motor_ids}
+
+            def configure(self, enable_torque=False):
+                calls.append(("configure", enable_torque))
+
+            def read_pos(self):
+                return np.zeros(13)
+
+            def set_positions(self, positions, clip=True):
+                calls.append(("set_positions", tuple(positions), clip))
+
+            def set_motion_profile(self, **kwargs):
+                calls.append(("set_motion_profile", kwargs))
+
+            def enable_torque(self, motor_ids):
+                calls.append(("enable_torque", tuple(motor_ids)))
+
+            def shutdown(self):
+                calls.append(("shutdown",))
+                self.is_connected = False
+
+        args = mock.Mock(
+            config=Path("scripts/trimorph_api_test/xl330_test_config.yaml"),
+            timeout_s=4.0,
+            yes=True,
+        )
+        with mock.patch(
+            "scripts.trimorph_api_test.joint_test.MidasHand", FakeHand
+        ), mock.patch(
+            "scripts.trimorph_api_test.joint_test._wait_for_motor"
+        ), mock.patch(
+            "scripts.trimorph_api_test.joint_test.time.sleep",
+            side_effect=KeyboardInterrupt,
+        ):
+            _run_goto(args, config)
+
+        target = tuple(GOTO_JOINTS.values())
+        self.assertIn(("set_positions", target, True), calls)
+        self.assertIn(("enable_torque", tuple(range(13))), calls)
+        self.assertEqual(calls[-1], ("shutdown",))
 
     def test_home_joints_must_belong_to_selected_finger(self):
         with self.assertRaisesRegex(ValueError, "do not belong to thumb"):
