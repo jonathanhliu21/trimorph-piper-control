@@ -151,8 +151,14 @@ class EpisodeBuffer:
         stop_ns = self.stop_ns or time.monotonic_ns()
         follower_config = getattr(self.config, "follower_hand_config", None)
         follower_port = getattr(self.config, "follower_hand_port", None)
-        has_camera = hasattr(self.config, "task_camera_width")
-        has_piper = hasattr(self.config, "piper_rate_hz")
+        has_camera = hasattr(self.config, "task_camera_width") and bool(
+            getattr(self.config, "add_camera", True)
+        )
+        # CollectionConfig always includes Piper. HandOnlyCollectionConfig has
+        # the same settings, but gates the worker behind the opt-in flag.
+        has_piper = hasattr(self.config, "piper_rate_hz") and bool(
+            getattr(self.config, "use_piper", True)
+        )
         return {
             "episode_index": self.paths.episode_index,
             "status": "complete" if not self.errors else "error",
@@ -182,10 +188,36 @@ class EpisodeBuffer:
             },
             "camera": {
                 "device": "oak1_depthai" if has_camera else None,
-                "width": getattr(self.config, "task_camera_width", None),
-                "height": getattr(self.config, "task_camera_height", None),
-                "fps": getattr(self.config, "task_camera_fps", None),
-                "flip": getattr(self.config, "task_camera_flip", None),
+                "width": (
+                    getattr(self.config, "task_camera_width", None)
+                    if has_camera
+                    else None
+                ),
+                "height": (
+                    getattr(self.config, "task_camera_height", None)
+                    if has_camera
+                    else None
+                ),
+                "fps": (
+                    getattr(self.config, "task_camera_fps", None)
+                    if has_camera
+                    else None
+                ),
+                "flip": (
+                    getattr(self.config, "task_camera_flip", None)
+                    if has_camera
+                    else None
+                ),
+                "brightness": (
+                    getattr(self.config, "task_camera_brightness", None)
+                    if has_camera
+                    else None
+                ),
+                "anti_banding_hz": (
+                    getattr(self.config, "task_camera_anti_banding_hz", None)
+                    if has_camera
+                    else None
+                ),
             },
             "trimorph": {
                 "motor_ids": list(TRIMORPH_MOTOR_IDS),
@@ -194,6 +226,9 @@ class EpisodeBuffer:
                 "measure_rate_hz": self.config.hand_measure_rate_hz,
                 "force_feedback_rate_hz": getattr(
                     self.config, "force_feedback_rate_hz", None
+                ),
+                "disabled_force_feedback_motor_ids": list(
+                    getattr(self.config, "disabled_force_feedback_motor_ids", ())
                 ),
                 "training_uses": "measured positions from leader_hand.csv",
             },
@@ -225,8 +260,22 @@ class EpisodeBuffer:
             },
             "piper": {
                 "mode": "passive_drag_teach_logging" if has_piper else None,
-                "target_rate_hz": getattr(self.config, "piper_rate_hz", None),
+                "joint_level_recording": (
+                    bool(getattr(self.config, "piper_joint_level", False))
+                    if has_piper
+                    else False
+                ),
+                "target_rate_hz": (
+                    getattr(self.config, "piper_rate_hz", None)
+                    if has_piper
+                    else None
+                ),
                 "raw_eef_fields": list(RAW_EEF_FIELDS),
+                "raw_joint_fields": (
+                    [f"joint_{joint}" for joint in range(1, 7)]
+                    if has_piper and getattr(self.config, "piper_joint_level", False)
+                    else []
+                ),
             },
             "errors": self.errors,
         }

@@ -49,8 +49,18 @@ as `midas_hand_api`. The core Python dependencies are NumPy, PyYAML (provided by
 the hand API), and the hand API itself. Matplotlib is required for graph
 generation. OpenCV and DepthAI are needed by the full camera collection
 pipeline. Tkinter is required by the contact UIs and is normally supplied by
-the system Python installation. Install the PiperX `pyAgxArm` package using the
-vendor instructions and configure SocketCAN before using PiperX.
+the system Python installation. The PiperX `pyAgxArm` package is installed
+directly from the vendor's GitHub repository by `requirements.txt`; configure
+SocketCAN before using PiperX.
+
+Bring up the default `can0` interface at 1 Mbit/s with the checked-in helper:
+
+```bash
+./setup_arm_can.sh
+```
+
+Use `./setup_arm_can.sh --help` to select another interface or bitrate. The
+script uses `sudo` for the link changes and prints the resulting CAN status.
 
 Optional Paxini tactile operation also requires the Paxini support exposed by
 `midas_hand_api` and a valid sensor serial port.
@@ -187,7 +197,18 @@ uses finger-specific rows; without it the output is the three-panel overview.
 ## 4. Collect from TRIMORPH only
 
 [`data_collection/collect_hand_only.py`](data_collection/collect_hand_only.py)
-can record the backdriven TRIMORPH without launching PiperX or a camera:
+can record the backdriven TRIMORPH without launching PiperX. The wrist camera
+is optional. Collection is foot-pedal controlled by default: one press starts
+an episode after the ready delay, and pressing and releasing again saves it.
+Holding the pedal for the displayed delete interval discards the active
+episode. The pedal is auto-detected from Linux `/dev/input/event*` devices and
+is exclusively grabbed while the collector runs so its keystroke is not sent
+to other applications. If detection fails, run `python3
+scripts/piper_api/record_trajectory.py --list-input-devices` and ensure the
+desired event device is readable by the current user.
+
+For unattended or fixed-duration collection, pass `--episode-s` (the older
+`--episode-time` spelling remains supported):
 
 ```bash
 python3 data_collection/collect_hand_only.py \
@@ -196,15 +217,55 @@ python3 data_collection/collect_hand_only.py \
   --hand-config config/hand.yaml \
   --hand-port /dev/serial/by-id/TRIMORPH \
   --active-motors 0 1 2 3 4 5 6 7 8 9 10 11 12 \
-  --warmup-time 5 --episode-time 30
+  --warmup-time 5 --episode-s 30
 ```
 
-It warms up, records one fixed-duration episode, and exits. A hand-only episode
+This example warms up, records one 30-second episode, and exits. Without
+`--episode-s`, the collector continues creating pedal-controlled episodes until
+`q`, Escape (when a camera preview is open), or Ctrl-C. A hand-only episode
 contains populated `leader_hand.csv` and `metadata.json`, plus empty
 `camera_timestamps.csv` and `piper.csv` bookkeeping files. `follower.csv` is
 written only when a follower is configured, and no camera video is created.
 The older filename `proprioception.csv` is still accepted by replay for
 compatibility.
+
+Add `--use-piper` to passively record the Piper EEF pose and drag-teach state
+to `piper.csv`, synchronized with the hand samples. This uses the same Piper
+settings and passive logger as the full collector; it does not enable or send
+motion commands to the arm. Move the arm with its built-in drag-teach control.
+Add `--joint-level` to include measured `joint_1`–`joint_6` in each Piper row,
+then use `--joint-level` with `data_collection/replay_episode.py` to replay
+those angles using smooth joint commands instead of firmware EEF IK. This only
+works for episodes newly recorded with joint columns. `--joint-position` is an
+alias for collection. While recording joint angles, the Piper worker warns
+within 2° of a controller limit or when a measured angle is beyond it; it does
+not interrupt recording. Episode joint replay shares the trajectory replayer's
+bounded-step control and accepts the same `--max-joint-step-rad`,
+`--preposition-seconds`, `--settle-seconds`,
+`--preposition-speed-percent`, and `--replay-speed-percent` tuning options.
+Edit `JOINT_ACTION_SCALES` in `data_collection/replay_episode.py` to set the
+final-position multiplier for each hand motor ID 0–12.
+Piper sampling defaults
+to 250 Hz; `--piper-rate-hz`, `--piper-teacher-mode-poll-hz`,
+`--piper-channel`, `--piper-interface`, `--piper-firmware`,
+`--piper-installation-pos`, and `--piper-payload` configure the Piper worker.
+
+Add `--add-camera` to start the DepthAI/OAK wrist camera, display its live feed,
+and save `camera.mp4` plus populated `camera_timestamps.csv` and camera metadata
+in the same format as the full collector. Press `q` or Escape in the camera
+window to stop through the normal episode-save path. Camera brightness and
+anti-banding defaults are configured by `TASK_CAMERA_BRIGHTNESS` and
+`TASK_CAMERA_ANTI_BANDING_HZ` in `data_collection/collection/config.py`; the
+default anti-banding mode is `60` Hz.
+Set `TASK_CAMERA_FLIP = "180"` in the same config file to rotate the saved and
+previewed image by 180 degrees.
+
+To check the camera and its configured brightness, anti-banding, resolution,
+and flip before collection, run:
+
+```bash
+python3 scripts/camera/test_wrist_camera.py
+```
 
 ## 5. TRIMORPH leader to MIDAS follower with force feedback
 
@@ -231,6 +292,20 @@ as capped current-mode force feedback. `--show-ui` requires a follower. Add
 fingertip contacts with force feedback, or use `--tactile-debug-log PATH` for
 headless tactile diagnostics.
 
+Use `--disable-force-feedback-motors` to leave selected TRIMORPH motors
+torque-disabled without removing them from position reading or retargeting. The
+exclusion applies to both MIDAS contact feedback and Paxini tactile feedback:
+
+```bash
+python3 data_collection/collect_hand_only.py \
+  --retarget-only \
+  --hand-config config/hand.yaml \
+  --hand-port /dev/serial/by-id/TRIMORPH \
+  --follower-config config/midas_hand_config.yaml \
+  --follower-port /dev/serial/by-id/MIDAS \
+  --disable-force-feedback-motors 8
+```
+
 ## 6. Episode replay and current logging
 
 Replay the latest episode on TRIMORPH and PiperX (or supply an episode number,
@@ -242,6 +317,10 @@ python3 data_collection/replay_episode.py \
   --hand-config config/hand.yaml \
   --hand-port /dev/serial/by-id/TRIMORPH
 ```
+
+Hand replay always selects Dynamixel pure position-control mode (`3`) for
+faithful pose tracking. This is an in-memory replay override; it does not alter
+the hand YAML or the current-based position mode used during collection.
 
 Replay just episode 42's hand stream and record graph-compatible current
 telemetry at the replay logger's fixed 10 Hz sampling rate:
@@ -268,9 +347,96 @@ python3 data_collection/replay_episode.py 42 \
   --output-current output/episode_42_midas_current.csv
 ```
 
-Useful switches are `--no-preposition`, `--arm-only`, and `--no-piper-enable`.
+The `ACTION_SCALE` constant in `data_collection/replay_episode.py` multiplies
+every final hand target angle before joint-limit clipping. The
+`JOINT_ACTION_SCALES` dictionary adds a multiplier by motor ID for all IDs
+0–12; IDs 4–5 and 7–8 currently use `1.3`, and the others use `1.0`.
+Useful switches include
+`--no-preposition`, `--arm-only`, and `--no-piper-enable`.
 `--hand-only` and `--arm-only` are mutually exclusive in practice, and current
 logging cannot be used with `--arm-only`.
+
+### Record and replay a Piper trajectory
+
+[`scripts/piper_api/record_trajectory.py`](scripts/piper_api/record_trajectory.py)
+records a passively drag-taught Piper end-effector trajectory. First enable the
+arm's drag-teach mode, then press the pedal once to begin and again to stop and
+save:
+
+```bash
+python3 scripts/piper_api/record_trajectory.py \
+  --output trajectories/piper_pick.csv \
+  --joint-level \
+  --foot-pedal-device /dev/input/by-id/FOOT_PEDAL
+```
+
+Use `--episode-s 10` to stop automatically after ten seconds, `--force` to
+replace an existing output, and `--list-input-devices` to locate the pedal.
+The recorder leaves Piper passive and stores timestamped end-effector
+`x,y,z,roll,pitch,yaw` samples in CSV. With `--joint-level`, it also stores
+measured `joint_1`–`joint_6` angles. The default sampling request is 250 Hz;
+actual distinct samples are limited by the controller's feedback rate. In
+`--joint-level` mode, the recorder prints a warning when a measured joint is
+within 2° of, or beyond, a controller-reported limit; recording continues.
+
+Replay that CSV in Piper position mode with automatic movement to its first
+pose followed by time-based interpolation at the requested command rate:
+
+```bash
+python3 scripts/piper_api/replay_trajectory.py \
+  trajectories/piper_pick.csv \
+  --joint-level --rate-hz 60
+```
+
+The replay command also accepts an episode directory containing
+`trajectory.csv` or `piper.csv`. Use `--debug` for controller state and
+commanded-versus-measured pose diagnostics, or `--no-preposition` only when the
+arm is already safely positioned at the first pose.
+Joint-level replay uses smooth `move_j` commands, not the unsmoothed `move_js`
+mode. It does not preflight recorded angles against controller limits; the
+controller may reject out-of-range targets during replay. Omit `--joint-level`
+for the original EEF replay.
+Higher sampling or command rates do not guarantee lower physical tracking lag.
+For joint-level replay, prepositioning ramps linearly from the arm's measured
+joint angles to the first recorded point. Each subsequent command is capped at
+`--max-joint-step-rad` (default 0.02 rad) from measured feedback. If the start
+is too far to reach in `--preposition-seconds`, replay aborts before that move;
+increase the preposition time only after checking the physical path is clear.
+After prepositioning, joint-level replay warns if the largest start error is
+over 0.10 rad and aborts only above 0.15 rad.
+
+### Alternating manual replay
+
+[`scripts/replay_corl_workshop/manual_replay.py`](scripts/replay_corl_workshop/manual_replay.py)
+replays separate Piper and TRIMORPH trajectories one at a time. Create a text
+file whose non-comment lines alternate from Piper to TRIMORPH; relative paths
+are resolved from the text file's directory:
+
+```text
+# workshop_sequence.txt
+trajectories/piper_pick.csv
+trajectories/trimorph_close.csv
+trajectories/piper_place.csv
+trajectories/trimorph_open.csv
+```
+
+Then run:
+
+```bash
+python3 scripts/replay_corl_workshop/manual_replay.py workshop_sequence.txt \
+  --hand-config config/hand.yaml \
+  --hand-port /dev/serial/by-id/TRIMORPH \
+  --foot-pedal-device /dev/input/by-id/FOOT_PEDAL
+```
+
+Both devices are checked before motion. The first fresh pedal press moves the
+hand to the initial joint-angle constant defined in the script. After that move
+settles, a second fresh press starts the first Piper trajectory. After each CSV
+finishes, press and release the foot pedal to advance; a press made during
+motion is discarded. The inactive controller stays enabled at its last target,
+and no trajectory commands are sent to it until its next turn. Use
+`--list-input-devices` to find the pedal event device and `--help` for
+replay-rate, preposition, hardware, and motion-profile options.
 
 ## 7. Thumb IK/retarget calibration
 

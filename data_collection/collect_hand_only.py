@@ -1,5 +1,6 @@
 import argparse
 import queue
+import shutil
 import sys
 import threading
 import time
@@ -7,7 +8,19 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from collection.config import TRIMORPH_MOTOR_IDS
+from collection.config import (
+    TASK_CAMERA_ANTI_BANDING_HZ,
+    TASK_CAMERA_BRIGHTNESS,
+    TASK_CAMERA_FLIP,
+    TASK_CAMERA_FPS,
+    TASK_CAMERA_HEIGHT,
+    TASK_CAMERA_WIDTH,
+    TASK_VIEW_WINDOW_NAME,
+    TRIMORPH_MOTOR_IDS,
+    VIDEO_CODEC,
+    validate_camera_settings,
+)
+from collection.depthai_task_camera_worker import run_depthai_task_camera_worker
 from collection.episode import (
     EpisodeBuffer,
     RecordingManager,
@@ -17,16 +30,29 @@ from collection.episode import (
 )
 from collection.follower_hand_worker import run_follower_hand_worker
 from collection.leader_hand_worker import run_leader_hand_worker
+from collection.piper_worker import run_piper_worker
 from collection.shared_state import SharedState
 from collection.tactile_worker import run_tactile_worker
-from collection.utils import WorkerError, worker_wrapper
+from collection.utils import WorkerError, import_cv2, worker_wrapper
+from scripts.piper_api.foot_pedal import FootPedalTrigger
 
 WORKER_INIT_TIMEOUT_S = 60.0
+VIDEO_FLUSH_TIMEOUT_S = 5.0
 DEFAULT_DEMONSTRATION_DURATION_S = 30.0
 DEFAULT_WARMUP_TIME_S = 5.0
 DEFAULT_HAND_MEASURE_RATE_HZ = 50.0
 DEFAULT_FOLLOWER_MEASURE_RATE_HZ = 100.0
 DEFAULT_FORCE_FEEDBACK_RATE_HZ = 50.0
+DEFAULT_PIPER_RATE_HZ = 250.0
+DEFAULT_PIPER_INTERFACE = "socketcan"
+DEFAULT_PIPER_CHANNEL = "can0"
+DEFAULT_PIPER_FIRMWARE = "v183"
+DEFAULT_PIPER_INSTALLATION_POS = "right"
+DEFAULT_PIPER_PAYLOAD = "half"
+DEFAULT_TEACHER_MODE_POLL_HZ = 20.0
+DEFAULT_HOLD_DELETE_S = 2.0
+DEFAULT_READY_SECONDS = 0.2
+DEFAULT_FOOT_PEDAL_DEBOUNCE_S = 0.5
 DEFAULT_HAND_CONFIG = Path("config/hand.yaml")
 DEFAULT_HAND_PORT = "/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND"
 FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
@@ -35,7 +61,7 @@ DATA_COLLECTION_MODE = "data_collection"
 RETARGET_ONLY_MODE = "retarget_only"
 DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
 
-PIP_SCALE = 0.4
+PIP_SCALE = 0.6
 MCP_SCALE = 0.5
 
 FORCE_FEEDBACK_MOTOR_IDS = (0, 1, *range(4, 13))
@@ -64,12 +90,37 @@ class HandOnlyCollectionConfig:
 
     warmup_time: float
     episode_time: float
+    use_foot_pedal: bool = False
+    hold_delete_s: float = DEFAULT_HOLD_DELETE_S
+    ready_seconds: float = DEFAULT_READY_SECONDS
+    foot_pedal_device: str | None = None
+    foot_pedal_key_code: int | None = None
+    foot_pedal_debounce_s: float = DEFAULT_FOOT_PEDAL_DEBOUNCE_S
     mode: str = DATA_COLLECTION_MODE
     show_ui: bool = False
+    add_camera: bool = False
+    use_piper: bool = False
+    piper_joint_level: bool = False
+    piper_rate_hz: float = DEFAULT_PIPER_RATE_HZ
+    piper_interface: str = DEFAULT_PIPER_INTERFACE
+    piper_channel: str = DEFAULT_PIPER_CHANNEL
+    piper_firmware: str = DEFAULT_PIPER_FIRMWARE
+    piper_installation_pos: str | None = DEFAULT_PIPER_INSTALLATION_POS
+    piper_payload: str | None = DEFAULT_PIPER_PAYLOAD
+    teacher_mode_poll_hz: float = DEFAULT_TEACHER_MODE_POLL_HZ
+    task_view_window_name: str = TASK_VIEW_WINDOW_NAME
+    task_camera_width: int = TASK_CAMERA_WIDTH
+    task_camera_height: int = TASK_CAMERA_HEIGHT
+    task_camera_fps: int = TASK_CAMERA_FPS
+    task_camera_flip: str = TASK_CAMERA_FLIP
+    task_camera_brightness: int = TASK_CAMERA_BRIGHTNESS
+    task_camera_anti_banding_hz: str = TASK_CAMERA_ANTI_BANDING_HZ
+    video_codec: str = VIDEO_CODEC
     add_tactile: bool = False
     paxini_port: str | None = None
     tactile_debug_log: Path | None = None
     force_feedback_motor_ids: tuple[int, ...] = FORCE_FEEDBACK_MOTOR_IDS
+    disabled_force_feedback_motor_ids: tuple[int, ...] = ()
     force_feedback_source_motor_ids: dict[int, int] = field(
         default_factory=lambda: dict(FORCE_FEEDBACK_SOURCE_MOTOR_IDS)
     )
@@ -140,7 +191,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Retarget a follower from the TRIMORPH leader hand, optionally recording "
-            "a fixed-duration episode."
+            "episodes with a foot pedal or for a fixed duration."
         )
     )
     mode_group = parser.add_mutually_exclusive_group()
@@ -156,7 +207,10 @@ def parse_args() -> argparse.Namespace:
         dest="mode",
         action="store_const",
         const=DATA_COLLECTION_MODE,
-        help="Record one fixed-duration episode (the default).",
+        help=(
+            "Record episodes (the default; foot-pedal controlled unless "
+            "--episode-s is set)."
+        ),
     )
     parser.set_defaults(mode=DATA_COLLECTION_MODE)
     parser.add_argument("--dataset-root", type=Path, default=Path("data_trimorph"))
@@ -170,6 +224,54 @@ def parse_args() -> argparse.Namespace:
         "--show-ui",
         action="store_true",
         help="Show the read-only follower MIDAS live-contact visualization.",
+    )
+    parser.add_argument(
+        "--add-camera",
+        action="store_true",
+        help="record the DepthAI wrist camera and show its live feed",
+    )
+    parser.add_argument(
+        "--use-piper",
+        action="store_true",
+        help=(
+            "passively record Piper EEF and drag-teach state alongside the hand; "
+            "the collector never commands or enables the arm"
+        ),
+    )
+    parser.add_argument(
+        "--piper-joint-level", "--joint-level", "--joint-position",
+        dest="piper_joint_level",
+        action="store_true",
+        help="Record measured Piper joint angles alongside EEF poses for joint-space replay (still passive).",
+    )
+    parser.add_argument(
+        "--piper-rate-hz",
+        type=float,
+        default=DEFAULT_PIPER_RATE_HZ,
+        help="Piper sampling rate in Hz (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--piper-teacher-mode-poll-hz",
+        type=float,
+        default=DEFAULT_TEACHER_MODE_POLL_HZ,
+        help="Piper status polling rate in Hz (default: %(default)s).",
+    )
+    parser.add_argument("--piper-channel", default=DEFAULT_PIPER_CHANNEL)
+    parser.add_argument("--piper-interface", default=DEFAULT_PIPER_INTERFACE)
+    parser.add_argument(
+        "--piper-firmware",
+        choices=("default", "v183", "v188"),
+        default=DEFAULT_PIPER_FIRMWARE,
+    )
+    parser.add_argument(
+        "--piper-installation-pos",
+        choices=("unchanged", "horizontal", "left", "right"),
+        default=DEFAULT_PIPER_INSTALLATION_POS,
+    )
+    parser.add_argument(
+        "--piper-payload",
+        choices=("unchanged", "empty", "half", "full"),
+        default=DEFAULT_PIPER_PAYLOAD,
     )
     parser.add_argument(
         "--add-tactile",
@@ -205,10 +307,26 @@ def parse_args() -> argparse.Namespace:
             "fit_model_to_endpoints.py (default: %(default)s)."
         ),
     )
-    parser.add_argument(
+    episode_group = parser.add_mutually_exclusive_group()
+    episode_group.add_argument(
+        "--episode-s",
         "--episode-time",
+        dest="episode_time",
         type=float,
-        default=DEFAULT_DEMONSTRATION_DURATION_S,
+        default=None,
+        help=(
+            "record one fixed-duration episode instead of using the foot pedal "
+            "(the --episode-time spelling is retained for compatibility)"
+        ),
+    )
+    episode_group.add_argument(
+        "--use-foot-pedal",
+        action="store_true",
+        default=True,
+        help=(
+            "use the foot pedal to start and save episodes, or discard an episode "
+            "with a long hold (default)"
+        ),
     )
     parser.add_argument(
         "--warmup-time",
@@ -225,7 +343,35 @@ def parse_args() -> argparse.Namespace:
             "files may contain additional motor IDs."
         ),
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--disable-force-feedback-motors",
+        nargs="+",
+        type=int,
+        default=[],
+        metavar="MOTOR_ID",
+        help=(
+            "Keep these active TRIMORPH motors torque-disabled while retaining "
+            "their position readings and retargeting (for example: 8 or 7 8 9)."
+        ),
+    )
+    args = parser.parse_args()
+    if args.episode_time is not None:
+        args.use_foot_pedal = False
+    return args
+
+
+def worker_specs(config: HandOnlyCollectionConfig):
+    specs = []
+    if config.add_camera:
+        specs.append(("task_camera", run_depthai_task_camera_worker))
+    if config.use_piper:
+        specs.append(("piper", run_piper_worker))
+    specs.append(("leader_hand", run_leader_hand_worker))
+    if config.follower_hand_config is not None:
+        specs.append(("follower", run_follower_hand_worker))
+    if config.add_tactile:
+        specs.append(("tactile", run_tactile_worker))
+    return specs
 
 
 def initialize_worker(
@@ -234,11 +380,7 @@ def initialize_worker(
     recorder: RecordingManager,
     errors: queue.Queue[WorkerError],
 ) -> list[threading.Thread]:
-    specs = [("leader_hand", run_leader_hand_worker)]
-    if config.follower_hand_config is not None:
-        specs.append(("follower", run_follower_hand_worker))
-    if config.add_tactile:
-        specs.append(("tactile", run_tactile_worker))
+    specs = worker_specs(config)
 
     threads: list[threading.Thread] = []
     try:
@@ -287,7 +429,13 @@ def start_episode(
     paths.episode_dir.mkdir(parents=True, exist_ok=False)
     session = EpisodeBuffer(paths, config)
     recorder.start(session)
-    print(f"Recording episode {index:06d} for {config.episode_time:.1f}s...")
+    if config.use_foot_pedal:
+        print(
+            f"Recording episode {index:06d}. Press pedal to save; "
+            f"hold {config.hold_delete_s:g}s to delete."
+        )
+    else:
+        print(f"Recording episode {index:06d} for {config.episode_time:.1f}s...")
     return session
 
 
@@ -295,19 +443,89 @@ def stop_episode(recorder: RecordingManager, reason: str) -> EpisodeBuffer | Non
     session = recorder.stop(reason)
     if session is None:
         return None
+    if session.config.add_camera and not session.video_done.wait(
+        timeout=VIDEO_FLUSH_TIMEOUT_S
+    ):
+        print(
+            f"Warning: camera writer did not finish within {VIDEO_FLUSH_TIMEOUT_S:.1f}s"
+        )
     session.flush()
     print(
         f"Saved episode {session.paths.episode_index:06d}: "
         f"{len(session.leader_hand_rows)} leader-hand samples, "
-        f"{len(session.follower_rows)} follower samples"
+        f"{len(session.follower_rows)} follower samples, "
+        f"{len(session.camera_rows)} camera frames, "
+        f"{len(session.piper_rows)} Piper samples"
     )
     return session
+
+
+def delete_episode(recorder: RecordingManager) -> EpisodeBuffer | None:
+    """Stop and discard the current episode after a long pedal hold."""
+
+    session = recorder.stop("foot_pedal_delete")
+    if session is None:
+        return None
+    if session.config.add_camera:
+        session.video_done.wait(timeout=VIDEO_FLUSH_TIMEOUT_S)
+    shutil.rmtree(session.paths.episode_dir, ignore_errors=True)
+    print(f"Episode {session.paths.episode_index:06d} deleted.")
+    return session
+
+
+@dataclass
+class FootPedalCollectionController:
+    config: HandOnlyCollectionConfig
+    recorder: RecordingManager
+    pedal: FootPedalTrigger
+    pending_start_deadline: float | None = None
+    recording_pedal_down: bool = False
+
+    def poll(self) -> None:
+        """Apply the same start/save/long-hold-delete behavior as runner.py."""
+
+        pedal_pressed = bool(self.pedal.poll())
+        if self.recorder.is_recording():
+            hold_s = self.pedal.current_hold_s()
+            if pedal_pressed and not self.recording_pedal_down:
+                self.recording_pedal_down = True
+                print(
+                    "Pedal held. Release to save; "
+                    f"hold {self.config.hold_delete_s:g}s to delete."
+                )
+            if self.recording_pedal_down:
+                if hold_s is not None and hold_s >= self.config.hold_delete_s:
+                    self.recording_pedal_down = False
+                    delete_episode(self.recorder)
+                elif hold_s is None:
+                    self.recording_pedal_down = False
+                    stop_episode(self.recorder, "foot_pedal")
+            return
+
+        if self.pending_start_deadline is None:
+            if pedal_pressed:
+                self.pending_start_deadline = (
+                    time.monotonic() + self.config.ready_seconds
+                )
+                print(
+                    "Pedal pressed. Recording starts in "
+                    f"{self.config.ready_seconds:.1f}s."
+                )
+        elif pedal_pressed:
+            print("Start cancelled by second pedal press during ready delay.")
+            self.pending_start_deadline = None
+        elif time.monotonic() >= self.pending_start_deadline:
+            start_episode(self.config, self.recorder)
+            self.pending_start_deadline = None
 
 
 def run_follower_contact_ui(
     shared: SharedState,
     *,
     duration_s: float | None,
+    show_camera: bool = False,
+    camera_window_name: str = TASK_VIEW_WINDOW_NAME,
+    on_tick=None,
 ) -> str:
     """Run the read-only follower contact view until close or shutdown."""
 
@@ -320,6 +538,7 @@ def run_follower_contact_ui(
     root.minsize(1000, 500)
     widget = LiveContactWidget(root)
     widget.pack(fill="both", expand=True, padx=12, pady=12)
+    cv2 = import_cv2() if show_camera else None
     deadline = None if duration_s is None else time.monotonic() + duration_s
     exit_reason = "ui_closed"
 
@@ -330,6 +549,8 @@ def run_follower_contact_ui(
 
     def refresh() -> None:
         nonlocal exit_reason
+        if on_tick is not None:
+            on_tick()
         snapshot = shared.latest_follower_contact_snapshot()
         tactile_contacts = shared.latest_tactile_contacts()
         if snapshot is not None:
@@ -341,6 +562,16 @@ def run_follower_contact_ui(
             )
         elif tactile_contacts is not None:
             widget.show(tactile_contacts=tactile_contacts)
+        if cv2 is not None:
+            frame = shared.latest_task_frame()
+            if frame is not None:
+                cv2.imshow(camera_window_name, frame)
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                exit_reason = "camera_view_closed"
+                shared.shutdown.set()
+        if shared.shutdown.is_set():
+            root.destroy()
+            return
         if deadline is not None and time.monotonic() >= deadline:
             exit_reason = "duration_complete"
             shared.shutdown.set()
@@ -355,13 +586,54 @@ def run_follower_contact_ui(
         root.mainloop()
     finally:
         shared.shutdown.set()
+        if cv2 is not None:
+            try:
+                cv2.destroyWindow(camera_window_name)
+            except Exception:
+                pass
     return exit_reason
+
+
+def run_camera_view(
+    shared: SharedState,
+    *,
+    duration_s: float | None,
+    window_name: str,
+    on_tick=None,
+) -> str:
+    """Show camera frames until the duration expires, shutdown, or q/Escape."""
+
+    cv2 = import_cv2()
+    deadline = None if duration_s is None else time.monotonic() + duration_s
+    reason = "duration_complete"
+    try:
+        while not shared.shutdown.is_set():
+            if on_tick is not None:
+                on_tick()
+            frame = shared.latest_task_frame()
+            if frame is not None:
+                cv2.imshow(window_name, frame)
+            if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                reason = "camera_view_closed"
+                shared.shutdown.set()
+                break
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            time.sleep(0.005)
+    finally:
+        try:
+            cv2.destroyWindow(window_name)
+        except Exception:
+            pass
+    return reason
 
 
 def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     shared = SharedState()
     recorder = RecordingManager()
     errors: queue.Queue[WorkerError] = queue.Queue()
+    pedal: FootPedalTrigger | None = None
+    pedal_controller: FootPedalCollectionController | None = None
 
     if config.mode == DATA_COLLECTION_MODE:
         print(f"Warming up for {config.warmup_time}s")
@@ -370,7 +642,27 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     elif config.mode != RETARGET_ONLY_MODE:
         raise ValueError(f"Unknown hand-only mode: {config.mode!r}")
 
-    threads = initialize_worker(config, shared, recorder, errors)
+    if config.use_piper:
+        print(
+            "Piper logging is passive: use the arm's built-in drag-teach control."
+        )
+
+    if config.use_foot_pedal and config.mode == DATA_COLLECTION_MODE:
+        pedal = FootPedalTrigger(
+            config.foot_pedal_device,
+            key_code=config.foot_pedal_key_code,
+            debounce_s=config.foot_pedal_debounce_s,
+        )
+        pedal.start()
+        print(f"Foot pedal input: {pedal.active_device}")
+        pedal_controller = FootPedalCollectionController(config, recorder, pedal)
+
+    try:
+        threads = initialize_worker(config, shared, recorder, errors)
+    except Exception:
+        if pedal is not None:
+            pedal.stop()
+        raise
     # Retain compatibility with callers that replace the initializer in tests.
     if isinstance(threads, threading.Thread) or hasattr(threads, "join"):
         threads = [threads]
@@ -379,15 +671,63 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
         if config.mode == RETARGET_ONLY_MODE:
             print("Retarget-only mode active. Press Ctrl-C to stop.")
             if config.show_ui:
-                reason = run_follower_contact_ui(shared, duration_s=None)
+                if config.add_camera:
+                    reason = run_follower_contact_ui(
+                        shared,
+                        duration_s=None,
+                        show_camera=True,
+                        camera_window_name=config.task_view_window_name,
+                    )
+                else:
+                    reason = run_follower_contact_ui(shared, duration_s=None)
+            elif config.add_camera:
+                reason = run_camera_view(
+                    shared,
+                    duration_s=None,
+                    window_name=config.task_view_window_name,
+                )
             else:
                 shared.shutdown.wait()
-        else:
-            start_episode(config, recorder)
+        elif config.use_foot_pedal:
+            print("Foot-pedal collection active. Press q or Ctrl-C to stop.")
             if config.show_ui:
                 reason = run_follower_contact_ui(
                     shared,
+                    duration_s=None,
+                    show_camera=config.add_camera,
+                    camera_window_name=config.task_view_window_name,
+                    on_tick=pedal_controller.poll,
+                )
+            elif config.add_camera:
+                reason = run_camera_view(
+                    shared,
+                    duration_s=None,
+                    window_name=config.task_view_window_name,
+                    on_tick=pedal_controller.poll,
+                )
+            else:
+                while not shared.shutdown.wait(0.005):
+                    pedal_controller.poll()
+        else:
+            start_episode(config, recorder)
+            if config.show_ui:
+                if config.add_camera:
+                    reason = run_follower_contact_ui(
+                        shared,
+                        duration_s=config.episode_time,
+                        show_camera=True,
+                        camera_window_name=config.task_view_window_name,
+                    )
+                else:
+                    reason = run_follower_contact_ui(
+                        shared,
+                        duration_s=config.episode_time,
+                    )
+            elif config.add_camera:
+                reason = run_camera_view(
+                    shared,
                     duration_s=config.episode_time,
+                    window_name=config.task_view_window_name,
                 )
             else:
                 shared.shutdown.wait(config.episode_time)
@@ -406,6 +746,8 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
             print("\nCollection interrupted; saving recorded samples.")
     finally:
         shared.shutdown.set()
+        if pedal is not None:
+            pedal.stop()
         for thread in threads:
             thread.join(timeout=3.0)
         if config.mode == DATA_COLLECTION_MODE:
@@ -415,6 +757,17 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
 
 def main() -> int:
     args = parse_args()
+    disabled_force_feedback_motor_ids = tuple(
+        dict.fromkeys(args.disable_force_feedback_motors)
+    )
+    inactive_disabled_ids = sorted(
+        set(disabled_force_feedback_motor_ids) - set(args.active_motors)
+    )
+    if inactive_disabled_ids:
+        raise ValueError(
+            "--disable-force-feedback-motors contains IDs that are not active: "
+            f"{inactive_disabled_ids}"
+        )
     add_tactile = (
         args.add_tactile
         or args.paxini_port is not None
@@ -425,10 +778,25 @@ def main() -> int:
         hand_config=args.hand_config.expanduser(),
         hand_port=args.hand_port,
         hand_measure_rate_hz=DEFAULT_HAND_MEASURE_RATE_HZ,
-        episode_time=args.episode_time,
+        episode_time=(
+            args.episode_time
+            if args.episode_time is not None
+            else DEFAULT_DEMONSTRATION_DURATION_S
+        ),
+        use_foot_pedal=args.use_foot_pedal,
         warmup_time=args.warmup_time,
         mode=args.mode,
         show_ui=args.show_ui,
+        add_camera=args.add_camera,
+        use_piper=args.use_piper,
+        piper_joint_level=args.piper_joint_level,
+        piper_rate_hz=args.piper_rate_hz,
+        teacher_mode_poll_hz=args.piper_teacher_mode_poll_hz,
+        piper_channel=args.piper_channel,
+        piper_interface=args.piper_interface,
+        piper_firmware=args.piper_firmware,
+        piper_installation_pos=args.piper_installation_pos,
+        piper_payload=args.piper_payload,
         add_tactile=add_tactile,
         paxini_port=args.paxini_port,
         tactile_debug_log=(
@@ -437,6 +805,7 @@ def main() -> int:
             else None
         ),
         active_motors=args.active_motors,
+        disabled_force_feedback_motor_ids=disabled_force_feedback_motor_ids,
         follower_hand_config=(
             args.follower_config.expanduser()
             if args.follower_config is not None
@@ -457,6 +826,17 @@ def main() -> int:
         raise ValueError(
             "Tactile sensing requires --show-ui or --tactile-debug-log"
         )
+    if config.add_camera:
+        validate_camera_settings(config)
+    if config.piper_joint_level and not config.use_piper:
+        raise ValueError("--piper-joint-level requires --use-piper")
+    if config.use_piper:
+        if config.piper_rate_hz <= 0:
+            raise ValueError("PIPER_RATE_HZ must be greater than 0")
+        if config.teacher_mode_poll_hz <= 0:
+            raise ValueError("TEACHER_MODE_POLL_HZ must be greater than 0")
+        if config.piper_firmware not in {"default", "v183", "v188"}:
+            raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
     if config.follower_hand_port == config.hand_port:
         raise ValueError("Primary and follower hand ports must be different")
     if config.paxini_port is not None and config.paxini_port in {

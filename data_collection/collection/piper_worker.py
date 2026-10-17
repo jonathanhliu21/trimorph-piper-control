@@ -2,11 +2,51 @@ from __future__ import annotations
 
 import time
 
-from scripts.piper_api.teacher_mode import get_teacher_mode
+from scripts.piper_api.record_trajectory import (
+    JOINT_LIMIT_WARNING_REPEAT_NS,
+    joint_limit_warning,
+    read_joint_limits,
+)
 
 from .config import RAW_EEF_FIELDS, CollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
+
+
+PIPER_LIMIT_WARNING_INTERVAL_S = 2.0
+PIPER_JOINT_FIELDS = tuple(f"joint_{joint}" for joint in range(1, 7))
+PIPER_KINEMATIC_LIMIT_STATUSES = (
+    "TARGET_POS_EXCEEDS_LIMIT",
+    "NO_SOLUTION",
+    "SINGULARITY_POINT",
+)
+
+
+def piper_workspace_warning(state: dict[str, object]) -> str | None:
+    """Describe Piper workspace/joint-limit feedback, if present."""
+
+    arm_status = str(state.get("arm_status", ""))
+    reasons = [
+        f"arm_status={arm_status}"
+        for status in PIPER_KINEMATIC_LIMIT_STATUSES
+        if status in arm_status
+    ]
+    try:
+        err_code = int(state.get("err_code", 0))
+    except (TypeError, ValueError):
+        err_code = 0
+    limited_joints = [
+        joint for joint in range(1, 7) if err_code & (1 << (joint + 7))
+    ]
+    if limited_joints:
+        reasons.append(f"joint_angle_limit={limited_joints}")
+    if not reasons:
+        return None
+    return (
+        "WARNING: Piper reached a workspace/kinematic limit ("
+        + ", ".join(reasons)
+        + "). Move the arm away from the boundary before recording/replay."
+    )
 
 
 def run_piper_worker(
@@ -42,6 +82,11 @@ def run_piper_worker(
         "[piper_worker] Passive logging only — use the arm's built-in "
         "drag-teach button to move it."
     )
+    joint_limits = (
+        read_joint_limits(api)
+        if getattr(config, "piper_joint_level", False)
+        else {}
+    )
 
     init_done.set()
 
@@ -53,21 +98,49 @@ def run_piper_worker(
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
     teach_status: object = None
+    last_limit_warning: str | None = None
+    last_limit_warning_t = float("-inf")
+    last_joint_limit_state: dict[int, str] = {}
+    last_joint_limit_warning_ns: dict[int, int] = {}
     try:
         while not shared.shutdown.is_set():
             now_ns = time.monotonic_ns()
 
             if now_ns >= next_teacher_ns:
-                _active, teach_status = get_teacher_mode(api)
+                state = api.get_state()
+                teach_status = state.get("teach_status")
+                limit_warning = piper_workspace_warning(state)
+                now_s = now_ns / 1e9
+                if limit_warning is not None and (
+                    limit_warning != last_limit_warning
+                    or now_s - last_limit_warning_t >= PIPER_LIMIT_WARNING_INTERVAL_S
+                ):
+                    print(limit_warning, flush=True)
+                    last_limit_warning = limit_warning
+                    last_limit_warning_t = now_s
+                elif limit_warning is None:
+                    last_limit_warning = None
                 next_teacher_ns += teacher_period_ns
                 while next_teacher_ns < now_ns:
                     next_teacher_ns += teacher_period_ns
 
             if now_ns >= next_sample_ns:
-                eef = api.get_eef_state()
-                sample_ns = time.monotonic_ns()
                 session = recorder.current()
-                if session is not None and eef is not None:
+                eef = api.get_eef_state()
+                joints = (
+                    api.get_joint_state()
+                    if session is not None and getattr(config, "piper_joint_level", False)
+                    else None
+                )
+                sample_ns = time.monotonic_ns()
+                if (
+                    session is not None
+                    and eef is not None
+                    and (
+                        not getattr(config, "piper_joint_level", False)
+                        or joints is not None
+                    )
+                ):
                     if session is not sample_session:
                         sample_session = session
                         sample_idx = 0
@@ -86,6 +159,31 @@ def run_piper_worker(
                             for name, value in zip(RAW_EEF_FIELDS, eef.pose)
                         }
                     )
+                    if joints is not None:
+                        for joint, angle in enumerate(joints.joints, start=1):
+                            if joint not in joint_limits:
+                                continue
+                            warning = joint_limit_warning(
+                                joint, float(angle), *joint_limits[joint]
+                            )
+                            if warning is None:
+                                last_joint_limit_state.pop(joint, None)
+                                continue
+                            state, message = warning
+                            if (
+                                state != last_joint_limit_state.get(joint)
+                                or sample_ns - last_joint_limit_warning_ns.get(joint, 0)
+                                >= JOINT_LIMIT_WARNING_REPEAT_NS
+                            ):
+                                print(message, flush=True)
+                                last_joint_limit_warning_ns[joint] = sample_ns
+                            last_joint_limit_state[joint] = state
+                        row.update(
+                            {
+                                name: f"{float(value):.9f}"
+                                for name, value in zip(PIPER_JOINT_FIELDS, joints.joints)
+                            }
+                        )
                     session.append_piper(row)
                     sample_idx += 1
                 next_sample_ns += sample_period_ns

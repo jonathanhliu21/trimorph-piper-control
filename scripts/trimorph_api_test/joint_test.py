@@ -1,9 +1,9 @@
 """Hardware bring-up CLI for an XL330 or XM335 finger test fixture.
 
 The commands mirror ``xl330_hand_test.py``, but every bus operation is limited
-to the motor IDs for the finger selected by ``--test-finger``. Non-homing
-commands default to ``finger-1`` (motor IDs 4, 5, and 6). The ``home`` command
-homes every configured motor when ``--test-finger`` is omitted.
+to the motor IDs for the finger selected by ``--test-finger``. Most commands
+default to ``finger-1`` (motor IDs 4, 5, and 6). The ``home`` and ``goto``
+commands select every configured motor when ``--test-finger`` is omitted.
 
 Run from the repository root, for example:
 
@@ -15,6 +15,7 @@ Run from the repository root, for example:
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_current --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py measure_position_error --motors 4,5
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py detect_contact --motors 4,5
+    .venv/bin/python scripts/trimorph_api_test/joint_test.py goto
     .venv/bin/python scripts/trimorph_api_test/two_joint_test.py home
 
 Use ``--test-finger`` before the command to select the motors under test:
@@ -96,29 +97,47 @@ OPEN_ANGLES_RAD = (
     0.0,
     0.0,
     0.0,
-    0.35,
     0.0,
     0.0,
-    0.35,
     0.0,
     0.0,
-    0.35,
+    0.0,
+    0.0,
+    0.0,
 )
 CLOSE_ANGLES_RAD = (
     -1.4,
     -1.4,
     -0.1,
     1.5,
-    -1.35,
-    -1.35,
-    -0.35,
-    -1.35,
-    -1.35,
-    -0.35,
-    -1.35,
-    -1.35,
-    -0.35,
+    -1.5,
+    -1.4,
+    0.0,
+    -1.5,
+    -1.4,
+    0.0,
+    -1.5,
+    -1.4,
+    0.0,
 )
+
+# Calibrated joint pose captured from the final printed row of a full-hand
+# ``record`` run. Keys are Dynamixel motor IDs and values are radians.
+GOTO_JOINTS = {
+    0: -0.005,
+    1: 0.042,
+    2: 0.159,
+    3: 0.533,
+    4: -1.432,
+    5: -2.688,
+    6: 0.166,
+    7: -1.440,
+    8: -2.780,
+    9: 0.225,
+    10: -1.378,
+    11: -2.467,
+    12: 0.422,
+}
 
 MOTOR_LABELS = {
     0: "Thumb IP",
@@ -827,6 +846,64 @@ def _run_record(args: argparse.Namespace, config: HandConfig) -> None:
     print(f"Saved {sample_count} samples to {output}")
 
 
+def _run_goto(args: argparse.Namespace, config: HandConfig) -> None:
+    """Move the configured motors to ``GOTO_JOINTS`` and hold the pose."""
+
+    _require_reviewed_config(args.config)
+    missing_motor_ids = sorted(set(config.motor_ids) - GOTO_JOINTS.keys())
+    if missing_motor_ids:
+        raise ValueError(
+            f"No goto position is configured for motor IDs {missing_motor_ids}; "
+            "add them to GOTO_JOINTS"
+        )
+
+    goto_positions = np.asarray(
+        [GOTO_JOINTS[motor_id] for motor_id in config.motor_ids],
+        dtype=float,
+    )
+    for motor_id, position in zip(config.motor_ids, goto_positions):
+        _check_move_target(config, motor_id, float(position))
+
+    print(f"Selected motor IDs = {list(config.motor_ids)}")
+    print(f"Goto positions (rad) = {goto_positions.tolist()}")
+    _confirm_motion("Goto", args.yes)
+
+    hand = MidasHand(config, autoconnect=False)
+    try:
+        hand.connect()
+        _verify_bus(hand)
+        hand.configure(enable_torque=False)
+
+        # Hold the measured pose before enabling torque, then command the goto
+        # pose with a bounded velocity and acceleration profile.
+        hold_position = hand.read_pos()
+        hand.set_positions(hold_position, clip=False)
+        hand.set_motion_profile(
+            profile_velocity_rad_s=PROFILE_MOVE_VELOCITY_RAD_S,
+            profile_acceleration_rad_s2=PROFILE_MOVE_ACCELERATION_RAD_S2,
+            motor_ids=config.motor_ids,
+        )
+        hand.enable_torque(config.motor_ids)
+        hand.set_positions(goto_positions)
+
+        for motor_id, position in zip(config.motor_ids, goto_positions):
+            _wait_for_motor(
+                hand,
+                motor_id,
+                float(position),
+                args.timeout_s,
+            )
+
+        print("Goto pose reached; torque is enabled. Press Ctrl-C to release.")
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\nGoto hold stopped by user.")
+    finally:
+        if hand.is_connected:
+            hand.shutdown()
+
+
 def _run_continuous_measurement(
     args: argparse.Namespace,
     config: HandConfig,
@@ -983,9 +1060,9 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=tuple(TEST_FINGER_MOTOR_IDS),
         default=None,
         help=(
-            "Finger whose motors may be tested and torque-enabled; for home, "
-            "omit this option to home every configured motor (other commands "
-            f"default to {DEFAULT_TEST_FINGER})"
+            "Finger whose motors may be tested and torque-enabled; for home "
+            "and goto, omit this option to select every configured motor "
+            f"(other commands default to {DEFAULT_TEST_FINGER})"
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1116,6 +1193,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Print every Nth sample; use 0 to disable",
     )
+
+    goto = commands.add_parser(
+        "goto",
+        help="Move to GOTO_JOINTS and hold the pose with torque enabled",
+    )
+    goto.add_argument(
+        "--timeout-s",
+        type=float,
+        default=PROFILE_MOVE_TIMEOUT_S,
+        help="Timeout while moving each selected motor to its goto position",
+    )
+    goto.add_argument("--yes", action="store_true", help="Skip the MOVE prompt")
 
     measure_current = commands.add_parser(
         "measure_current",
@@ -1262,6 +1351,9 @@ def main() -> None:
             parser.error("--duration-s must be positive")
         if args.print_every < 0:
             parser.error("--print-every must be non-negative")
+    elif args.command == "goto":
+        if args.timeout_s <= 0:
+            parser.error("--timeout-s must be positive")
     elif args.command in (
         "measure_current",
         "measure_position_error",
@@ -1289,7 +1381,7 @@ def main() -> None:
     try:
         if args.command == "home":
             _validate_home_joints(args.joints, args.test_finger)
-        if args.command == "home" and args.test_finger is None:
+        if args.command in ("home", "goto") and args.test_finger is None:
             motor_ids = None
         else:
             test_finger = args.test_finger or DEFAULT_TEST_FINGER
@@ -1303,6 +1395,8 @@ def main() -> None:
             _run_stream_move(args, config)
         elif args.command == "record":
             _run_record(args, config)
+        elif args.command == "goto":
+            _run_goto(args, config)
         elif args.command == "measure_current":
             _run_measure_current(args, config)
         elif args.command == "measure_position_error":
