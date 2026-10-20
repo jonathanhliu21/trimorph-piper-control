@@ -2,16 +2,16 @@ import unittest
 
 import numpy as np
 
-from collection.contact_detection import (
+from data_collection.collection.contact_detection import (
     CONTACT_EXIT_THRESHOLD,
     CONTACT_MOTOR_IDS,
     CONTACT_THRESHOLD,
 )
-from collection.config import (
+from data_collection.collection.config import (
     FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
     FOLLOWER_PROFILE_VELOCITY_RAD_S,
 )
-from collection.follower_hand_worker import (
+from data_collection.collection.follower_hand_worker import (
     adjusted_follower_position_error,
     follower_contact_detection_ready,
     prepare_follower_hand,

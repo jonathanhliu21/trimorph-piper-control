@@ -13,21 +13,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Support both direct execution and package imports.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import numpy as np
+
+from data_collection.collection.config import (
+    TRIMORPH_MOTOR_IDS as CANONICAL_TRIMORPH_MOTOR_IDS,
+    RAW_EEF_FIELDS,
+)
 
 
 # Operator settings. Adjust these values, then run:
-#   python3 data_collection/postprocess_dataset.py
+#   python3 scripts/dataset/postprocess_dataset.py
 DATASET_ROOT = Path("data_trimorph6")
 RAW_DIR = DATASET_ROOT / "raw"
 OVERWRITE_PROCESSED_FILES = True
 PROCESS_ONLY_RAW_STATUSES = {"complete"}
 MAX_SYNC_ERROR_S = 0.010
 TRIM_CAMERA_FRAMES = 1  # drop this many frames from each end before syncing
-
-
-CANONICAL_TRIMORPH_MOTOR_IDS = tuple(range(13))
-RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 
 
 @dataclass(frozen=True)

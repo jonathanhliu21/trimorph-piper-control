@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from collection.hand_common import (
+from data_collection.collection.hand_common import (
     XC330_M181_T_MODEL_NUMBER,
     XL330_M077_T_MODEL_NUMBER,
     is_compatible_dynamixel_model,

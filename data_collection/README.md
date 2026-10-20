@@ -1,16 +1,28 @@
 # Collection pipeline
 
-`collect.py` always launches the passive PiperX logger and torque-disabled
-TRIMORPH leader-hand worker and the OAK-1 policy camera. A commanded MIDAS
-follower is optional. All streams use host `monotonic_ns` timestamps.
+`collect_hand_only.py` records the TRIMORPH leader hand. Add `--use-piper`
+for passive PiperX logging, `--use-quest` for Quest UDP poses, `--add-camera`
+for the OAK wrist camera, and both follower options for commanded MIDAS
+retargeting. Piper and Quest pose sources are mutually exclusive.
+All streams use host `monotonic_ns` timestamps. Foot-pedal recording is the
+default; use `--episode-s` for a fixed duration or `--retarget-only` to run
+without recording. `replay_episode.py` replays saved hand and Piper streams.
+
+`collection/config.py` defines shared hardware and retargeting settings in
+`HandRuntimeConfig` and collection-specific options in
+`HandOnlyCollectionConfig`. Replay tuning lives in `collection/replay_config.py`.
+Standalone calibration and diagnostics are under `scripts/`; dataset conversion
+is `scripts/dataset/postprocess_dataset.py`. Run all commands from the repository
+root. See [the project README](../README.md) for the full directory map.
 
 The primary hand records its calibrated 13-motor `read_pos()` vector directly
 to `leader_hand.csv`. When configured, the follower clips and optionally
 smooths that vector, commands it with `set_positions()`, and records its own
 measured `read_pos()` values to `follower.csv`.
 The global `follower_command_scale` is multiplied by the motor-ID keyed
-`follower_joint_command_scales`, whose entries default to `1.0`.
-Hand-only collection also adds its motor-ID keyed
+`follower_joint_command_scales`, which default to `0.6` for finger PIP joints, `0.5` for finger MCP joints,
+and `1.0` for the other joints.
+Collection and follower replay also add its motor-ID keyed
 `follower_joint_command_offsets` after scaling. Each offset is the MIDAS
 target angle when the corresponding TRIMORPH joint is at zero:
 `MIDAS = TRIMORPH * global scale * joint scale + joint offset`.
@@ -27,7 +39,7 @@ hold the TRIMORPH thumb at the pose corresponding to the displayed MIDAS pose
 and press Enter:
 
 ```bash
-python data_collection/retarget_thumb.py \
+python scripts/thumb_retargeting/retarget_thumb.py \
   --trimorph-config path/to/trimorph.yaml \
   --trimorph-port /dev/serial/by-id/TRIMORPH \
   --midas-config config/midas_hand_config.yaml \
@@ -38,7 +50,7 @@ This checkpoints `thumb_tip_matching.csv` after every point. Fit the affine
 map from TRIMORPH joints 2--3 to MIDAS joints 2--3:
 
 ```bash
-python data_collection/fit_model_to_endpoints.py \
+python scripts/thumb_retargeting/fit_model_to_endpoints.py \
   --input thumb_tip_matching.csv \
   --output thumb_retarget_model.json
 ```

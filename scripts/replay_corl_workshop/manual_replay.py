@@ -16,12 +16,10 @@ import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DATA_COLLECTION_ROOT = REPO_ROOT / "data_collection"
-for import_root in (REPO_ROOT, DATA_COLLECTION_ROOT):
-    if str(import_root) not in sys.path:
-        sys.path.insert(0, str(import_root))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-from collection.hand_common import load_hand_config, verify_connected_hand  # noqa: E402
+from data_collection.collection.hand_common import load_hand_config, verify_connected_hand  # noqa: E402
 from scripts.piper_api.foot_pedal import (  # noqa: E402
     FootPedalTrigger,
     format_input_devices,

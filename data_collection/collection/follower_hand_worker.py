@@ -15,7 +15,7 @@ from .contact_detection import (
 from .config import (
     FOLLOWER_PROFILE_ACCELERATION_RAD_S2,
     FOLLOWER_PROFILE_VELOCITY_RAD_S,
-    CollectionConfig,
+    HandOnlyCollectionConfig,
     joint_command_offsets_for_motor_ids,
     joint_command_scales_for_motor_ids,
 )
@@ -99,7 +99,7 @@ def prepare_follower_hand(
 
 
 def run_follower_hand_worker(
-    config: CollectionConfig,
+    config: HandOnlyCollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
     *,

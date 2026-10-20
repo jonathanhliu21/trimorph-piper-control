@@ -8,13 +8,12 @@ from scripts.piper_api.record_trajectory import (
     read_joint_limits,
 )
 
-from .config import RAW_EEF_FIELDS, CollectionConfig
+from .config import RAW_EEF_FIELDS, PIPER_JOINT_FIELDS, HandOnlyCollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .shared_state import SharedState
 
 
 PIPER_LIMIT_WARNING_INTERVAL_S = 2.0
-PIPER_JOINT_FIELDS = tuple(f"joint_{joint}" for joint in range(1, 7))
 PIPER_KINEMATIC_LIMIT_STATUSES = (
     "TARGET_POS_EXCEEDS_LIMIT",
     "NO_SOLUTION",
@@ -50,7 +49,7 @@ def piper_workspace_warning(state: dict[str, object]) -> str | None:
 
 
 def run_piper_worker(
-    config: CollectionConfig,
+    config: HandOnlyCollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
     *,

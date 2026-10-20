@@ -13,77 +13,68 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
 
+# Support both direct execution and package imports.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import numpy as np
 
-from collect_hand_only import (
+from data_collection.collection.config import (
     DEFAULT_HAND_CONFIG,
     DEFAULT_HAND_MEASURE_RATE_HZ,
     DEFAULT_HAND_PORT,
     DEFAULT_PIPER_RATE_HZ,
     DEFAULT_THUMB_MODEL,
-    HandOnlyCollectionConfig,
+    HandRuntimeConfig,
+    RAW_EEF_FIELDS,
+    PIPER_JOINT_FIELDS,
 )
-from collection.depthai_task_camera_worker import flip_frame
-from collection.depthai_utils import (
+from data_collection.collection.depthai_task_camera_worker import flip_frame
+from data_collection.collection.depthai_utils import (
     apply_camera_control,
     import_depthai,
     require_depthai_device,
     warmup_color_queue,
 )
-from collection.episode import raw_root
-from collection.hand_common import (
+from data_collection.collection.episode import raw_root
+from data_collection.collection.hand_common import (
     load_follower_config,
     load_hand_config,
     verify_connected_hand,
 )
-from collection.thumb_retargeting import (
+from data_collection.collection.thumb_retargeting import (
     THUMB_RETARGET_MOTOR_IDS,
     ThumbRetargetModel,
     build_follower_target,
     load_thumb_retarget_model,
 )
-from collection.utils import import_cv2
+from data_collection.collection.utils import import_cv2
 
-
-DATASET_ROOT = Path("data_trimorph")
-RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
-PIPER_JOINT_FIELDS = tuple(f"joint_{joint}" for joint in range(1, 7))
-REPLAY_HZ = 60.0
-CURRENT_TELEMETRY_HZ = 10.0
-PREPOSITION_SECONDS = 3.0
-SETTLE_SECONDS = 1.0
-PIPER_PREPOSITION_SPEED_PERCENT = 20
-PIPER_REPLAY_SPEED_PERCENT = 100
-PIPER_INTERFACE = "socketcan"
-PIPER_CHANNEL = "can0"
-PIPER_FIRMWARE = "v183"
-PIPER_INSTALLATION_POS = "right"
-PIPER_PAYLOAD = "half"
-PIPER_DIAG_INTERVAL_S = 0.5
-PURE_POSITION_OPERATING_MODE = 3
-ACTION_SCALE = 1.0
-JOINT_ACTION_SCALES: dict[int, float] = {
-    0: 1.1,
-    1: 1.1,
-    2: 1.0,
-    3: 1.0,
-    4: 1.1,
-    5: 1.1,
-    6: 1.0,
-    7: 1.1,
-    8: 1.1,
-    9: 1.0,
-    10: 1.1,
-    11: 1.1,
-    12: 1.0,
-}
-CAMERA_WARMUP_ATTEMPTS = 60
+from data_collection.collection.replay_config import (
+    DATASET_ROOT,
+    REPLAY_HZ,
+    CURRENT_TELEMETRY_HZ,
+    PREPOSITION_SECONDS,
+    SETTLE_SECONDS,
+    PIPER_PREPOSITION_SPEED_PERCENT,
+    PIPER_REPLAY_SPEED_PERCENT,
+    PIPER_INTERFACE,
+    PIPER_CHANNEL,
+    PIPER_FIRMWARE,
+    PIPER_INSTALLATION_POS,
+    PIPER_PAYLOAD,
+    PIPER_DIAG_INTERVAL_S,
+    PURE_POSITION_OPERATING_MODE,
+    ACTION_SCALE,
+    JOINT_ACTION_SCALES,
+    CAMERA_WARMUP_ATTEMPTS,
+)
 
 
 class ReplayVideoRecorder:
     """Keep an OAK pipeline warm and record frames during the replay interval."""
 
-    def __init__(self, output: Path, config: HandOnlyCollectionConfig) -> None:
+    def __init__(self, output: Path, config: HandRuntimeConfig) -> None:
         self.output = output.expanduser().resolve()
         self.config = config
         self._ready = threading.Event()
@@ -562,10 +553,10 @@ def config_values_for_motor_ids(
 def build_replay_config(
     args: argparse.Namespace,
     active_motors: tuple[int, ...] | None,
-) -> HandOnlyCollectionConfig:
-    """Build replay settings from the hand-only collection configuration."""
+) -> HandRuntimeConfig:
+    """Build replay settings from the shared hand runtime configuration."""
 
-    return HandOnlyCollectionConfig(
+    return HandRuntimeConfig(
         dataset_root=Path(args.dataset_root).expanduser(),
         hand_config=(
             Path(args.hand_config).expanduser()
@@ -574,8 +565,6 @@ def build_replay_config(
         ),
         hand_port=args.hand_port or DEFAULT_HAND_PORT,
         hand_measure_rate_hz=DEFAULT_HAND_MEASURE_RATE_HZ,
-        warmup_time=0.0,
-        episode_time=0.0,
         active_motors=list(active_motors or ()),
     )
 

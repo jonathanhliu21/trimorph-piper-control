@@ -5,15 +5,15 @@ from pathlib import Path
 
 import numpy as np
 
-from collection.thumb_retargeting import (
+from data_collection.collection.thumb_retargeting import (
     MODEL_FORMAT,
     ThumbRetargetModel,
     apply_thumb_retargeting,
     build_follower_target,
     load_thumb_retarget_model,
 )
-from fit_model_to_endpoints import fit_linear_model
-from retarget_thumb import generate_midas_waypoints
+from scripts.thumb_retargeting.fit_model_to_endpoints import fit_linear_model
+from scripts.thumb_retargeting.retarget_thumb import generate_midas_waypoints
 
 
 class ThumbRetargetingTests(unittest.TestCase):

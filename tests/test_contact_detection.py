@@ -1,6 +1,6 @@
 import unittest
 
-from collection.contact_detection import ContactState, ContactStateMachine
+from data_collection.collection.contact_detection import ContactState, ContactStateMachine
 
 
 class ContactStateMachineTests(unittest.TestCase):

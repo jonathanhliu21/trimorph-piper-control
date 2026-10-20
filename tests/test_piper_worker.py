@@ -3,7 +3,7 @@ import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from collection.piper_worker import piper_workspace_warning, run_piper_worker
+from data_collection.collection.piper_worker import piper_workspace_warning, run_piper_worker
 
 
 class PiperWorkspaceWarningTests(unittest.TestCase):
@@ -100,7 +100,7 @@ class PiperWorkspaceWarningTests(unittest.TestCase):
         )
         with (
             patch("scripts.piper_api.piper_api.PiperAPI") as api_type,
-            patch("collection.piper_worker.print") as printed,
+            patch("data_collection.collection.piper_worker.print") as printed,
         ):
             api = api_type.return_value
             api.is_ok.return_value = True

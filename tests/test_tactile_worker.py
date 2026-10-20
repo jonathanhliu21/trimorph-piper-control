@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from collection.shared_state import SharedState
-from collection.tactile_worker import TACTILE_SENSOR_NAMES, run_tactile_worker
+from data_collection.collection.shared_state import SharedState
+from data_collection.collection.tactile_worker import TACTILE_SENSOR_NAMES, run_tactile_worker
 
 
 class _Config:
@@ -71,7 +71,7 @@ class TactileWorkerTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"midas_hand_api": fake_api}),
             patch(
-                "collection.tactile_worker.TactileContactDetector", FakeDetector
+                "data_collection.collection.tactile_worker.TactileContactDetector", FakeDetector
             ),
         ):
             run_tactile_worker(_Config(), shared, None, init_done=init_done)

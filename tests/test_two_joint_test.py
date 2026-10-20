@@ -128,7 +128,7 @@ class TwoJointConfigTests(unittest.TestCase):
 
     def test_goto_enables_torque_at_recorded_positions(self):
         config = _load_config(
-            Path("scripts/trimorph_api_test/xl330_test_config.yaml"),
+            Path("config/xl330_test_config.yaml"),
         )
         config = replace(config, joint_lower_limits=(-3.14,) * config.n_motors)
         calls = []
@@ -165,7 +165,7 @@ class TwoJointConfigTests(unittest.TestCase):
                 self.is_connected = False
 
         args = mock.Mock(
-            config=Path("scripts/trimorph_api_test/xl330_test_config.yaml"),
+            config=Path("config/xl330_test_config.yaml"),
             timeout_s=4.0,
             yes=True,
         )
@@ -303,6 +303,7 @@ class TwoJointConfigTests(unittest.TestCase):
             TEST_FINGER_MOTOR_IDS,
             {
                 "thumb": (0, 1, 2, 3),
+                "all": range(13),
                 "finger-1": (4, 5, 6),
                 "finger-2": (7, 8, 9),
                 "finger-3": (10, 11, 12),
@@ -311,19 +312,19 @@ class TwoJointConfigTests(unittest.TestCase):
 
     def test_motion_angles_are_joint_specific(self):
         expected = (
-            (0.0, -1.57),
+            (0.0, -1.4),
             (0.0, -1.4),
             (0.8, -0.1),
-            (0.0, 2.0),
-            (0.0, -1.35),
-            (0.0, -1.35),
-            (0.35, -0.35),
-            (0.0, -1.35),
-            (0.0, -1.35),
-            (0.35, -0.35),
-            (0.0, -1.35),
-            (0.0, -1.35),
-            (0.35, -0.35),
+            (0.0, 1.5),
+            (0.0, -1.5),
+            (0.0, -1.4),
+            (0.0, 0.0),
+            (0.0, -1.5),
+            (0.0, -1.4),
+            (0.0, 0.0),
+            (0.0, -1.5),
+            (0.0, -1.4),
+            (0.0, 0.0),
         )
 
         self.assertEqual(tuple(_motion_angles(i) for i in range(13)), expected)

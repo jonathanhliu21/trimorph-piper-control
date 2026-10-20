@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from collect_hand_only import (
+from data_collection.collection.config import (
     DATA_COLLECTION_MODE,
     DEFAULT_FOLLOWER_MEASURE_RATE_HZ,
     DEFAULT_FORCE_FEEDBACK_RATE_HZ,
@@ -15,6 +15,8 @@ from collect_hand_only import (
     RETARGET_ONLY_MODE,
     TACTILE_FORCE_FEEDBACK_CURRENT_MA,
     HandOnlyCollectionConfig,
+)
+from data_collection.collect_hand_only import (
     main,
     parse_args,
     run_hand_only,
@@ -22,8 +24,8 @@ from collect_hand_only import (
     stop_episode,
     worker_specs,
 )
-from collection.episode import RecordingManager
-from collection.config import TRIMORPH_MOTOR_IDS
+from data_collection.collection.episode import RecordingManager
+from data_collection.collection.config import TRIMORPH_MOTOR_IDS
 
 
 class HandOnlyCollectionTests(unittest.TestCase):
@@ -79,12 +81,13 @@ class HandOnlyCollectionTests(unittest.TestCase):
         self.assertEqual(
             config.follower_joint_command_scales,
             {
-                motor_id: 0.5 if motor_id in (4, 5) else 1.0
+                motor_id: (0.6 if motor_id in (4, 7, 10) else
+                           0.5 if motor_id in (5, 8, 11) else 1.0)
                 for motor_id in TRIMORPH_MOTOR_IDS
             },
         )
 
-    def test_joint_command_offsets_default_to_zero_midas_pose(self):
+    def test_joint_command_offsets_default_to_calibrated_midas_pose(self):
         config = HandOnlyCollectionConfig(
             dataset_root=Path("data_trimorph"),
             hand_config=Path("config/hand.yaml"),
@@ -96,7 +99,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
 
         self.assertEqual(
             config.follower_joint_command_offsets,
-            {motor_id: 0.0 for motor_id in TRIMORPH_MOTOR_IDS},
+            {motor_id: 0.262 if motor_id == 12 else 0.0 for motor_id in TRIMORPH_MOTOR_IDS},
         )
 
     def test_cli_modes_default_to_data_collection(self):
@@ -114,7 +117,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
                 ["collect_hand_only.py", "--use-piper", "--joint-level",
                  "--piper-rate-hz", "300", "--piper-channel", "can1"],
             ),
-            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
         ):
             self.assertEqual(main(), 0)
         config = run.call_args.args[0]
@@ -125,7 +128,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
     def test_joint_position_alias_enables_piper_joint_recording(self):
         with (
             patch("sys.argv", ["collect_hand_only.py", "--use-piper", "--joint-position"]),
-            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
         ):
             self.assertEqual(main(), 0)
         self.assertTrue(run.call_args.args[0].piper_joint_level)
@@ -156,7 +159,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
                     "11",
                 ],
             ),
-            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
         ):
             self.assertEqual(main(), 0)
 
@@ -260,7 +263,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
     def test_main_copies_quest_flag_and_defaults_to_config(self):
         with (
             patch("sys.argv", ["collect_hand_only.py", "--use-quest"]),
-            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
         ):
             self.assertEqual(main(), 0)
 
@@ -273,7 +276,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
     def test_main_copies_piper_flag_to_config(self):
         with (
             patch("sys.argv", ["collect_hand_only.py", "--use-piper"]),
-            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
         ):
             self.assertEqual(main(), 0)
 
@@ -317,7 +320,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
                     "/dev/paxini",
                 ],
             ),
-            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
         ):
             self.assertEqual(main(), 0)
 
@@ -328,7 +331,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
     def test_omitted_paxini_port_does_not_conflict_with_omitted_follower(self):
         with (
             patch("sys.argv", ["collect_hand_only.py"]),
-            patch("collect_hand_only.run_hand_only", return_value=0) as run,
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
         ):
             self.assertEqual(main(), 0)
 
@@ -355,7 +358,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
                 {"sample_idx": 0, "monotonic_ns": session.start_ns, "elapsed_s": "0.0"}
             )
 
-            with patch("collection.episode._hand_metadata", return_value={}):
+            with patch("data_collection.collection.episode._hand_metadata", return_value={}):
                 saved = stop_episode(recorder, "duration_complete")
 
             self.assertIs(saved, session)
@@ -387,7 +390,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
             session.append_piper(
                 {"sample_idx": 0, "monotonic_ns": session.start_ns, "elapsed_s": "0"}
             )
-            with patch("collection.episode._hand_metadata", return_value={}):
+            with patch("data_collection.collection.episode._hand_metadata", return_value={}):
                 stop_episode(recorder, "duration_complete")
 
             metadata = json.loads(session.paths.metadata_path.read_text())
@@ -424,7 +427,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
                     "qw": 1.0,
                 }
             )
-            with patch("collection.episode._hand_metadata", return_value={}):
+            with patch("data_collection.collection.episode._hand_metadata", return_value={}):
                 stop_episode(recorder, "duration_complete")
 
             self.assertTrue(session.paths.quest_path.read_text())
@@ -451,7 +454,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
             )
             recorder = RecordingManager()
             session = start_episode(config, recorder)
-            with patch("collection.episode._hand_metadata", return_value={}):
+            with patch("data_collection.collection.episode._hand_metadata", return_value={}):
                 stop_episode(recorder, "duration_complete")
 
             self.assertFalse(session.paths.quest_path.exists())
@@ -477,12 +480,12 @@ class HandOnlyCollectionTests(unittest.TestCase):
                 {"frame_idx": 0, "monotonic_ns": session.start_ns, "elapsed_s": "0"}
             )
             session.video_done.set()
-            with patch("collection.episode._hand_metadata", return_value={}):
+            with patch("data_collection.collection.episode._hand_metadata", return_value={}):
                 stop_episode(recorder, "duration_complete")
 
             metadata = json.loads(session.paths.metadata_path.read_text())
             self.assertEqual(metadata["camera"]["device"], "oak1_depthai")
-            self.assertEqual(metadata["camera"]["brightness"], 0)
+            self.assertEqual(metadata["camera"]["brightness"], -1)
             self.assertEqual(metadata["camera"]["anti_banding_hz"], "60")
             self.assertEqual(metadata["counts"]["camera_frames"], 1)
 
@@ -501,8 +504,8 @@ class HandOnlyCollectionTests(unittest.TestCase):
                 episode_time=0.0,
             )
             with (
-                patch("collect_hand_only.initialize_worker", return_value=FinishedThread()),
-                patch("collection.episode._hand_metadata", return_value={}),
+                patch("data_collection.collect_hand_only.initialize_worker", return_value=FinishedThread()),
+                patch("data_collection.collection.episode._hand_metadata", return_value={}),
             ):
                 self.assertEqual(run_hand_only(config), 0)
 
@@ -531,7 +534,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
                 mode=RETARGET_ONLY_MODE,
             )
             with patch(
-                "collect_hand_only.initialize_worker", side_effect=initialize_and_stop
+                "data_collection.collect_hand_only.initialize_worker", side_effect=initialize_and_stop
             ):
                 self.assertEqual(run_hand_only(config), 0)
 
@@ -555,12 +558,12 @@ class HandOnlyCollectionTests(unittest.TestCase):
                 follower_hand_port="/dev/follower",
             )
             with (
-                patch("collect_hand_only.initialize_worker", return_value=FinishedThread()),
+                patch("data_collection.collect_hand_only.initialize_worker", return_value=FinishedThread()),
                 patch(
-                    "collect_hand_only.run_follower_contact_ui",
+                    "data_collection.collect_hand_only.run_follower_contact_ui",
                     return_value="ui_closed",
                 ) as run_ui,
-                patch("collection.episode._hand_metadata", return_value={}),
+                patch("data_collection.collection.episode._hand_metadata", return_value={}),
             ):
                 self.assertEqual(run_hand_only(config), 0)
 

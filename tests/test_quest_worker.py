@@ -5,7 +5,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from collection.quest_worker import _decode_packet, run_quest_worker
+from data_collection.collection.quest_worker import _decode_packet, run_quest_worker
 
 
 VALID_PACKET = {
@@ -46,9 +46,9 @@ class QuestWorkerTests(unittest.TestCase):
 
         fake_socket.recvfrom.side_effect = receive_once
         with (
-            patch("collection.quest_worker.socket.socket") as socket_type,
-            patch("collection.quest_worker.time.monotonic_ns", return_value=2_000_000_000),
-            patch("collection.quest_worker.time.time", return_value=1234.5),
+            patch("data_collection.collection.quest_worker.socket.socket") as socket_type,
+            patch("data_collection.collection.quest_worker.time.monotonic_ns", return_value=2_000_000_000),
+            patch("data_collection.collection.quest_worker.time.time", return_value=1234.5),
         ):
             socket_type.return_value.__enter__.return_value = fake_socket
             run_quest_worker(
@@ -68,8 +68,8 @@ class QuestWorkerTests(unittest.TestCase):
     def test_startup_fails_when_no_packet_arrives_before_timeout(self):
         fake_socket = MagicMock()
         with (
-            patch("collection.quest_worker.socket.socket") as socket_type,
-            patch("collection.quest_worker.time.monotonic", side_effect=[10.0, 10.1]),
+            patch("data_collection.collection.quest_worker.socket.socket") as socket_type,
+            patch("data_collection.collection.quest_worker.time.monotonic", side_effect=[10.0, 10.1]),
         ):
             socket_type.return_value.__enter__.return_value = fake_socket
             with self.assertRaisesRegex(TimeoutError, "No valid Quest UDP data"):
@@ -94,7 +94,7 @@ class QuestWorkerTests(unittest.TestCase):
             raise socket.timeout
 
         fake_socket.recvfrom.side_effect = receive
-        with patch("collection.quest_worker.socket.socket") as socket_type:
+        with patch("data_collection.collection.quest_worker.socket.socket") as socket_type:
             socket_type.return_value.__enter__.return_value = fake_socket
             init_done = threading.Event()
             run_quest_worker(

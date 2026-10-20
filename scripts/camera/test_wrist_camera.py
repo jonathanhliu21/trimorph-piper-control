@@ -21,7 +21,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
-from data_collection.collection.config import build_config
+from data_collection.collection import config as defaults
 from data_collection.collection.depthai_task_camera_worker import flip_frame
 from data_collection.collection.depthai_utils import (
     apply_camera_control,
@@ -36,17 +36,16 @@ WARMUP_ATTEMPTS = 60
 
 
 def parse_args() -> argparse.Namespace:
-    defaults = build_config()
     parser = argparse.ArgumentParser(
         description="Show a live feed from the DepthAI/OAK wrist camera."
     )
-    parser.add_argument("--width", type=int, default=defaults.task_camera_width)
-    parser.add_argument("--height", type=int, default=defaults.task_camera_height)
+    parser.add_argument("--width", type=int, default=defaults.TASK_CAMERA_WIDTH)
+    parser.add_argument("--height", type=int, default=defaults.TASK_CAMERA_HEIGHT)
     flip_group = parser.add_mutually_exclusive_group()
     flip_group.add_argument(
         "--flip",
         choices=("none", "horizontal", "vertical", "both", "180"),
-        default=defaults.task_camera_flip,
+        default=defaults.TASK_CAMERA_FLIP,
     )
     flip_group.add_argument(
         "--flip-180",
@@ -66,7 +65,6 @@ def main() -> int:
     dai = import_depthai()
     require_depthai_device(dai)
     flip_mode = "both" if args.flip_180 else args.flip
-    defaults = build_config()
 
     try:
         with dai.Pipeline() as pipeline:
@@ -74,8 +72,8 @@ def main() -> int:
             apply_camera_control(
                 dai,
                 camera,
-                brightness=defaults.task_camera_brightness,
-                anti_banding_hz=defaults.task_camera_anti_banding_hz,
+                brightness=defaults.TASK_CAMERA_BRIGHTNESS,
+                anti_banding_hz=defaults.TASK_CAMERA_ANTI_BANDING_HZ,
             )
             camera_output = camera.requestOutput(
                 (args.width, args.height), dai.ImgFrame.Type.NV12

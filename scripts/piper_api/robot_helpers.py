@@ -3,15 +3,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
-
-
-FIRMWARE = {
-    "default": PiperFW.DEFAULT,
-    "v183": PiperFW.V183,
-    "v188": PiperFW.V188,
-}
-
 
 def create_piper_robot(
     *,
@@ -19,9 +10,16 @@ def create_piper_robot(
     interface: str = "socketcan",
     channel: str = "can0",
 ):
+    from pyAgxArm import AgxArmFactory, ArmModel, PiperFW, create_agx_arm_config
+
+    firmware_versions = {
+        "default": PiperFW.DEFAULT,
+        "v183": PiperFW.V183,
+        "v188": PiperFW.V188,
+    }
     cfg = create_agx_arm_config(
         robot=ArmModel.PIPER,
-        firmeware_version=FIRMWARE[firmware],
+        firmeware_version=firmware_versions[firmware],
         interface=interface,
         channel=channel,
     )

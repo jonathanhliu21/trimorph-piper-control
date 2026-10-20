@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import numpy as np
 from midas_hand_api.actuators import control_table as ct
 
-from collect_hand_only import (
+from data_collection.collection.config import (
     FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD,
     FORCE_FEEDBACK_MAX_CURRENT_MA,
     FORCE_FEEDBACK_MOTOR_IDS,
@@ -12,7 +12,7 @@ from collect_hand_only import (
     TACTILE_FORCE_FEEDBACK_CURRENT_MA,
     TACTILE_FORCE_FEEDBACK_MOTOR_IDS,
 )
-from collection.leader_hand_worker import (
+from data_collection.collection.leader_hand_worker import (
     TrimorphForceFeedbackController,
     force_feedback_current_ma,
 )

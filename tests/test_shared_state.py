@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from collection.shared_state import SharedState
+from data_collection.collection.shared_state import SharedState
 
 
 class SharedStateTests(unittest.TestCase):

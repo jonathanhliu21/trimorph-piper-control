@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from .config import CollectionConfig
+from .config import HandOnlyCollectionConfig
 from .depthai_utils import (
     apply_camera_control,
     import_depthai,
@@ -27,7 +27,7 @@ def flip_frame(cv2, frame, mode: str):
 
 
 def run_depthai_task_camera_worker(
-    config: CollectionConfig,
+    config: HandOnlyCollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
     *,

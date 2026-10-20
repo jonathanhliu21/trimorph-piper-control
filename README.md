@@ -24,7 +24,7 @@ The two principal checked-in configurations are:
 
 | Configuration | Used by |
 | --- | --- |
-| `scripts/trimorph_api_test/xl330_test_config.yaml` | TRIMORPH homing, angle recording, deterministic motion, current logging, and contact tests in `joint_test.py` |
+| `config/xl330_test_config.yaml` | TRIMORPH homing, angle recording, deterministic motion, current logging, and contact tests in `joint_test.py` |
 | `config/midas_hand_config.yaml` | MIDAS contact UI, follower retargeting, replay onto MIDAS, and thumb calibration |
 
 `data_collection/collect_hand_only.py` and direct TRIMORPH replay default to
@@ -34,6 +34,29 @@ The two principal checked-in configurations are:
 ```bash
 cp config/hand.example.yaml config/hand.yaml
 ```
+
+## Project structure
+
+| Location | Contents |
+| --- | --- |
+| `config/` | Hand YAML configurations, including `xl330_test_config.yaml` |
+| `data_collection/` | `collect_hand_only.py`, `replay_episode.py`, and collection documentation |
+| `data_collection/collection/` | Shared runtime configuration, episode storage, workers, contact detection, and retargeting |
+| `scripts/thumb_retargeting/` | Paired thumb calibration and model fitting |
+| `scripts/motion_smoothness/` | Deterministic joint motion tests |
+| `scripts/tracking_error/` | Leader/follower tracking diagnostics |
+| `scripts/dataset/` | Raw episode postprocessing and dataset validation |
+| `scripts/trimorph_api_test/` | Hand bring-up, contact UI, telemetry, and plotting |
+| `scripts/piper_api/`, `scripts/camera/`, `scripts/quest/` | Arm utilities and standalone sensor checks |
+| `tests/` | Automated tests |
+
+Collection and replay share `HandRuntimeConfig` in
+`data_collection/collection/config.py`, including hand profiles, retarget scales
+and offsets, camera defaults, dataset location, and Piper connection defaults.
+`HandOnlyCollectionConfig` extends it with worker and episode options.
+Replay-only action multipliers, rates, and preposition settings live in
+`data_collection/collection/replay_config.py`. The Piper SDK is loaded when an
+arm connection is created, so hand-only tools can run without it.
 
 ## Setup
 
@@ -76,12 +99,12 @@ Home one finger, or selected joints within that finger:
 
 ```bash
 python3 scripts/trimorph_api_test/joint_test.py \
-  --config scripts/trimorph_api_test/xl330_test_config.yaml \
+  --config config/xl330_test_config.yaml \
   --test-finger finger-1 \
   home --current-threshold-ma 200 --velocity-rad-s 1.5
 
 python3 scripts/trimorph_api_test/joint_test.py \
-  --config scripts/trimorph_api_test/xl330_test_config.yaml \
+  --config config/xl330_test_config.yaml \
   --test-finger thumb \
   home --joints 0 2
 ```
@@ -93,7 +116,7 @@ Read calibrated joint angles with torque disabled and write them to CSV:
 
 ```bash
 python3 scripts/trimorph_api_test/joint_test.py \
-  --config scripts/trimorph_api_test/xl330_test_config.yaml \
+  --config config/xl330_test_config.yaml \
   --test-finger finger-1 \
   record --motors 4,5,6 --rate-hz 20 --duration-s 30 \
   --print-every 10 --output output/finger_1_angles.csv
@@ -106,7 +129,7 @@ averaging:
 
 ```bash
 python3 scripts/trimorph_api_test/joint_test.py \
-  --config scripts/trimorph_api_test/xl330_test_config.yaml \
+  --config config/xl330_test_config.yaml \
   --test-finger finger-1 \
   stream_move --motors 4,5,6 --rate-hz 50 --duration-s 2 \
   --settle-s 0.5 --trials 5 \
@@ -117,7 +140,7 @@ For discrete configured-profile moves instead, use:
 
 ```bash
 python3 scripts/trimorph_api_test/joint_test.py \
-  --config scripts/trimorph_api_test/xl330_test_config.yaml \
+  --config config/xl330_test_config.yaml \
   --test-finger finger-1 \
   profile_move --motors 4,5,6 \
   --profile-velocity-rad-s 1.5 \
@@ -230,9 +253,8 @@ The older filename `proprioception.csv` is still accepted by replay for
 compatibility.
 
 Add `--use-piper` to passively record the Piper EEF pose and drag-teach state
-to `piper.csv`, synchronized with the hand samples. This uses the same Piper
-settings and passive logger as the full collector; it does not enable or send
-motion commands to the arm. Move the arm with its built-in drag-teach control.
+to `piper.csv`, synchronized with the hand samples. This uses the shared Piper
+settings and passive logger; it does not enable or send motion commands to the arm. Move the arm with its built-in drag-teach control.
 Add `--joint-level` to include measured `joint_1`–`joint_6` in each Piper row,
 then use `--joint-level` with `data_collection/replay_episode.py` to replay
 those angles using smooth joint commands instead of firmware EEF IK. This only
@@ -243,7 +265,7 @@ not interrupt recording. Episode joint replay shares the trajectory replayer's
 bounded-step control and accepts the same `--max-joint-step-rad`,
 `--preposition-seconds`, `--settle-seconds`,
 `--preposition-speed-percent`, and `--replay-speed-percent` tuning options.
-Edit `JOINT_ACTION_SCALES` in `data_collection/replay_episode.py` to set the
+Edit `JOINT_ACTION_SCALES` in `data_collection/collection/replay_config.py` to set the
 final-position multiplier for each hand motor ID 0–12.
 Piper sampling defaults
 to 250 Hz; `--piper-rate-hz`, `--piper-teacher-mode-poll-hz`,
@@ -252,7 +274,7 @@ to 250 Hz; `--piper-rate-hz`, `--piper-teacher-mode-poll-hz`,
 
 Add `--add-camera` to start the DepthAI/OAK wrist camera, display its live feed,
 and save `camera.mp4` plus populated `camera_timestamps.csv` and camera metadata
-in the same format as the full collector. Press `q` or Escape in the camera
+in the standard raw episode format. Press `q` or Escape in the camera
 window to stop through the normal episode-save path. Camera brightness and
 anti-banding defaults are configured by `TASK_CAMERA_BRIGHTNESS` and
 `TASK_CAMERA_ANTI_BANDING_HZ` in `data_collection/collection/config.py`; the
@@ -347,7 +369,7 @@ python3 data_collection/replay_episode.py 42 \
   --output-current output/episode_42_midas_current.csv
 ```
 
-The `ACTION_SCALE` constant in `data_collection/replay_episode.py` multiplies
+The `ACTION_SCALE` constant in `data_collection/collection/replay_config.py` multiplies
 every final hand target angle before joint-limit clipping. The
 `JOINT_ACTION_SCALES` dictionary adds a multiplier by motor ID for all IDs
 0–12; IDs 4–5 and 7–8 currently use `1.3`, and the others use `1.0`.
@@ -440,13 +462,13 @@ replay-rate, preposition, hardware, and motion-profile options.
 
 ## 7. Thumb IK/retarget calibration
 
-[`data_collection/retarget_thumb.py`](data_collection/retarget_thumb.py)
+[`scripts/thumb_retargeting/retarget_thumb.py`](scripts/thumb_retargeting/retarget_thumb.py)
 collects corresponding TRIMORPH and MIDAS thumb poses for the joints 2-3
 retarget map. TRIMORPH stays torque-disabled while MIDAS moves through a
 deterministic, joint-limit-aware calibration set:
 
 ```bash
-python3 data_collection/retarget_thumb.py \
+python3 scripts/thumb_retargeting/retarget_thumb.py \
   --trimorph-config config/hand.yaml \
   --trimorph-port /dev/serial/by-id/TRIMORPH \
   --midas-config config/midas_hand_config.yaml \
@@ -463,13 +485,23 @@ point. Then fit the affine retarget model used by collection and follower
 replay:
 
 ```bash
-python3 data_collection/fit_model_to_endpoints.py \
+python3 scripts/thumb_retargeting/fit_model_to_endpoints.py \
   --input thumb_tip_matching.csv \
   --output thumb_retarget_model.json
 ```
 
 Use `--no-configure-midas` only when the required MIDAS operating mode and gain
 registers have already been configured correctly.
+
+## Standalone hand diagnostics
+
+```bash
+python3 scripts/motion_smoothness/test_motion_smoothness.py --help
+python3 scripts/tracking_error/get_tracking_error.py --help
+```
+
+Tracking diagnostics write to `output/tracking_error/` by default. Motion
+smoothness tests use the local calibrated `config/one_finger_test.yaml`.
 
 ## Important shared modules
 
@@ -488,14 +520,13 @@ low-current hardware tests.
 
 ## Full PiperX/OAK-1 collection and dataset conversion
 
-The full collector remains available when synchronized camera, PiperX, and hand
-data are required:
+Use the current collector with both optional workers for synchronized camera,
+PiperX, and hand data:
 
 ```bash
-python3 data_collection/collect.py \
+python3 data_collection/collect_hand_only.py --add-camera --use-piper \
   --hand-config config/hand.yaml \
-  --hand-port /dev/serial/by-id/TRIMORPH \
-  --foot-pedal-device /dev/input/by-id/FOOT_PEDAL
+  --hand-port /dev/serial/by-id/TRIMORPH
 ```
 
 Its raw episode contains `camera.mp4`, `camera_timestamps.csv`,
@@ -503,7 +534,7 @@ Its raw episode contains `camera.mp4`, `camera_timestamps.csv`,
 Convert raw episodes with:
 
 ```bash
-python3 data_collection/postprocess_dataset.py data_trimorph
+python3 scripts/dataset/postprocess_dataset.py data_trimorph
 ```
 
 See `data_collection/DATASET_SPEC.md` for the processed format and
@@ -513,7 +544,7 @@ See `data_collection/DATASET_SPEC.md` for the processed format and
 
 ```bash
 python3 -m compileall data_collection scripts tests
-PYTHONPATH=data_collection python3 -m unittest discover -s tests
+python3 -m unittest discover -s tests
 ```
 
 These checks do not exercise hardware. Before a full run, perform a low-current

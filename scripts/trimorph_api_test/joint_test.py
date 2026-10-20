@@ -76,7 +76,7 @@ from data_collection.collection.hand_common import is_compatible_dynamixel_model
 from midas_hand_api import HandConfig, MidasHand, home_hand
 
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().with_name("xl330_test_config.yaml")
+DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "config" / "xl330_test_config.yaml"
 SUPPORTED_MOTOR_MODELS = ("xl330-m077-t", "xm335-t323-t")
 TEST_FINGER_MOTOR_IDS = {
     "thumb": (0, 1, 2, 3),

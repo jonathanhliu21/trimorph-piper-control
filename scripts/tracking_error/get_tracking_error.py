@@ -31,14 +31,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
+# Support both direct execution and package imports.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import numpy as np
 
-from collection.config import (
+from data_collection.collection.config import (
     TRIMORPH_MOTOR_IDS,
     joint_command_scales_for_motor_ids,
 )
-from collection.follower_hand_worker import prepare_follower_hand
-from collection.hand_common import (
+from data_collection.collection.follower_hand_worker import prepare_follower_hand
+from data_collection.collection.hand_common import (
     load_follower_config,
     load_hand_config,
     verify_connected_hand,
@@ -47,7 +51,7 @@ from collection.hand_common import (
 
 # User-facing experiment defaults.  All are also exposed as command-line flags.
 DEFAULT_DURATION_S = 30.0  # Use 0 to record until Ctrl-C.
-DEFAULT_OUTPUT_ROOT = Path("data_collection/output/tracking_error")
+DEFAULT_OUTPUT_ROOT = Path("output/tracking_error")
 DEFAULT_LEADER_RATE_HZ = 100.0
 DEFAULT_FOLLOWER_MEASURE_RATE_HZ = 200.0
 DEFAULT_FOLLOWER_COMMAND_RATE_HZ = 50.0

@@ -5,194 +5,53 @@ import sys
 import threading
 import time
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from collection.config import (
-    DEFAULT_QUEST_HOST,
-    DEFAULT_QUEST_PORT,
-    DEFAULT_QUEST_STARTUP_TIMEOUT_S,
-    TASK_CAMERA_ANTI_BANDING_HZ,
-    TASK_CAMERA_BRIGHTNESS,
-    TASK_CAMERA_FLIP,
-    TASK_CAMERA_FPS,
-    TASK_CAMERA_HEIGHT,
-    TASK_CAMERA_WIDTH,
+# Support both direct execution and package imports.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from data_collection.collection.config import (
+    WORKER_INIT_TIMEOUT_S,
+    VIDEO_FLUSH_TIMEOUT_S,
+    DEFAULT_DEMONSTRATION_DURATION_S,
+    DEFAULT_WARMUP_TIME_S,
+    DEFAULT_HAND_MEASURE_RATE_HZ,
+    DEFAULT_PIPER_RATE_HZ,
+    DEFAULT_PIPER_INTERFACE,
+    DEFAULT_PIPER_CHANNEL,
+    DEFAULT_PIPER_FIRMWARE,
+    DEFAULT_PIPER_INSTALLATION_POS,
+    DEFAULT_PIPER_PAYLOAD,
+    DEFAULT_TEACHER_MODE_POLL_HZ,
+    DEFAULT_HAND_CONFIG,
+    DEFAULT_HAND_PORT,
+    DATA_COLLECTION_MODE,
+    RETARGET_ONLY_MODE,
+    DEFAULT_THUMB_MODEL,
+    HandOnlyCollectionConfig,
+    DEFAULT_DATASET_ROOT,
     TASK_VIEW_WINDOW_NAME,
     TRIMORPH_MOTOR_IDS,
-    VIDEO_CODEC,
     validate_camera_settings,
 )
-from collection.depthai_task_camera_worker import run_depthai_task_camera_worker
-from collection.episode import (
+from data_collection.collection.depthai_task_camera_worker import run_depthai_task_camera_worker
+from data_collection.collection.episode import (
     EpisodeBuffer,
     RecordingManager,
     episode_paths,
     next_episode_index,
     raw_root,
 )
-from collection.follower_hand_worker import run_follower_hand_worker
-from collection.leader_hand_worker import run_leader_hand_worker
-from collection.piper_worker import run_piper_worker
-from collection.quest_worker import run_quest_worker
-from collection.shared_state import SharedState
-from collection.tactile_worker import run_tactile_worker
-from collection.utils import WorkerError, import_cv2, worker_wrapper
+from data_collection.collection.follower_hand_worker import run_follower_hand_worker
+from data_collection.collection.leader_hand_worker import run_leader_hand_worker
+from data_collection.collection.piper_worker import run_piper_worker
+from data_collection.collection.quest_worker import run_quest_worker
+from data_collection.collection.shared_state import SharedState
+from data_collection.collection.tactile_worker import run_tactile_worker
+from data_collection.collection.utils import WorkerError, import_cv2, worker_wrapper
 from scripts.piper_api.foot_pedal import FootPedalTrigger
-
-WORKER_INIT_TIMEOUT_S = 60.0
-VIDEO_FLUSH_TIMEOUT_S = 5.0
-DEFAULT_DEMONSTRATION_DURATION_S = 30.0
-DEFAULT_WARMUP_TIME_S = 5.0
-DEFAULT_HAND_MEASURE_RATE_HZ = 50.0
-DEFAULT_FOLLOWER_MEASURE_RATE_HZ = 100.0
-DEFAULT_FORCE_FEEDBACK_RATE_HZ = 50.0
-DEFAULT_PIPER_RATE_HZ = 250.0
-DEFAULT_PIPER_INTERFACE = "socketcan"
-DEFAULT_PIPER_CHANNEL = "can0"
-DEFAULT_PIPER_FIRMWARE = "v183"
-DEFAULT_PIPER_INSTALLATION_POS = "right"
-DEFAULT_PIPER_PAYLOAD = "half"
-DEFAULT_TEACHER_MODE_POLL_HZ = 20.0
-DEFAULT_HOLD_DELETE_S = 2.0
-DEFAULT_READY_SECONDS = 0.2
-DEFAULT_FOOT_PEDAL_DEBOUNCE_S = 0.5
-DEFAULT_HAND_CONFIG = Path("config/hand.yaml")
-DEFAULT_HAND_PORT = "/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND"
-FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
-FOLLOWER_PROFILE_ACCELERATION_RAD_S2 = 50.0
-DATA_COLLECTION_MODE = "data_collection"
-RETARGET_ONLY_MODE = "retarget_only"
-DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
-
-PIP_SCALE = 0.6
-MCP_SCALE = 0.5
-
-FORCE_FEEDBACK_MOTOR_IDS = (0, 1, *range(4, 13))
-# Map each enabled TRIMORPH thumb joint to its MIDAS contact-error source.
-FORCE_FEEDBACK_SOURCE_MOTOR_IDS = {
-    0: 0,
-    1: 1,
-}
-FORCE_FEEDBACK_MAX_CURRENT_MA = 100.0
-FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD = 0.01
-TACTILE_FORCE_FEEDBACK_CURRENT_MA = 50.0
-TACTILE_FORCE_FEEDBACK_MOTOR_IDS = (
-    (4, 5, 6),
-    (7, 8, 9),
-    (10, 11, 12),
-    (0, 1),
-)
-
-
-@dataclass(frozen=True)
-class HandOnlyCollectionConfig:
-    dataset_root: Path
-    hand_config: Path
-    hand_port: str
-    hand_measure_rate_hz: float
-
-    warmup_time: float
-    episode_time: float
-    use_foot_pedal: bool = False
-    hold_delete_s: float = DEFAULT_HOLD_DELETE_S
-    ready_seconds: float = DEFAULT_READY_SECONDS
-    foot_pedal_device: str | None = None
-    foot_pedal_key_code: int | None = None
-    foot_pedal_debounce_s: float = DEFAULT_FOOT_PEDAL_DEBOUNCE_S
-    mode: str = DATA_COLLECTION_MODE
-    show_ui: bool = False
-    add_camera: bool = False
-    use_piper: bool = False
-    use_quest: bool = False
-    quest_host: str = DEFAULT_QUEST_HOST
-    quest_port: int = DEFAULT_QUEST_PORT
-    quest_startup_timeout_s: float = DEFAULT_QUEST_STARTUP_TIMEOUT_S
-    piper_joint_level: bool = False
-    piper_rate_hz: float = DEFAULT_PIPER_RATE_HZ
-    piper_interface: str = DEFAULT_PIPER_INTERFACE
-    piper_channel: str = DEFAULT_PIPER_CHANNEL
-    piper_firmware: str = DEFAULT_PIPER_FIRMWARE
-    piper_installation_pos: str | None = DEFAULT_PIPER_INSTALLATION_POS
-    piper_payload: str | None = DEFAULT_PIPER_PAYLOAD
-    teacher_mode_poll_hz: float = DEFAULT_TEACHER_MODE_POLL_HZ
-    task_view_window_name: str = TASK_VIEW_WINDOW_NAME
-    task_camera_width: int = TASK_CAMERA_WIDTH
-    task_camera_height: int = TASK_CAMERA_HEIGHT
-    task_camera_fps: int = TASK_CAMERA_FPS
-    task_camera_flip: str = TASK_CAMERA_FLIP
-    task_camera_brightness: int = TASK_CAMERA_BRIGHTNESS
-    task_camera_anti_banding_hz: str = TASK_CAMERA_ANTI_BANDING_HZ
-    video_codec: str = VIDEO_CODEC
-    add_tactile: bool = False
-    paxini_port: str | None = None
-    tactile_debug_log: Path | None = None
-    force_feedback_motor_ids: tuple[int, ...] = FORCE_FEEDBACK_MOTOR_IDS
-    disabled_force_feedback_motor_ids: tuple[int, ...] = ()
-    force_feedback_source_motor_ids: dict[int, int] = field(
-        default_factory=lambda: dict(FORCE_FEEDBACK_SOURCE_MOTOR_IDS)
-    )
-    force_feedback_max_current_ma: float = FORCE_FEEDBACK_MAX_CURRENT_MA
-    force_feedback_rate_hz: float = DEFAULT_FORCE_FEEDBACK_RATE_HZ
-    force_feedback_full_scale_error_rad: float = (
-        FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD
-    )
-    tactile_force_feedback_current_ma: float = TACTILE_FORCE_FEEDBACK_CURRENT_MA
-    tactile_force_feedback_motor_ids: tuple[tuple[int, ...], ...] = (
-        TACTILE_FORCE_FEEDBACK_MOTOR_IDS
-    )
-    active_motors: list[int] = field(
-        default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
-    )
-    follower_hand_config: Path | None = None
-    follower_hand_port: str | None = None
-    follower_measure_rate_hz: float = DEFAULT_FOLLOWER_MEASURE_RATE_HZ
-    follower_command_rate_hz: float = 50.0
-    follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
-    follower_profile_acceleration_rad_s2: float = (
-        FOLLOWER_PROFILE_ACCELERATION_RAD_S2
-    )
-    follower_configure_hardware: bool = True
-    follower_command_scale: float = 1.0
-    follower_max_step_rad: float = 0.15
-    follower_interpolation_alpha: float = 0.4
-    thumb_retarget_model: Path | None = None
-    follower_joint_command_scales: dict[int, float] = field(
-        default_factory=lambda: {
-            0: 1.0,
-            1: 1.0,
-            2: 1.0,
-            3: 1.0,
-            4: PIP_SCALE,
-            5: MCP_SCALE,
-            6: 1.0,
-            7: PIP_SCALE,
-            8: MCP_SCALE,
-            9: 1.0,
-            10: PIP_SCALE,
-            11: MCP_SCALE,
-            12: 1.0,
-        }
-    )
-    # MIDAS target, in radians, when the matching TRIMORPH joint is at 0 rad.
-    # Joints 2 and 3 are overridden by the learned thumb model when it is used.
-    follower_joint_command_offsets: dict[int, float] = field(
-        default_factory=lambda: {
-            0: 0.0,
-            1: 0.0,
-            2: 0.0,
-            3: 0.0,
-            4: 0.0,
-            5: 0.0,
-            6: 0.0,
-            7: 0.0,
-            8: 0.0,
-            9: 0.0,
-            10: 0.0,
-            11: 0.0,
-            12: 0.262,
-        }
-    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -221,7 +80,7 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.set_defaults(mode=DATA_COLLECTION_MODE)
-    parser.add_argument("--dataset-root", type=Path, default=Path("data_trimorph"))
+    parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--hand-config", type=Path, default=DEFAULT_HAND_CONFIG)
     parser.add_argument(
         "--hand-port", default=DEFAULT_HAND_PORT
@@ -321,7 +180,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_THUMB_MODEL,
         help=(
             "Linear TRIMORPH-to-MIDAS thumb model produced by "
-            "fit_model_to_endpoints.py (default: %(default)s)."
+            "scripts.thumb_retargeting.fit_model_to_endpoints.py (default: %(default)s)."
         ),
     )
     episode_group = parser.add_mutually_exclusive_group()
@@ -502,7 +361,7 @@ class FootPedalCollectionController:
     recording_pedal_down: bool = False
 
     def poll(self) -> None:
-        """Apply the same start/save/long-hold-delete behavior as runner.py."""
+        """Handle pedal start, save on release, and discard after a long hold."""
 
         pedal_pressed = bool(self.pedal.poll())
         if self.recorder.is_recording():
@@ -551,7 +410,7 @@ def run_follower_contact_ui(
 
     import tkinter as tk
 
-    from collection.live_contact_widget import LiveContactWidget
+    from data_collection.collection.live_contact_widget import LiveContactWidget
 
     root = tk.Tk()
     root.title("Follower hand contact")

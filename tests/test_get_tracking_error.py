@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "data_collection"))
 
-from get_tracking_error import TrackingConfig, annotate_samples, summarize_samples
+from scripts.tracking_error.get_tracking_error import TrackingConfig, annotate_samples, summarize_samples
 
 
 class TrackingErrorAnalysisTests(unittest.TestCase):

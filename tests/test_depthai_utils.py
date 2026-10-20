@@ -2,8 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from collection.depthai_task_camera_worker import flip_frame
-from collection.depthai_utils import apply_camera_control
+from data_collection.collection.depthai_task_camera_worker import flip_frame
+from data_collection.collection.depthai_utils import apply_camera_control
 
 
 class DepthAICameraControlTests(unittest.TestCase):

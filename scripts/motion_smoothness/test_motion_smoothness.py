@@ -8,11 +8,11 @@ desired velocity or acceleration is calculated from the trajectory.
 
 Run from the repository root, for example:
 
-    .venv/bin/python data_collection/test_motion_smoothness.py \
+    .venv/bin/python scripts/motion_smoothness/test_motion_smoothness.py \
         --motion slow-sweep --joint 4
-    .venv/bin/python data_collection/test_motion_smoothness.py \
+    .venv/bin/python scripts/motion_smoothness/test_motion_smoothness.py \
         --motion triangle --joint 5
-    .venv/bin/python data_collection/test_motion_smoothness.py \
+    .venv/bin/python scripts/motion_smoothness/test_motion_smoothness.py \
         --motion sinusoid --joint 4 5
 
 Review the motion constants and ``config/one_finger_test.yaml`` before moving
@@ -26,10 +26,8 @@ import sys
 import time
 from pathlib import Path
 
-# Direct script execution places data_collection/ rather than the repository
-# root on sys.path. Add the root so this script can import shared collection
-# helpers through the same package path as the other entry points.
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+# Make repository packages available during direct script execution.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 

@@ -1,8 +1,6 @@
-from __future__ import annotations
+"""Shared collection/replay hardware defaults, retargeting settings, and configuration."""
 
-import importlib.util
-import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -29,10 +27,167 @@ TASK_VIEW_WINDOW_NAME = "trimorph_task_view"
 VIDEO_CODEC = "mp4v"
 
 
-def default_follower_joint_command_scales() -> dict[int, float]:
-    """Return unity command scales keyed by TRIMORPH motor ID."""
+DEFAULT_DATASET_ROOT = Path("data_trimorph")
+PIPER_JOINT_FIELDS = tuple(f"joint_{joint}" for joint in range(1, 7))
 
-    return {motor_id: 1.0 for motor_id in TRIMORPH_MOTOR_IDS}
+
+WORKER_INIT_TIMEOUT_S = 60.0
+VIDEO_FLUSH_TIMEOUT_S = 5.0
+DEFAULT_DEMONSTRATION_DURATION_S = 30.0
+DEFAULT_WARMUP_TIME_S = 5.0
+DEFAULT_HAND_MEASURE_RATE_HZ = 50.0
+DEFAULT_FOLLOWER_MEASURE_RATE_HZ = 100.0
+DEFAULT_FORCE_FEEDBACK_RATE_HZ = 50.0
+DEFAULT_PIPER_RATE_HZ = 250.0
+DEFAULT_PIPER_INTERFACE = "socketcan"
+DEFAULT_PIPER_CHANNEL = "can0"
+DEFAULT_PIPER_FIRMWARE = "v183"
+DEFAULT_PIPER_INSTALLATION_POS = "right"
+DEFAULT_PIPER_PAYLOAD = "half"
+DEFAULT_TEACHER_MODE_POLL_HZ = 20.0
+DEFAULT_HOLD_DELETE_S = 2.0
+DEFAULT_READY_SECONDS = 0.2
+DEFAULT_FOOT_PEDAL_DEBOUNCE_S = 0.5
+DEFAULT_HAND_CONFIG = Path("config/hand.yaml")
+DEFAULT_HAND_PORT = "/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND"
+DATA_COLLECTION_MODE = "data_collection"
+RETARGET_ONLY_MODE = "retarget_only"
+DEFAULT_THUMB_MODEL = Path("thumb_retarget_model.json")
+
+PIP_SCALE = 0.6
+MCP_SCALE = 0.5
+
+FORCE_FEEDBACK_MOTOR_IDS = (0, 1, *range(4, 13))
+# Map each enabled TRIMORPH thumb joint to its MIDAS contact-error source.
+FORCE_FEEDBACK_SOURCE_MOTOR_IDS = {
+    0: 0,
+    1: 1,
+}
+FORCE_FEEDBACK_MAX_CURRENT_MA = 100.0
+FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD = 0.01
+TACTILE_FORCE_FEEDBACK_CURRENT_MA = 50.0
+TACTILE_FORCE_FEEDBACK_MOTOR_IDS = (
+    (4, 5, 6),
+    (7, 8, 9),
+    (10, 11, 12),
+    (0, 1),
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class HandRuntimeConfig:
+    """Hand, retargeting, and camera settings used by collection and replay."""
+
+    dataset_root: Path
+    hand_config: Path
+    hand_port: str
+    hand_measure_rate_hz: float
+    task_view_window_name: str = TASK_VIEW_WINDOW_NAME
+    task_camera_width: int = TASK_CAMERA_WIDTH
+    task_camera_height: int = TASK_CAMERA_HEIGHT
+    task_camera_fps: int = TASK_CAMERA_FPS
+    task_camera_flip: str = TASK_CAMERA_FLIP
+    task_camera_brightness: int = TASK_CAMERA_BRIGHTNESS
+    task_camera_anti_banding_hz: str = TASK_CAMERA_ANTI_BANDING_HZ
+    video_codec: str = VIDEO_CODEC
+    active_motors: list[int] = field(
+        default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
+    )
+    follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
+    follower_profile_acceleration_rad_s2: float = (
+        FOLLOWER_PROFILE_ACCELERATION_RAD_S2
+    )
+    follower_command_scale: float = 1.0
+    follower_joint_command_scales: dict[int, float] = field(
+        default_factory=lambda: {
+            0: 1.0,
+            1: 1.0,
+            2: 1.0,
+            3: 1.0,
+            4: PIP_SCALE,
+            5: MCP_SCALE,
+            6: 1.0,
+            7: PIP_SCALE,
+            8: MCP_SCALE,
+            9: 1.0,
+            10: PIP_SCALE,
+            11: MCP_SCALE,
+            12: 1.0,
+        }
+    )
+    # MIDAS zero offsets; the learned model overrides joints 2 and 3.
+    follower_joint_command_offsets: dict[int, float] = field(
+        default_factory=lambda: {
+            0: 0.0,
+            1: 0.0,
+            2: 0.0,
+            3: 0.0,
+            4: 0.0,
+            5: 0.0,
+            6: 0.0,
+            7: 0.0,
+            8: 0.0,
+            9: 0.0,
+            10: 0.0,
+            11: 0.0,
+            12: 0.262,
+        }
+    )
+
+
+@dataclass(frozen=True)
+class HandOnlyCollectionConfig(HandRuntimeConfig):
+    """Collection worker and episode-control settings."""
+
+    warmup_time: float
+    episode_time: float
+    use_foot_pedal: bool = False
+    hold_delete_s: float = DEFAULT_HOLD_DELETE_S
+    ready_seconds: float = DEFAULT_READY_SECONDS
+    foot_pedal_device: str | None = None
+    foot_pedal_key_code: int | None = None
+    foot_pedal_debounce_s: float = DEFAULT_FOOT_PEDAL_DEBOUNCE_S
+    mode: str = DATA_COLLECTION_MODE
+    show_ui: bool = False
+    add_camera: bool = False
+    use_piper: bool = False
+    use_quest: bool = False
+    quest_host: str = DEFAULT_QUEST_HOST
+    quest_port: int = DEFAULT_QUEST_PORT
+    quest_startup_timeout_s: float = DEFAULT_QUEST_STARTUP_TIMEOUT_S
+    piper_joint_level: bool = False
+    piper_rate_hz: float = DEFAULT_PIPER_RATE_HZ
+    piper_interface: str = DEFAULT_PIPER_INTERFACE
+    piper_channel: str = DEFAULT_PIPER_CHANNEL
+    piper_firmware: str = DEFAULT_PIPER_FIRMWARE
+    piper_installation_pos: str | None = DEFAULT_PIPER_INSTALLATION_POS
+    piper_payload: str | None = DEFAULT_PIPER_PAYLOAD
+    teacher_mode_poll_hz: float = DEFAULT_TEACHER_MODE_POLL_HZ
+    add_tactile: bool = False
+    paxini_port: str | None = None
+    tactile_debug_log: Path | None = None
+    force_feedback_motor_ids: tuple[int, ...] = FORCE_FEEDBACK_MOTOR_IDS
+    disabled_force_feedback_motor_ids: tuple[int, ...] = ()
+    force_feedback_source_motor_ids: dict[int, int] = field(
+        default_factory=lambda: dict(FORCE_FEEDBACK_SOURCE_MOTOR_IDS)
+    )
+    force_feedback_max_current_ma: float = FORCE_FEEDBACK_MAX_CURRENT_MA
+    force_feedback_rate_hz: float = DEFAULT_FORCE_FEEDBACK_RATE_HZ
+    force_feedback_full_scale_error_rad: float = (
+        FORCE_FEEDBACK_FULL_SCALE_ERROR_RAD
+    )
+    tactile_force_feedback_current_ma: float = TACTILE_FORCE_FEEDBACK_CURRENT_MA
+    tactile_force_feedback_motor_ids: tuple[tuple[int, ...], ...] = (
+        TACTILE_FORCE_FEEDBACK_MOTOR_IDS
+    )
+    follower_hand_config: Path | None = None
+    follower_hand_port: str | None = None
+    follower_measure_rate_hz: float = DEFAULT_FOLLOWER_MEASURE_RATE_HZ
+    follower_command_rate_hz: float = 50.0
+    follower_configure_hardware: bool = True
+    follower_max_step_rad: float = 0.15
+    follower_interpolation_alpha: float = 0.4
+    thumb_retarget_model: Path | None = None
 
 
 def joint_command_scales_for_motor_ids(
@@ -53,73 +208,6 @@ def joint_command_offsets_for_motor_ids(
     """Resolve MIDAS-zero offsets in motor order, defaulting to zero radians."""
 
     return tuple(float(offsets.get(int(motor_id), 0.0)) for motor_id in motor_ids)
-
-
-@dataclass(frozen=True)
-class CollectionConfig:
-    dataset_root: Path
-    ready_seconds: float
-    show_task_view: bool
-    task_view_window_name: str
-    task_camera_width: int
-    task_camera_height: int
-    task_camera_fps: int
-    task_camera_flip: str
-    task_camera_brightness: int
-    task_camera_anti_banding_hz: str
-    video_codec: str
-    hand_config: Path
-    hand_port: str
-    hand_measure_rate_hz: float
-    follower_hand_config: Path | None
-    follower_hand_port: str | None
-    follower_measure_rate_hz: float
-    follower_command_rate_hz: float
-    follower_configure_hardware: bool
-    follower_command_scale: float
-    follower_max_step_rad: float
-    follower_interpolation_alpha: float
-    piper_rate_hz: float
-    piper_interface: str
-    piper_channel: str
-    piper_firmware: str
-    piper_installation_pos: str | None
-    piper_payload: str | None
-    teacher_mode_poll_hz: float
-    foot_pedal_device: str | None
-    foot_pedal_key_code: int | None
-    foot_pedal_debounce_seconds: float
-    active_motors: list[int] = field(
-        default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
-    )
-    follower_joint_command_scales: dict[int, float] = field(
-        default_factory=default_follower_joint_command_scales
-    )
-    force_feedback_motor_ids: tuple[int, ...] = tuple(range(4, 13))
-    disabled_force_feedback_motor_ids: tuple[int, ...] = ()
-    # TRIMORPH motor ID -> MIDAS motor ID; omitted entries use the same ID.
-    force_feedback_source_motor_ids: dict[int, int] = field(default_factory=dict)
-    force_feedback_max_current_ma: float = 100.0
-    force_feedback_rate_hz: float = 50.0
-    force_feedback_full_scale_error_rad: float = 0.01
-    follower_profile_velocity_rad_s: float = FOLLOWER_PROFILE_VELOCITY_RAD_S
-    follower_profile_acceleration_rad_s2: float = (
-        FOLLOWER_PROFILE_ACCELERATION_RAD_S2
-    )
-    tactile_force_feedback_current_ma: float = 50.0
-    tactile_force_feedback_motor_ids: tuple[tuple[int, ...], ...] = (
-        (4, 5, 6),
-        (7, 8, 9),
-        (10, 11, 12),
-        (0, 1),
-    )
-
-
-def _module_available(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except ModuleNotFoundError:
-        return False
 
 
 def validate_camera_settings(config) -> None:
@@ -147,125 +235,3 @@ def validate_camera_settings(config) -> None:
         )
     if len(config.video_codec) != 4:
         raise ValueError("VIDEO_CODEC must be a 4-character fourcc")
-
-
-def build_config() -> CollectionConfig:
-    return CollectionConfig(
-        dataset_root=Path("data_trimorph"),
-        ready_seconds=0.2,
-        show_task_view=True,
-        task_view_window_name=TASK_VIEW_WINDOW_NAME,
-        task_camera_width=TASK_CAMERA_WIDTH,
-        task_camera_height=TASK_CAMERA_HEIGHT,
-        task_camera_fps=TASK_CAMERA_FPS,
-        task_camera_flip=TASK_CAMERA_FLIP,
-        task_camera_brightness=TASK_CAMERA_BRIGHTNESS,
-        task_camera_anti_banding_hz=TASK_CAMERA_ANTI_BANDING_HZ,
-        video_codec=VIDEO_CODEC,
-        hand_config=Path("config/hand.yaml"),
-        hand_port="/dev/serial/by-id/REPLACE_WITH_TRIMORPH_HAND",
-        hand_measure_rate_hz=50.0,
-        follower_hand_config=None,
-        follower_hand_port=None,
-        follower_measure_rate_hz=100.0,
-        follower_command_rate_hz=50.0,
-        follower_configure_hardware=True,
-        follower_command_scale=1.0,
-        follower_max_step_rad=0.15,
-        follower_interpolation_alpha=0.4,
-        piper_rate_hz=200.0,
-        piper_interface="socketcan",
-        piper_channel="can0",
-        piper_firmware="v183",
-        piper_installation_pos="right",
-        piper_payload="half",
-        teacher_mode_poll_hz=20.0,
-        foot_pedal_device=None,
-        foot_pedal_key_code=None,
-        foot_pedal_debounce_seconds=0.5,
-        follower_joint_command_scales=default_follower_joint_command_scales(),
-    )
-
-
-def apply_overrides(
-    config: CollectionConfig,
-    *,
-    dataset_root: str | None = None,
-    hand_config: str | None = None,
-    hand_port: str | None = None,
-    follower_config: str | None = None,
-    follower_port: str | None = None,
-    foot_pedal_device: str | None = None,
-) -> CollectionConfig:
-    updates: dict[str, object] = {}
-    if dataset_root is not None:
-        updates["dataset_root"] = Path(dataset_root).expanduser()
-    if hand_config is not None:
-        updates["hand_config"] = Path(hand_config).expanduser()
-    if hand_port is not None:
-        updates["hand_port"] = hand_port
-    if follower_config is not None:
-        updates["follower_hand_config"] = Path(follower_config).expanduser()
-    if follower_port is not None:
-        updates["follower_hand_port"] = follower_port
-    if foot_pedal_device is not None:
-        updates["foot_pedal_device"] = foot_pedal_device
-    return replace(config, **updates) if updates else config
-
-
-def validate_config(config: CollectionConfig, *, require_runtime_modules: bool = True) -> None:
-    for name, value in {
-        "READY_SECONDS": config.ready_seconds,
-        "HAND_MEASURE_RATE_HZ": config.hand_measure_rate_hz,
-        "FORCE_FEEDBACK_RATE_HZ": config.force_feedback_rate_hz,
-        "PIPER_RATE_HZ": config.piper_rate_hz,
-        "TEACHER_MODE_POLL_HZ": config.teacher_mode_poll_hz,
-    }.items():
-        if value <= 0:
-            raise ValueError(f"{name} must be greater than 0")
-    validate_camera_settings(config)
-    if config.piper_firmware not in {"default", "v183", "v188"}:
-        raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
-    if not config.hand_port or "REPLACE_WITH" in config.hand_port:
-        raise ValueError("Set an explicit TRIMORPH hand serial port")
-    if not config.hand_config.is_file():
-        raise FileNotFoundError(f"TRIMORPH hand config not found: {config.hand_config}")
-    if config.follower_hand_config is None:
-        if config.follower_hand_port is not None:
-            raise ValueError("--follower-port requires --follower-config")
-    else:
-        if not config.follower_hand_port or "REPLACE_WITH" in config.follower_hand_port:
-            raise ValueError("Set an explicit follower hand serial port")
-        if config.hand_port == config.follower_hand_port:
-            raise ValueError("Primary and follower hand ports must be different")
-        if not config.follower_hand_config.is_file():
-            raise FileNotFoundError(
-                f"Follower hand config not found: {config.follower_hand_config}"
-            )
-        if config.follower_measure_rate_hz <= 0:
-            raise ValueError("FOLLOWER_MEASURE_RATE_HZ must be greater than 0")
-        if config.follower_command_rate_hz <= 0:
-            raise ValueError("FOLLOWER_COMMAND_RATE_HZ must be greater than 0")
-        if not math.isfinite(config.follower_command_scale):
-            raise ValueError("FOLLOWER_COMMAND_SCALE must be finite")
-        if not all(
-            math.isfinite(float(scale))
-            for scale in config.follower_joint_command_scales.values()
-        ):
-            raise ValueError("FOLLOWER_JOINT_COMMAND_SCALES must contain finite values")
-        if not 0.0 < config.follower_interpolation_alpha <= 1.0:
-            raise ValueError("FOLLOWER_INTERPOLATION_ALPHA must be in (0, 1]")
-        if config.follower_max_step_rad < 0:
-            raise ValueError("FOLLOWER_MAX_STEP_RAD must be non-negative")
-    if config.foot_pedal_debounce_seconds < 0:
-        raise ValueError("FOOT_PEDAL_DEBOUNCE_SECONDS must be non-negative")
-    if require_runtime_modules:
-        modules = (
-            ("depthai", "depthai"),
-            ("cv2", "opencv-python"),
-            ("midas_hand_api", "an editable install of ../trimorph_hand_api"),
-            ("pyAgxArm", "the PiperX vendor Python package"),
-        )
-        for module, install_hint in modules:
-            if not _module_available(module):
-                raise RuntimeError(f"Missing {module!r}; install {install_hint}")

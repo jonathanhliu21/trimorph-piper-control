@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from midas_hand_api.actuators import control_table as ct
 
-from .config import CollectionConfig
+from .config import HandOnlyCollectionConfig
 from .episode import EpisodeBuffer, RecordingManager
 from .hand_common import load_hand_config, verify_connected_hand
 from .shared_state import SharedState
@@ -274,7 +274,7 @@ class TrimorphForceFeedbackController:
 
 
 def run_leader_hand_worker(
-    config: CollectionConfig,
+    config: HandOnlyCollectionConfig,
     shared: SharedState,
     recorder: RecordingManager,
     *,

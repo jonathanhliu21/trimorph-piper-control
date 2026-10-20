@@ -17,6 +17,11 @@ The dataset class is:
 shared/env/trimorph/trimorph_image_dataset.py
 ```
 
+Collect raw episodes with `data_collection/collect_hand_only.py --add-camera
+--use-piper` plus the hand connection options. Convert them using
+`python3 scripts/dataset/postprocess_dataset.py DATASET_ROOT`. Shared raw column
+names are defined in `data_collection/collection/config.py`.
+
 ## High-Level Contract
 
 Each training episode must provide synchronized streams for:

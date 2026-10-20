@@ -10,8 +10,8 @@ from unittest.mock import patch
 
 import numpy as np
 
-from collection.thumb_retargeting import ThumbRetargetModel
-from replay_episode import (
+from data_collection.collection.thumb_retargeting import ThumbRetargetModel
+from data_collection.replay_episode import (
     ACTION_SCALE,
     CURRENT_TELEMETRY_HZ,
     JOINT_ACTION_SCALES,
@@ -80,7 +80,7 @@ class ReplayEpisodeTests(unittest.TestCase):
             np.asarray([0.0, 0.008]),
             np.asarray([[0.0] * 6, [8.0] * 6]),
         )
-        with patch("replay_episode.time.monotonic", side_effect=lambda: clock.now):
+        with patch("data_collection.replay_episode.time.monotonic", side_effect=lambda: clock.now):
             replay_piper_commands(api, stream, 0.0, 0.008, 0.0, args, FakeStop())
 
         np.testing.assert_allclose(api.targets, [[0.0] * 6, [4.0] * 6, [8.0] * 6])
@@ -88,14 +88,14 @@ class ReplayEpisodeTests(unittest.TestCase):
     def test_action_scale_is_a_module_constant(self):
         self.assertEqual(ACTION_SCALE, 1.0)
         self.assertEqual(set(JOINT_ACTION_SCALES), set(range(13)))
-        self.assertEqual(JOINT_ACTION_SCALES[0], 1.0)
-        self.assertEqual(JOINT_ACTION_SCALES[1], 1.0)
-        self.assertEqual(JOINT_ACTION_SCALES[4], 1.3)
-        self.assertEqual(JOINT_ACTION_SCALES[5], 1.3)
-        self.assertEqual(JOINT_ACTION_SCALES[7], 1.3)
-        self.assertEqual(JOINT_ACTION_SCALES[8], 1.3)
+        self.assertEqual(JOINT_ACTION_SCALES[0], 1.1)
+        self.assertEqual(JOINT_ACTION_SCALES[1], 1.1)
+        self.assertEqual(JOINT_ACTION_SCALES[4], 1.1)
+        self.assertEqual(JOINT_ACTION_SCALES[5], 1.1)
+        self.assertEqual(JOINT_ACTION_SCALES[7], 1.1)
+        self.assertEqual(JOINT_ACTION_SCALES[8], 1.1)
 
-    def test_replay_uses_hand_only_collection_config(self):
+    def test_replay_uses_shared_runtime_config(self):
         with patch(
             "sys.argv",
             [
@@ -270,7 +270,7 @@ class ReplayEpisodeTests(unittest.TestCase):
         loaded = ReplayConfig(operating_mode=5)
         path = Path("midas.yaml")
         with patch(
-            "replay_episode.load_follower_config", return_value=loaded
+            "data_collection.replay_episode.load_follower_config", return_value=loaded
         ) as loader:
             actual = build_replay_hand_config(
                 path,
@@ -506,7 +506,7 @@ class ReplayEpisodeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Missing columns"):
                 load_piper_stream(path)
 
-    @patch("replay_episode.time.sleep")
+    @patch("data_collection.replay_episode.time.sleep")
     @patch("scripts.piper_api.replay_trajectory.preposition_joints_linearly")
     def test_joint_episode_preposition_uses_linear_ramp(self, ramp, _sleep):
         from unittest.mock import Mock

@@ -171,8 +171,6 @@ class EpisodeBuffer:
         has_camera = hasattr(self.config, "task_camera_width") and bool(
             getattr(self.config, "add_camera", True)
         )
-        # CollectionConfig always includes Piper. HandOnlyCollectionConfig has
-        # the same settings, but gates the worker behind the opt-in flag.
         has_piper = hasattr(self.config, "piper_rate_hz") and bool(
             getattr(self.config, "use_piper", True)
         )

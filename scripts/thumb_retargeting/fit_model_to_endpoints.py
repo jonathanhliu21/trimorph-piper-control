@@ -8,9 +8,13 @@ import json
 import sys
 from pathlib import Path
 
+# Support both direct execution and package imports.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import numpy as np
 
-from collection.thumb_retargeting import (
+from data_collection.collection.thumb_retargeting import (
     MODEL_FORMAT,
     THUMB_RETARGET_MOTOR_IDS,
 )
