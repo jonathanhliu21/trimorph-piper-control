@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -220,6 +222,38 @@ def main() -> int:
     _verify_csv(output, rows)
 
     print(f"Saved and verified {len(rows)} Quest poses in {output.resolve()}")
+    if len(rows) >= 2:
+        average_interval_ms = (
+            (int(rows[-1]["monotonic_ns"]) - int(rows[0]["monotonic_ns"]))
+            / (len(rows) - 1)
+            / 1e6
+        )
+        print(
+            "Average time between Quest frames (host receive timestamps): "
+            f"{average_interval_ms:.3f} ms"
+        )
+        frame_intervals_ms = [
+            (int(current["monotonic_ns"]) - int(previous["monotonic_ns"])) / 1e6
+            for previous, current in zip(rows, rows[1:])
+        ]
+        print(
+            "Quest frame time min/max (host receive timestamps): "
+            f"min={min(frame_intervals_ms):.3f} ms, "
+            f"max={max(frame_intervals_ms):.3f} ms"
+        )
+        percentiles = (50, 90, 95, 99)
+        values = np.percentile(frame_intervals_ms, percentiles)
+        print(
+            "Quest frame time percentiles (host receive timestamps): "
+            + ", ".join(
+                f"p{percentile}={value:.3f} ms"
+                for percentile, value in zip(percentiles, values)
+            )
+        )
+    else:
+        print("Average time between Quest frames: unavailable (need at least 2 samples)")
+        print("Quest frame time min/max: unavailable (need at least 2 samples)")
+        print("Quest frame time percentiles: unavailable (need at least 2 samples)")
     print(_format_pose("First", rows[0]))
     print(_format_pose("Last ", rows[-1]))
     return 130 if interrupted else 0
