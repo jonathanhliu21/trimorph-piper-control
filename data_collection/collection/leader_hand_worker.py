@@ -261,6 +261,8 @@ class TrimorphForceFeedbackController:
     def _write_raw_currents(
         self, raw_currents: Sequence[int], *, force: bool = False
     ) -> None:
+        if not self._feedback_motor_ids:
+            return
         values = tuple(int(value) for value in raw_currents)
         if not force and values == self._last_raw_currents:
             return
@@ -297,8 +299,12 @@ def run_leader_hand_worker(
         feedback_source_motor_ids=getattr(
             config, "force_feedback_source_motor_ids", None
         ),
-        disabled_motor_ids=getattr(
-            config, "disabled_force_feedback_motor_ids", ()
+        # Without a follower, collection is passive even if tactile sensing is
+        # enabled. Include joints 2 and 3, which are not feedback motors.
+        disabled_motor_ids=(
+            hand.motor_ids
+            if config.follower_hand_config is None
+            else config.disabled_force_feedback_motor_ids
         ),
     )
     period_ns = int(round(1_000_000_000 / config.hand_measure_rate_hz))
@@ -312,6 +318,8 @@ def run_leader_hand_worker(
     try:
         initial_positions = np.asarray(hand.read_pos(), dtype=np.float64)
         force_feedback.start(initial_positions)
+        if config.follower_hand_config is None:
+            print("No follower configured; all active TRIMORPH motors torque-disabled.")
         print(
             f"TRIMORPH hand connected on {hand.port}; "
             f"model={hand.config.motor_model}; baud={hand.config.baudrate}; "

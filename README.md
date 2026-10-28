@@ -291,6 +291,10 @@ python3 scripts/camera/test_wrist_camera.py
 
 ## 5. TRIMORPH leader to MIDAS follower with force feedback
 
+Without a follower configured, all active TRIMORPH motors are automatically
+torque-disabled while their positions are recorded, including thumb joints 2–3.
+This also applies when tactile sensing is enabled without a follower.
+
 Provide both follower options to enable retargeting. `--retarget-only` runs
 until Ctrl-C without saving an episode; omit it (or use `--data-collection`) to
 record one fixed-duration episode:

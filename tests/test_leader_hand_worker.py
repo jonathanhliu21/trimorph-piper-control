@@ -1,5 +1,8 @@
 import unittest
+import threading
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import numpy as np
 from midas_hand_api.actuators import control_table as ct
@@ -11,11 +14,14 @@ from data_collection.collection.config import (
     FORCE_FEEDBACK_SOURCE_MOTOR_IDS,
     TACTILE_FORCE_FEEDBACK_CURRENT_MA,
     TACTILE_FORCE_FEEDBACK_MOTOR_IDS,
+    HandOnlyCollectionConfig,
 )
 from data_collection.collection.leader_hand_worker import (
     TrimorphForceFeedbackController,
     force_feedback_current_ma,
+    run_leader_hand_worker,
 )
+from data_collection.collection.shared_state import SharedState
 
 
 class FakeClient:
@@ -56,6 +62,72 @@ class FakeThumbHand(FakeHand):
         self.motor_ids = [0, 1, 2, 3]
         self.config.joint_signs_array = np.ones(4)
         self.config.home_offsets_array = np.zeros(4)
+
+
+class LeaderHandWorkerTests(unittest.TestCase):
+    def test_passive_without_follower_and_feedback_with_follower(self):
+        for follower in (None, Path("config/midas_hand_config.yaml")):
+            with self.subTest(follower=follower):
+                config = HandOnlyCollectionConfig(
+                    dataset_root=Path("unused"),
+                    hand_config=Path("config/xl330_test_config.yaml"),
+                    hand_port="/dev/fake",
+                    hand_measure_rate_hz=50.0,
+                    warmup_time=0.0,
+                    episode_time=30.0,
+                    follower_hand_config=follower,
+                    follower_hand_port="/dev/follower" if follower else None,
+                )
+                shared = SharedState()
+                # Even contact input must not activate a leader without a follower.
+                shared.set_tactile_contacts([True] * 4)
+                hand = Mock()
+                hand.motor_ids = list(range(13))
+                hand.port = "/dev/fake"
+                hand.config = SimpleNamespace(
+                    joint_signs_array=np.ones(13),
+                    home_offsets_array=np.zeros(13),
+                    current_unit_ma=1.0,
+                    max_current_limit_ma=910.0,
+                    motor_model="xl330-m077-t",
+                    baudrate=57600,
+                )
+
+                def read_sample():
+                    shared.shutdown.set()
+                    return np.arange(13, dtype=float)
+
+                hand.read_pos.side_effect = lambda: (
+                    read_sample() if hand.read_pos.call_count > 1 else np.zeros(13)
+                )
+                session = Mock()
+                session.elapsed_s.return_value = 0.0
+                recorder = Mock()
+                recorder.current.return_value = session
+                init_done = threading.Event()
+                with (
+                    patch("midas_hand_api.MidasHand", return_value=hand),
+                    patch("data_collection.collection.leader_hand_worker.load_hand_config"),
+                    patch("data_collection.collection.leader_hand_worker.verify_connected_hand"),
+                ):
+                    run_leader_hand_worker(config, shared, recorder, init_done=init_done)
+
+                self.assertTrue(init_done.is_set())
+                row = session.append_leader_hand.call_args.args[0]
+                self.assertEqual(row["pos_12"], "12.000000000")
+                if follower is None:
+                    hand.disable_torque.assert_any_call(list(range(13)))
+                    hand.enable_torque.assert_not_called()
+                    hand.dxl_client.sync_write.assert_not_called()
+                else:
+                    hand.enable_torque.assert_called_once_with(list(FORCE_FEEDBACK_MOTOR_IDS))
+                    hand.dxl_client.sync_write.assert_any_call(
+                        list(FORCE_FEEDBACK_MOTOR_IDS),
+                        [ct.OPERATING_MODE_CURRENT] * len(FORCE_FEEDBACK_MOTOR_IDS),
+                        ct.ADDR_OPERATING_MODE,
+                        ct.LEN_OPERATING_MODE,
+                    )
+                hand.shutdown.assert_called_once()
 
 
 class ForceFeedbackCurrentTests(unittest.TestCase):
