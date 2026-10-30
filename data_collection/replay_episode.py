@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import sys
 import threading
@@ -18,6 +19,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from data_collection.collection.config import (
     DEFAULT_HAND_CONFIG,
@@ -288,7 +290,7 @@ def output_current_csv(recorder: ReplayCurrentRecorder, output: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Replay one raw PiperX/TRIMORPH episode (latest by default)."
+        description="Replay a TRIMORPH episode with processed Piper poses (latest by default)."
     )
     parser.add_argument(
         "episode",
@@ -329,9 +331,13 @@ def parse_args() -> argparse.Namespace:
         help="Piper replay rate in Hz, independent of the hand (default: %(default)s).",
     )
     parser.add_argument(
+        "--read-piper-raw", action="store_true",
+        help="Read raw/episode_XXXXXX/piper.csv instead of the postprocessed Piper CSV.",
+    )
+    parser.add_argument(
         "--joint-level",
         action="store_true",
-        help="Replay recorded Piper joints with smooth move_j; requires joint_1..joint_6 in piper.csv.",
+        help="Replay recorded Piper joints with smooth move_j; requires --read-piper-raw and joint_1..joint_6 in raw piper.csv.",
     )
     parser.add_argument(
         "--max-joint-step-rad",
@@ -579,6 +585,41 @@ def load_piper_stream(
     )
 
 
+def resolve_piper_source(episode_dir: Path, *, read_piper_raw=False) -> tuple[Path, str]:
+    """Keep the original raw logger untouched; processed CSVs declare their frame."""
+    if read_piper_raw:
+        return episode_dir / "piper.csv", "piper_base"
+    from data_collection.postprocess_dataset import processed_episode_dir
+
+    processed = processed_episode_dir(episode_dir)
+    path = processed / "piper.csv"
+    metadata_path = processed / "metadata.json"
+    if not path.exists() or not metadata_path.exists():
+        raise FileNotFoundError(
+            f"Processed Piper poses missing under {processed}. Run data_collection/postprocess_dataset.py "
+            "first, or use --read-piper-raw for the original raw CSV."
+        )
+    metadata = json.loads(metadata_path.read_text())
+    frame = metadata.get("pose_frame")
+    if frame not in ("piper_base", "relative_to_episode_start"):
+        raise ValueError(f"Unknown pose_frame {frame!r} in {metadata_path}")
+    return path, frame
+
+
+def anchor_relative_piper_stream(stream, start_pose):
+    """Anchor mapped spatial deltas at a measured Piper XYZ/RPY pose."""
+    times, values = stream
+    start = np.asarray(start_pose, dtype=float)
+    if start.shape != (6,) or not np.isfinite(start).all():
+        raise ValueError("Relative replay requires a finite measured Piper XYZ/RPY starting pose")
+    rotations = Rotation.from_euler("xyz", values[:, 3:])
+    spatial_delta = rotations * rotations[0].inv()
+    target_rotations = spatial_delta * Rotation.from_euler("xyz", start[3:])
+    result = np.column_stack((start[:3] + values[:, :3] - values[0, :3],
+                              np.unwrap(target_rotations.as_euler("xyz"), axis=0)))
+    return times, result
+
+
 def sample_stream(times: np.ndarray, values: np.ndarray, query_t: float) -> np.ndarray:
     return np.asarray(
         [np.interp(query_t, times, values[:, column]) for column in range(values.shape[1])],
@@ -780,15 +821,20 @@ def main() -> int:
     if args.output_current is not None and args.arm_only:
         raise ValueError("--output-current cannot be used with --arm-only")
 
+    if args.joint_level and not args.read_piper_raw:
+        raise ValueError("--joint-level requires --read-piper-raw; processed poses contain EEF coordinates")
+
     replay_hand = not args.arm_only
     replay_arm = not args.hand_only
     episode_dir = resolve_episode(Path(args.dataset_root).expanduser(), args.episode)
     hand_path = resolve_leader_hand_path(episode_dir)
     active_motors = hand_motor_ids(hand_path) if replay_hand else None
     hand_stream = load_hand_stream(hand_path) if replay_hand else None
+    piper_path, piper_frame = (resolve_piper_source(episode_dir, read_piper_raw=args.read_piper_raw)
+                               if replay_arm else (None, None))
     piper_stream = (
         load_piper_stream(
-            episode_dir / "piper.csv",
+            piper_path,
             allow_empty=args.no_piper_enable,
             joint_level=args.joint_level,
         )
@@ -797,7 +843,7 @@ def main() -> int:
     )
     if replay_arm and piper_stream is None:
         replay_arm = False
-        print("piper.csv is empty; replaying hand only.")
+        print(f"{piper_path} is empty; replaying hand only.")
     if args.joint_level and piper_stream is not None:
         from scripts.piper_api.replay_trajectory import validate_joint_continuity
 
@@ -903,6 +949,10 @@ def main() -> int:
                 if args.arm_diag:
                     log_piper_diagnostics(api, "after-position-mode")
 
+        if api is not None and piper_frame == "relative_to_episode_start" and piper_stream is not None:
+            measured_start = api.get_eef_pose()
+            piper_stream = anchor_relative_piper_stream(piper_stream, measured_start)
+            print(f"Anchored processed relative motion at measured Piper pose: {measured_start}")
         move_to_first_pose(hand, api, hand_stream, piper_stream, start_s, args)
         if args.joint_level and api is not None and piper_stream is not None:
             from scripts.piper_api.replay_trajectory import verify_joint_start

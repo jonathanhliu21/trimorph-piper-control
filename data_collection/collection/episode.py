@@ -308,6 +308,9 @@ class EpisodeBuffer:
                     if has_quest
                     else None
                 ),
+                "jump_threshold": (
+                    getattr(self.config, "quest_jump_threshold", None) if has_quest else None
+                ),
                 "raw_fields": list(QUEST_PACKET_FIELDS) if has_quest else [],
             },
             "errors": self.errors,

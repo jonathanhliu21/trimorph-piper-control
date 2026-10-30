@@ -10,6 +10,7 @@ RAW_EEF_FIELDS = ("x", "y", "z", "roll", "pitch", "yaw")
 QUEST_PACKET_FIELDS = ("seq", "px", "py", "pz", "qx", "qy", "qz", "qw")
 DEFAULT_QUEST_HOST = "0.0.0.0"
 DEFAULT_QUEST_PORT = 5005
+DEFAULT_QUEST_JUMP_THRESHOLD = 0.05
 DEFAULT_QUEST_STARTUP_TIMEOUT_S = 5.0
 FOLLOWER_PROFILE_VELOCITY_RAD_S = 3.0
 FOLLOWER_PROFILE_ACCELERATION_RAD_S2 = 50.0
@@ -154,6 +155,7 @@ class HandOnlyCollectionConfig(HandRuntimeConfig):
     use_quest: bool = False
     quest_host: str = DEFAULT_QUEST_HOST
     quest_port: int = DEFAULT_QUEST_PORT
+    quest_jump_threshold: float = DEFAULT_QUEST_JUMP_THRESHOLD
     quest_startup_timeout_s: float = DEFAULT_QUEST_STARTUP_TIMEOUT_S
     piper_joint_level: bool = False
     piper_rate_hz: float = DEFAULT_PIPER_RATE_HZ

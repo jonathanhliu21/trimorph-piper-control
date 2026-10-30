@@ -273,6 +273,19 @@ class HandOnlyCollectionTests(unittest.TestCase):
         self.assertEqual(config.quest_port, 5005)
         self.assertEqual(config.quest_startup_timeout_s, 5.0)
 
+    def test_quest_jump_threshold_is_configurable_and_validated(self):
+        with (patch("sys.argv", ["collect_hand_only.py", "--use-quest", "--quest-jump-threshold", "0.1"]),
+              patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run):
+            self.assertEqual(main(), 0)
+        self.assertEqual(run.call_args.args[0].quest_jump_threshold, .1)
+        self.assertFalse(run.call_args.args[0].use_piper)
+        self.assertFalse(run.call_args.args[0].add_camera)
+        for value in ("0", "-1", "nan", "inf"):
+            with (self.subTest(value=value),
+                  patch("sys.argv", ["collect_hand_only.py", "--use-quest", "--quest-jump-threshold", value]),
+                  self.assertRaisesRegex(ValueError, "quest-jump-threshold")):
+                main()
+
     def test_main_copies_piper_flag_to_config(self):
         with (
             patch("sys.argv", ["collect_hand_only.py", "--use-piper"]),

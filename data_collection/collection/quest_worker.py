@@ -59,6 +59,14 @@ def run_quest_worker(
 ) -> None:
     """Receive raw Quest poses over UDP and record them with host timestamps."""
 
+    # Collection enables this; standalone tools can keep their own jump reporting.
+    jump_threshold = getattr(config, "quest_jump_threshold", None)
+    if jump_threshold is not None and (not math.isfinite(jump_threshold) or jump_threshold <= 0):
+        raise ValueError("quest_jump_threshold must be finite and positive")
+    previous_position = None
+    previous_sample_ns = None
+    first_sample_ns = None
+    jump_count = 0
     startup_deadline = time.monotonic() + config.quest_startup_timeout_s
     initialized = False
     sample_idx = 0
@@ -92,6 +100,26 @@ def run_quest_worker(
             sample_ns = time.monotonic_ns()
             wall_time_s = time.time()
             packet = _decode_packet(data)
+            if jump_threshold is not None:
+                position = tuple(float(packet[key]) for key in ("px", "py", "pz"))
+                if first_sample_ns is None:
+                    first_sample_ns = sample_ns
+                if previous_position is not None:
+                    delta = tuple(value - previous for value, previous in zip(position, previous_position))
+                    distance = math.hypot(*delta)
+                    if distance > jump_threshold:
+                        jump_count += 1
+                        print(
+                            f"WARNING: [quest_worker] POSITION JUMP #{jump_count} "
+                            f"t={(sample_ns - first_sample_ns) / 1e9:.3f}s "
+                            f"seq={packet['seq']} step={distance:.4f} units "
+                            f"dt={(sample_ns - previous_sample_ns) / 1e9:.4f}s "
+                            f"delta=({delta[0]:+.4f}, {delta[1]:+.4f}, {delta[2]:+.4f}) "
+                            f"threshold={jump_threshold:g}",
+                            flush=True,
+                        )
+                previous_position = position
+                previous_sample_ns = sample_ns
 
             if not initialized:
                 initialized = True

@@ -1,4 +1,5 @@
 import argparse
+import math
 import queue
 import shutil
 import sys
@@ -27,6 +28,7 @@ from data_collection.collection.config import (
     DEFAULT_TEACHER_MODE_POLL_HZ,
     DEFAULT_HAND_CONFIG,
     DEFAULT_HAND_PORT,
+    DEFAULT_QUEST_JUMP_THRESHOLD,
     DATA_COLLECTION_MODE,
     RETARGET_ONLY_MODE,
     DEFAULT_THUMB_MODEL,
@@ -113,6 +115,10 @@ def parse_args() -> argparse.Namespace:
             "record raw Quest position and quaternion packets received over UDP "
             "alongside the hand"
         ),
+    )
+    parser.add_argument(
+        "--quest-jump-threshold", type=float, default=DEFAULT_QUEST_JUMP_THRESHOLD,
+        help="Warn when consecutive Quest packets move farther than this distance in native position units (default: 0.05).",
     )
     parser.add_argument(
         "--piper-joint-level", "--joint-level", "--joint-position",
@@ -674,6 +680,7 @@ def main() -> int:
         add_camera=args.add_camera,
         use_piper=args.use_piper,
         use_quest=args.use_quest,
+        quest_jump_threshold=args.quest_jump_threshold,
         piper_joint_level=args.piper_joint_level,
         piper_rate_hz=args.piper_rate_hz,
         teacher_mode_poll_hz=args.piper_teacher_mode_poll_hz,
@@ -723,6 +730,8 @@ def main() -> int:
         if config.piper_firmware not in {"default", "v183", "v188"}:
             raise ValueError("PIPER_FIRMWARE must be one of: default, v183, v188")
     if config.use_quest:
+        if not math.isfinite(config.quest_jump_threshold) or config.quest_jump_threshold <= 0:
+            raise ValueError("--quest-jump-threshold must be finite and greater than 0")
         if not config.quest_host:
             raise ValueError("QUEST_HOST must not be empty")
         if not 1 <= config.quest_port <= 65535:

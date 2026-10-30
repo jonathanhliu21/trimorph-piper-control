@@ -107,6 +107,39 @@ class QuestWorkerTests(unittest.TestCase):
         self.assertTrue(init_done.is_set())
         self.assertEqual(calls, 2)
 
+    def test_jump_warnings_include_idle_packets_and_preserve_recorded_positions(self):
+        shutdown = threading.Event()
+        config = self.make_config()
+        config.quest_jump_threshold = .05
+        rows = []
+        session = SimpleNamespace(elapsed_s=lambda ns: ns / 1e9, append_quest=rows.append)
+        recorder = SimpleNamespace(current=MagicMock(side_effect=[None, session, session, session]))
+        packets = [dict(VALID_PACKET, seq=i, px=x) for i, x in enumerate((0., .02, .2, 0.))]
+        received = iter(packets)
+        fake_socket = MagicMock()
+
+        def receive(_size):
+            packet = next(received)
+            if packet['seq'] == 3:
+                shutdown.set()
+            return json.dumps(packet).encode(), ('127.0.0.1', 1234)
+
+        fake_socket.recvfrom.side_effect = receive
+        with (patch('data_collection.collection.quest_worker.socket.socket') as socket_type,
+              patch('data_collection.collection.quest_worker.time.monotonic_ns',
+                    side_effect=[1_000_000_000, 1_020_000_000, 1_040_000_000, 1_060_000_000]),
+              patch('builtins.print') as log):
+            socket_type.return_value.__enter__.return_value = fake_socket
+            run_quest_worker(config, SimpleNamespace(shutdown=shutdown), recorder, init_done=threading.Event())
+        warnings = [call for call in log.call_args_list if 'POSITION JUMP' in str(call)]
+        self.assertEqual(len(warnings), 2)
+        self.assertIn('POSITION JUMP #1', warnings[0].args[0])
+        self.assertIn('step=0.1800', warnings[0].args[0])
+        self.assertIn('dt=0.0200s', warnings[0].args[0])
+        self.assertIn('seq=2', warnings[0].args[0])
+        self.assertTrue(warnings[0].kwargs['flush'])
+        self.assertEqual([row['px'] for row in rows], [.02, .2, 0.])
+
     def test_malformed_and_incomplete_packets_fail(self):
         with self.assertRaisesRegex(ValueError, "Invalid Quest UDP JSON"):
             _decode_packet(b"not json")
