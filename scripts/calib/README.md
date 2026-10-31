@@ -172,3 +172,65 @@ objects disappear after two seconds without an update (`--stale-after-s`).
 to an automatic display scale. Drag to rotate the view. Close the window or
 press Ctrl-C to stop and release the ROS subscriptions. This viewer does not
 command hardware or write a CSV.
+
+### Rectangle repeatability: Piper FK vs Vicon / Quest
+
+Commands the arm (it moves). Start with the tracked marker or controller rigidly
+mounted on the flange and the arm at a safe pose with ~20 mm of clearance in the
+chosen plane; that pose becomes the rectangle's first corner.
+
+```bash
+# Vicon marker on the arm (uses .venv-mocap + ros2/mocap_env.sh automatically):
+python scripts/calib/rectangle_repeatability.py --label mocap
+# Quest controller on the arm, Quest sender streaming to UDP 5005 (add --no-mocap if Vicon is off):
+python scripts/calib/rectangle_repeatability.py --label quest --quest-port 5005
+python scripts/calib/analyze_rectangle.py output/rect_repeatability/<timestamp>_<label>
+```
+
+Defaults: 20 loops of a 20 x 20 mm rectangle in the Piper base `xy` plane at
+10 mm/s with a 1 s dwell per corner (about 4 minutes), orientation held
+constant, targets streamed with `move_eef` at 50 Hz. The script prints the
+corners and waits for Enter. Streaming stops if the reported flange pose
+deviates from the target by more than `--max-tracking-error-mm` (default 10).
+Each run directory holds `piper.csv` (flange pose + joints), `commands.csv`,
+`mocap.csv`, `quest.csv` and `meta.json`, all with host monotonic timestamps.
+
+The analyzer finds each tracker's time lag, rigidly aligns it to Piper FK,
+and reports residual RMSE/max (moving vs settled), per-loop RMSE, corner
+repeatability across loops and edge lengths, plus FK vs commanded error. It
+writes `summary.json` and `analysis.png` in the run directory. Rigid alignment
+absorbs the tracker frame and the marker's constant offset from the flange,
+not scale or shape errors.
+
+### Quest calibration sequence (shapes, rotations, dynamic trajectory)
+
+Commands the arm. Mount the Quest controller rigidly on the flange, start the
+Quest sender, then:
+
+```bash
+python scripts/calib/quest_calibration_sequence.py --list                    # show the plan (no hardware)
+python scripts/calib/quest_calibration_sequence.py --quest-port 5005 --no-mocap
+python scripts/calib/fit_quest_calibration.py output/quest_calibration/<timestamp>_quest_calib
+python scripts/calib/quest_calibration_sequence.py --home-only               # move to home only
+```
+
+The arm moves to a fixed home joint configuration (`--home-joints-deg`) in joint
+space before the sequence, before each segment and at the end. Default segments
+(about 4 min of motion): 30 s warmup hold; a 30 mm rectangle and 30 mm circle in
+each of the Piper `xy`, `xz`, `yz` planes; ±10° sweeps of wrist joints 4, 5 and 6;
+and 60 s of multi-sine motion on all six joints (dynamic trajectory). Joint-space
+segments are checked against joint limits and the wrist singularity before the arm
+moves; a Cartesian segment that exceeds `--max-tracking-error-mm` is stopped,
+marked failed in `meta.json`, and the sequence continues from home. Select
+segments with `--segments`, and drop Vicon with `--no-mocap` (keep it to also record
+Vicon ground truth).
+
+`fit_quest_calibration.py` estimates the Quest latency, fits rigid / similarity /
+linear Quest-to-Piper models with and without the rotating controller-to-flange
+offset (via `get_coord_transform.py`, each segment as its own recording), scores
+them on held-out segments (`--holdout`, default `rect_xy circle_xz`) with
+`transform_chunk` anchored at each segment start, and saves the best model refitted
+on all segments to `<run>/calibration/quest_calibration.json` (plus `latency_s`),
+with `model_comparison.json`, leave-one-segment-out errors and `report.png`.
+Apply it with `transform_chunk` after shifting Quest timestamps by `latency_s`. A
+calibration only holds for the Quest tracking session it was recorded in.

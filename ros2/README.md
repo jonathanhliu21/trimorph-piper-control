@@ -21,10 +21,18 @@ source .venv-mocap/bin/activate
 python -m pip install 'matplotlib>=3.3'
 
 bash ros2/build.sh
-source /opt/ros/foxy/setup.bash
-source ros2/install/local_setup.bash
-ros2 run trimorph_mocap mocap_detection --mocap-topic /vicon/Yori/Yori
+source ros2/mocap_env.sh
+.venv-mocap/bin/python scripts/calib/mocap_detection.py --mocap-topic /vicon/Yori/Yori
 ```
+
+`ros2/mocap_env.sh` sources Foxy and this workspace, and restricts Fast DDS to
+the interface facing the Vicon network (default: the default-route interface;
+pass a name such as `wlp0s20f3` to override). Without it, Fast DDS also
+advertises Tailscale/Docker addresses, the remote publisher sends to those, and
+delivery falls from ~200 Hz to near zero even though `ros2 topic list` still
+shows the topic. Foxy's Fast DDS whitelists by IP only, so the script rewrites
+`~/.ros/fastdds_mocap.xml` from the current address each time it is sourced;
+re-source it after the IP changes.
 
 The build script uses `.venv-mocap/bin/python` when available, otherwise system
 Python. Both must be Python 3.8 for this machine's Foxy installation. Set
@@ -41,8 +49,7 @@ existing interpreter conflict for the full application.
 ## Check remote messages
 
 ```bash
-source /opt/ros/foxy/setup.bash
-source ros2/install/local_setup.bash
+source ros2/mocap_env.sh
 ros2 interface show vicon_receiver/msg/Position
 ros2 topic info /vicon/Yori/Yori --verbose
 timeout --signal=INT 15s ros2 topic echo /vicon/Yori/Yori \
