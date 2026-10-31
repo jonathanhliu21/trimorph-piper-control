@@ -102,6 +102,33 @@ class PostprocessTests(unittest.TestCase):
             first = load_piper_stream(Path(summary['piper_csv']))[1][0]
             np.testing.assert_allclose(first, config.piper_start_pose, atol=1e-10)
 
+    def test_offset_conversion_requires_start_pose_and_applies_rotating_correction(self):
+        for start in (None, (.4, -.1, .3, .2, -.4, .1)):
+            with self.subTest(start=start), tempfile.TemporaryDirectory() as directory:
+                config, raw, qxyz, rq, a, b = self.fixture(Path(directory), start_pose=start)
+                calibration = json.loads(config.calibration_json.read_text())
+                offset = np.array([-.09, .03, -.04])
+                calibration['tracked_point_offset'] = dict(vector=offset.tolist(), frame='piper_flange')
+                config.calibration_json.write_text(json.dumps(calibration))
+                if start is None:
+                    with self.assertRaisesRegex(ValueError, '--piper-start-pose'):
+                        post.process_episode(config, raw)
+                    self.assertFalse((config.dataset_root / 'processed').exists())
+                    continue
+                summary = post.process_episode(config, raw)
+                mapped_r = b @ (rq.as_matrix() @ rq.as_matrix()[0].T) @ b.T
+                rp0 = Rotation.from_euler('xyz', start[3:]).as_matrix()
+                expected = start[:3] + (qxyz - qxyz[0]) @ a.T + (mapped_r @ rp0 - rp0) @ offset
+                poses = load_piper_stream(Path(summary['piper_csv']))[1]
+                np.testing.assert_allclose(poses[:, :3], expected, atol=1e-10)
+                self.assertEqual(resolve_piper_source(raw.path)[1], 'piper_base')
+                for invalid in (dict(frame='quest', vector=offset.tolist()),
+                                dict(frame='piper_flange', vector=[0., 1.]),
+                                dict(frame='piper_flange', vector=[0., float('nan'), 0.])):
+                    calibration['tracked_point_offset'] = invalid
+                    with self.assertRaisesRegex(ValueError, 'tracked_point_offset'):
+                        post.validate_calibration(calibration)
+
     def test_replay_default_anchors_processed_and_raw_flag_preserves_raw_behavior(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

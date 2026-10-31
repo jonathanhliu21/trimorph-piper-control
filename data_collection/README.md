@@ -118,6 +118,8 @@ python3 data_collection/postprocess_dataset.py data_trimorph_quest \
 
 Those six example values are XYZ and roll/pitch/yaw radians; replace them with the intended Piper starting pose. Explicitly anchored output is marked `piper_base` and is replayed without runtime reanchoring.
 
+For a calibration fitted with `get_coord_transform.py --fit-offset`, `--piper-start-pose` is required. The postprocessor applies the additional rotating position correction `(R_piper(t) - R_piper_start) @ tracked_point_offset.vector`. Its value depends on the actual flange starting orientation; processing with an assumed identity orientation and later reanchoring would give incorrect positions. Calibration files without a tracked-point offset retain the relative replay behavior described above.
+
 Replay now reads `processed/episode_XXXXXX/piper.csv` by default, while the hand continues to use its original measured CSV:
 
 ```bash

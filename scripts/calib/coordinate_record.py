@@ -18,6 +18,9 @@ matching the dataset postprocessor. CSV quaternions use xyzw order.
 Raw Quest/Piper position steps above --jump-threshold print warnings with
 elapsed time, distance, XYZ delta, packet interval, and per-device counts.
 Samples are retained unchanged; the threshold uses each device's native units.
+Omit --duration to start recording on a foot pedal press and save on the next
+press. An explicit --duration starts automatically after worker initialization;
+0 records until Ctrl-C.
 """
 from __future__ import annotations
 
@@ -42,6 +45,7 @@ from data_collection.collection.piper_worker import run_piper_worker
 from data_collection.collection.quest_worker import run_quest_worker
 from data_collection.collection.shared_state import SharedState
 from data_collection.collection.utils import worker_wrapper
+from scripts.piper_api.foot_pedal import FootPedalTrigger
 
 
 class CoordinateSession:
@@ -156,7 +160,10 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output", type=Path, required=True, help="Destination CSV (use -f to overwrite)")
     parser.add_argument("-f", "--force", action="store_true", help="Overwrite an existing output file")
-    parser.add_argument("--duration", type=float, default=30.0, help="Seconds after workers initialize; 0 = until Ctrl-C")
+    parser.add_argument("--duration", type=float, help="Seconds after workers initialize; 0 = until Ctrl-C; omit for pedal start/stop")
+    parser.add_argument("--foot-pedal-device", help="Linux input device path; auto-detected by default")
+    parser.add_argument("--foot-pedal-key-code", type=int)
+    parser.add_argument("--foot-pedal-debounce-seconds", type=float, default=0.5)
     parser.add_argument("--rate-hz", type=float, default=50.0, help="Synchronized CSV sample rate")
     parser.add_argument("--max-gap-s", type=float, default=0.1, help="Largest interpolation bracket allowed")
     parser.add_argument("--jump-threshold", type=float, default=0.05,
@@ -179,8 +186,10 @@ def record(args):
         value = getattr(args, name)
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be finite and positive")
-    if not math.isfinite(args.duration) or args.duration < 0:
+    if args.duration is not None and (not math.isfinite(args.duration) or args.duration < 0):
         raise ValueError("duration must be finite and nonnegative")
+    if not math.isfinite(args.foot_pedal_debounce_seconds) or args.foot_pedal_debounce_seconds < 0:
+        raise ValueError("foot_pedal_debounce_seconds must be finite and nonnegative")
     args.output = args.output.expanduser()
     if args.output.exists() and not args.force:
         raise FileExistsError(f"Output already exists: {args.output}; use -f to overwrite")
@@ -189,6 +198,7 @@ def record(args):
     threads = []
     ready_events = []
     session = None
+    pedal = None
     try:
         for name, worker in (("piper", run_piper_worker), ("quest", run_quest_worker)):
             ready = threading.Event()
@@ -207,19 +217,35 @@ def record(args):
             if time.monotonic() >= deadline:
                 raise TimeoutError("Timed out initializing coordinate workers")
         if not shared.shutdown.is_set():
-            session = CoordinateSession(jump_threshold=args.jump_threshold)
-            recorder.start(session)
-            print("Recording poses; translate in 3D and rotate about multiple axes. Ctrl-C saves early.", flush=True)
-            deadline = time.monotonic() + args.duration if args.duration else float("inf")
-            while time.monotonic() < deadline and not shared.shutdown.wait(0.05):
-                pass
+            if args.duration is None:
+                pedal = FootPedalTrigger(args.foot_pedal_device,
+                                         key_code=args.foot_pedal_key_code,
+                                         debounce_s=args.foot_pedal_debounce_seconds)
+                pedal.start()
+                print(f"Foot pedal input: {pedal.active_device}. Press pedal to start calibration.", flush=True)
+                while not shared.shutdown.is_set():
+                    if pedal.poll():
+                        break
+                    shared.shutdown.wait(0.05)
+            if not shared.shutdown.is_set():
+                session = CoordinateSession(jump_threshold=args.jump_threshold)
+                recorder.start(session)
+                print("Recording poses; translate in 3D and rotate about multiple axes. Ctrl-C saves early.", flush=True)
+                if pedal is not None:
+                    print("Press pedal again to stop and save calibration.", flush=True)
+                deadline = time.monotonic() + args.duration if args.duration else float("inf")
+                while time.monotonic() < deadline and not shared.shutdown.wait(0.05):
+                    if pedal is not None and pedal.poll():
+                        break
     except KeyboardInterrupt:
         print("Stopping and saving available samples.")
     finally:
+        recorder.stop("stopped")
         shared.shutdown.set()
+        if pedal is not None:
+            pedal.stop()
         for thread in threads:
             thread.join(timeout=5.0)
-        recorder.stop("stopped")
     failures = []
     while not errors.empty():
         error = errors.get_nowait()

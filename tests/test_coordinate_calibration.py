@@ -127,8 +127,10 @@ class CoordinateCalibrationTests(unittest.TestCase):
             output = Path(directory) / "nested" / "coords.csv"
             args = build_parser().parse_args(["--output", str(output), "--duration", ".06", "--rate-hz", "200"])
             with (patch("scripts.calib.coordinate_record.run_piper_worker", worker("piper")),
-                  patch("scripts.calib.coordinate_record.run_quest_worker", worker("quest"))):
+                  patch("scripts.calib.coordinate_record.run_quest_worker", worker("quest")),
+                  patch("scripts.calib.coordinate_record.FootPedalTrigger") as trigger):
                 record(args)
+                trigger.assert_not_called()
             times, quest, piper, qq, pq = load_poses(output)
             np.testing.assert_allclose(Rotation.from_quat(qq).as_matrix(), Rotation.from_quat(pq).as_matrix(), atol=1e-9)
             self.assertGreaterEqual(len(times), 4)
@@ -146,6 +148,53 @@ class CoordinateCalibrationTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "no device"):
                     record(args)
             self.assertFalse(output.exists())
+
+    def test_pedal_waits_to_start_then_saves_and_releases_device(self):
+        for interrupt_before_start in (False, True):
+            with self.subTest(interrupt_before_start=interrupt_before_start), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "coords.csv"
+                args = build_parser().parse_args(["--output", str(output)])
+                managers = []
+
+                def worker(config, shared, recorder, *, init_done):
+                    managers.append(recorder)
+                    init_done.set()
+                    shared.shutdown.wait()
+
+                polls = 0
+
+                def poll():
+                    nonlocal polls
+                    polls += 1
+                    manager = managers[0]
+                    if polls <= 2:
+                        self.assertIsNone(manager.current())
+                        if interrupt_before_start:
+                            raise KeyboardInterrupt
+                        return [] if polls == 1 else [object()]
+                    session = manager.current()
+                    self.assertIsNotNone(session)
+                    for i in range(6):
+                        stamp = session.start_ns + i * 20_000_000
+                        session.append_piper(dict(monotonic_ns=stamp, x=0., y=0., z=0.,
+                                                  roll=0., pitch=0., yaw=0.))
+                        session.append_quest(dict(monotonic_ns=stamp, px=0., py=0., pz=0.,
+                                                  qx=0., qy=0., qz=0., qw=1.))
+                    return [object()]
+
+                with (patch("scripts.calib.coordinate_record.run_piper_worker", worker),
+                      patch("scripts.calib.coordinate_record.run_quest_worker", worker),
+                      patch("scripts.calib.coordinate_record.FootPedalTrigger") as trigger):
+                    trigger.return_value.poll.side_effect = poll
+                    record(args)
+                    trigger.return_value.start.assert_called_once()
+                    trigger.return_value.stop.assert_called_once()
+                self.assertIsNone(managers[0].current())
+                if interrupt_before_start:
+                    self.assertFalse(output.exists())
+                else:
+                    times, *_ = load_poses(output)
+                    self.assertEqual(len(times), 6)
 
     def test_slerp_crosses_euler_wrap_and_ignores_quaternion_sign(self):
         piper = self.rows([0, 1], "piper", 0)
@@ -189,6 +238,57 @@ class CoordinateCalibrationTests(unittest.TestCase):
         offset = Rotation.from_euler("zyx", [.2, -.3, .4]).as_matrix()
         result3 = fit_orientation_transform(Rotation.from_matrix(rq @ offset).as_quat(), pq)
         np.testing.assert_allclose(result3["rotation_matrix"], b, atol=1e-12)
+
+    def test_fit_offset_recovers_mapping_and_converts_world_and_chunk_deltas(self):
+        q, _, rq, rp, qq, pq, _, _ = self.pose_fixture()
+        offset = np.array([-.09, .03, -.04])
+        for model in ("rigid", "similarity", "linear"):
+            for reflected in (False, True):
+                with self.subTest(model=model, reflected=reflected):
+                    a = Rotation.from_euler("xyz", [.2, -.5, .3]).as_matrix()
+                    if reflected:
+                        a = a @ np.diag([-1., 1., 1.])
+                    if model == "similarity":
+                        a *= .97
+                    elif model == "linear":
+                        a = a @ np.array([[.9, .1, 0.], [0., 1.1, 0.], [0., 0., .8]])
+                    p = q @ a.T + rp @ offset + [4., -3., 2.]
+                    # Different recording origins and fixed orientation offsets
+                    # must not be mistaken for displacement at the boundary.
+                    p[40:] += [20., 30., -40.]
+                    result = fit_pose_transform(q, p, qq, pq, model=model,
+                                                allow_reflection=reflected, fit_offset=True,
+                                                recording_lengths=[40, 40])
+                    np.testing.assert_allclose(result["linear_matrix"], a, atol=1e-7)
+                    np.testing.assert_allclose(result["tracked_point_offset"]["vector"], offset, atol=1e-7)
+                    self.assertLess(result["fit_errors"]["position_rmse"], 1e-8)
+                    self.assertLess(result["fit_errors"]["anchored_pose_position_rmse"], 1e-7)
+                    self.assertIsNone(result["position_matrix_4x4"])
+                    start, end = 7, 25
+                    targets, _ = transform_chunk(q[start:end], qq[start:end], p[start], pq[start], result)
+                    np.testing.assert_allclose(targets, p[start:end], atol=1e-7)
+                    world_dp = q[start:end] - q[start]
+                    world_dq = Rotation.from_matrix(rq[start:end] @ rq[start].T).as_quat()
+                    dp, _ = map_relative_pose(world_dp, world_dq, result, piper_start_quaternion=pq[start])
+                    np.testing.assert_allclose(dp, p[start:end] - p[start], atol=1e-7)
+                    local_dp = world_dp @ rq[start]
+                    local_dq = Rotation.from_matrix(rq[start].T @ rq[start:end]).as_quat()
+                    dp, _ = map_relative_pose(local_dp, local_dq, result, relative_frame="chunk",
+                                              quest_start_quaternion=qq[start], piper_start_quaternion=pq[start])
+                    np.testing.assert_allclose(dp, (p[start:end] - p[start]) @ rp[start], atol=1e-7)
+                    single, _ = map_relative_pose(world_dp[-1], world_dq[-1], result,
+                                                  piper_start_quaternion=pq[start])
+                    np.testing.assert_allclose(single, p[end - 1] - p[start], atol=1e-7)
+                    with self.assertRaisesRegex(ValueError, "piper_start_quaternion"):
+                        map_relative_pose(world_dp, world_dq, result)
+
+    def test_offset_fit_requires_observable_rotation_and_pose_data(self):
+        q, p, _, _, qq, _, _, _ = self.pose_fixture()
+        fixed = np.tile([0., 0., 0., 1.], (len(q), 1))
+        with self.assertRaisesRegex(ValueError, "underdetermined"):
+            fit_pose_transform(q, p, qq, fixed, fit_offset=True)
+        with self.assertRaisesRegex(ValueError, "omit --position-only"):
+            fit_csvs(["unused.csv"], position_only=True, fit_offset=True)
 
     def test_arbitrary_chunk_starts_recover_absolute_piper_poses(self):
         quest, piper, rq, rp, qq, pq, calibration, _ = self.pose_fixture()

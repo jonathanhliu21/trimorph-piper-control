@@ -25,7 +25,7 @@ from scipy.spatial.transform import Rotation
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.calib.get_coord_transform import transform_chunk
+from scripts.calib.get_coord_transform import tracked_point_offset, transform_chunk
 from scripts.dataset import postprocess_dataset as base
 
 
@@ -53,9 +53,13 @@ def validate_calibration(calibration):
             or not np.allclose(b.T @ b, np.eye(3), atol=1e-6)
             or not np.isclose(np.linalg.det(b), 1., atol=1e-6)):
         raise ValueError("Calibration needs a proper orientation.rotation_matrix")
+    tracked_point_offset(calibration)
 
 
 def convert_quest(episode, calibration, start_pose=None):
+    if tracked_point_offset(calibration) is not None and start_pose is None:
+        raise ValueError("Tracked-point offset calibration requires --piper-start-pose with the actual "
+                         "Piper starting XYZ/roll/pitch/yaw; the correction depends on flange orientation")
     path = episode.path / "quest.csv"
     rows = base.read_csv_rows(path)
     if not rows:

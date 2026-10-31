@@ -59,7 +59,6 @@ def worker_wrapper(
     try:
         target(*args, init_done=init_done)
     except Exception as exc:
-        init_done.set()
         errors.put(
             WorkerError(
                 name=name,
@@ -68,3 +67,4 @@ def worker_wrapper(
             )
         )
         shared.shutdown.set()
+        init_done.set()

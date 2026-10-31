@@ -7,6 +7,8 @@ Default: a proper rotation, preserving distances. Use --model similarity to fit
 uniform teleoperation gain / unit conversion, or --model linear for independent
 axis gains and shear. --allow-reflection permits opposite coordinate handedness
 for rigid/similarity fits. All models require motion spanning three dimensions.
+Use --fit-offset to estimate a rotating controller-to-flange position correction
+from pose recordings. The pose helpers apply it using the Piper starting pose.
 
 For column vectors, delta_piper = A @ delta_quest. The JSON's 4x4 displacement
 matrix has zero translation. Use piper_anchor + A @ (quest - quest_anchor) to
@@ -25,6 +27,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
 POSITION_FIELDS = tuple(f"{device}_{axis}" for device in ("quest", "piper") for axis in "xyz")
@@ -222,20 +225,150 @@ def fit_orientation_transform(quest_quaternions, piper_quaternions, *,
     }
 
 
+def fit_tracked_point_offset(quest, piper, piper_quaternions, result, *,
+                             recording_lengths=None, weighting="equal", allow_reflection=False):
+    """Fit p = A q + Rp l + b, with l fixed in Piper flange coordinates.
+
+    Center every recording independently to remove its constant origin b.
+    Both rotation parities are optimized when reflections are allowed.
+    """
+    quest, piper = np.asarray(quest, dtype=float), np.asarray(piper, dtype=float)
+    rotations = _rotation_from_quat(piper_quaternions).as_matrix()
+    groups, weights = _recording_groups(len(quest), recording_lengths, weighting)
+    qmeans = [quest[g].mean(axis=0) for g in groups]
+    pmeans = [piper[g].mean(axis=0) for g in groups]
+    rmeans = [rotations[g].mean(axis=0) for g in groups]
+    q = np.concatenate([quest[g] - mean for g, mean in zip(groups, qmeans)])
+    p = np.concatenate([piper[g] - mean for g, mean in zip(groups, pmeans)])
+    r = np.concatenate([rotations[g] - mean for g, mean in zip(groups, rmeans)])
+    root_weights = np.sqrt(weights[:, None])
+    model = result["model"]
+    initial_a = np.asarray(result["linear_matrix"])
+
+    if model == "linear":
+        def unpack(z):
+            return z[:9].reshape(3, 3), z[9:12]
+        initials = [np.r_[initial_a.ravel(), np.zeros(3)]]
+        bases = [None]
+    else:
+        initials, bases = [], []
+        for parity in ([1., -1.] if allow_reflection else [1.]):
+            basis = np.diag([parity, 1., 1.])
+            u, _, vt = np.linalg.svd(initial_a @ basis)
+            proper = u @ np.diag([1., 1., np.linalg.det(u @ vt)]) @ vt
+            initial = np.r_[Rotation.from_matrix(proper).as_rotvec(), np.zeros(3)]
+            if model == "similarity":
+                initial = np.r_[initial, np.log(max(abs(result["uniform_scale"]), 1e-6))]
+            initials.append(initial)
+            bases.append(basis)
+
+    candidates = []
+    for initial, basis in zip(initials, bases):
+        if model != "linear":
+            def unpack(z):
+                scale = np.exp(z[6]) if model == "similarity" else 1.
+                return scale * Rotation.from_rotvec(z[:3]).as_matrix() @ basis, z[3:6]
+
+        def residual(z):
+            a, offset = unpack(z)
+            return ((q @ a.T + r @ offset - p) * root_weights).ravel()
+
+        fit = least_squares(residual, initial, max_nfev=1000)
+        if fit.success:
+            a, offset = unpack(fit.x)
+            candidates.append((fit.cost, a, offset, fit.jac))
+    if not candidates:
+        raise ValueError("Tracked-point offset fit failed to converge")
+    _, a, offset, jacobian = min(candidates, key=lambda item: item[0])
+    singular = np.linalg.svd(jacobian, compute_uv=False)
+    if singular[-1] <= max(1e-9, singular[0] * 1e-6):
+        raise ValueError("Tracked-point offset is underdetermined; record independent 3D translations "
+                         "and rotations about multiple nonparallel axes")
+    if np.linalg.matrix_rank(a) < 3:
+        raise ValueError("Tracked-point fit produced a singular position mapping")
+
+    errors = q @ a.T + r @ offset - p
+    result["fit_errors"] = _position_errors(errors, weights)
+    step_errors, offsets = [], []
+    for g, qm, pm, rm, recording in zip(groups, qmeans, pmeans, rmeans, result["recordings"]):
+        steps = np.diff(errors[g], axis=0)
+        step_errors.append(float(np.mean(np.sum(steps**2, axis=1))))
+        recording["fit_errors"] = _position_errors(errors[g], np.full(g.stop - g.start, 1. / (g.stop - g.start)))
+        recording["fit_errors"]["consecutive_displacement_rmse"] = float(np.sqrt(step_errors[-1]))
+        offsets.append(pm - a @ qm - rm @ offset)
+        recording["position_offset"] = offsets[-1].tolist()
+        recording["piper_mean_rotation_matrix"] = rm.tolist()
+    step_weights = None if weighting == "equal" else [g.stop - g.start - 1 for g in groups]
+    result["fit_errors"]["consecutive_displacement_rmse"] = float(np.sqrt(np.average(step_errors, weights=step_weights)))
+    displacement = np.eye(4)
+    displacement[:3, :3] = a
+    result.update(
+        linear_matrix=a.tolist(), displacement_matrix_4x4=displacement.tolist(),
+        position_matrix_4x4=None,
+        position_offset=offsets[0].tolist() if len(groups) == 1 else None,
+        uniform_scale=float(np.linalg.svd(a, compute_uv=False)[0]) if model == "similarity" else (1. if model == "rigid" else None),
+        determinant=float(np.linalg.det(a)),
+        axis_gains_singular_values=np.linalg.svd(a, compute_uv=False).tolist(),
+        equation="piper = A @ quest + R_piper @ tracked_point_offset.vector + origin_offset",
+        anchored_equation="piper = piper_start + A @ (quest - quest_start) + (R_piper - R_piper_start) @ tracked_point_offset.vector",
+        tracked_point_offset=dict(vector=offset.tolist(), frame="piper_flange",
+                                  units="Piper position units (meters with pyAgxArm)",
+                                  length=float(np.linalg.norm(offset)),
+                                  convention="Add R_piper @ vector to the mapped Quest point to obtain the Piper flange point"),
+        offset_fit_jacobian_singular_values=singular.tolist(),
+    )
+    return result
+
+
+def tracked_point_offset(calibration):
+    """Read and validate the optional rotating position correction."""
+    if "tracked_point_offset" not in calibration:
+        return None
+    info = calibration["tracked_point_offset"]
+    if not isinstance(info, dict) or info.get("frame") != "piper_flange":
+        raise ValueError("tracked_point_offset.frame must be piper_flange")
+    vector = np.asarray(info.get("vector"), dtype=float)
+    if vector.shape != (3,) or not np.isfinite(vector).all():
+        raise ValueError("tracked_point_offset.vector must contain three finite values")
+    return vector
+
+
 def fit_pose_transform(quest, piper, quest_quaternions, piper_quaternions, *,
-                       recording_lengths=None, weighting="equal", **kwargs):
+                       recording_lengths=None, weighting="equal", fit_offset=False, **kwargs):
     if len(quest_quaternions) != len(quest) or len(piper_quaternions) != len(piper):
         raise ValueError("Position and orientation sample counts must match")
     result = fit_transform(quest, piper, recording_lengths=recording_lengths, weighting=weighting, **kwargs)
+    if fit_offset:
+        result = fit_tracked_point_offset(quest, piper, piper_quaternions, result,
+                                          recording_lengths=recording_lengths, weighting=weighting,
+                                          allow_reflection=kwargs.get("allow_reflection", False))
     result["orientation"] = fit_orientation_transform(
         quest_quaternions, piper_quaternions, recording_lengths=recording_lengths, weighting=weighting)
     for recording, angular in zip(result["recordings"], result["orientation"]["recordings"]):
         recording["orientation_errors"] = angular
-    result["schema_version"] = 2
+    result["schema_version"] = 3 if fit_offset else 2
     result["relative_frame"] = "world"
     result["limitations"] = ("Training residuals only; validate on another trajectory. "
-                             "No latency correction or tracked-point offset calibration. "
+                             + ("No latency correction. Tracked-point offset estimated from measured Piper orientations. "
+                                if fit_offset else "No latency correction or tracked-point offset calibration. ") +
                              "Position A and orientation B are independent; not a single SE(3) transform.")
+    if fit_offset:
+        # Conversion uses inferred orientations, so report that error as well as
+        # the position fit's measured-orientation residuals.
+        groups, weights = _recording_groups(len(quest), recording_lengths, weighting)
+        centered_errors, anchored_errors = [], []
+        for group, recording in zip(groups, result["recordings"]):
+            targets, _ = transform_chunk(np.asarray(quest)[group], np.asarray(quest_quaternions)[group],
+                                         np.asarray(piper)[group.start], np.asarray(piper_quaternions)[group.start], result)
+            error = targets - np.asarray(piper)[group]
+            centered = error - error.mean(axis=0)
+            local_weights = np.full(len(error), 1. / len(error))
+            recording["fit_errors"]["mapped_orientation_position_rmse"] = _position_errors(centered, local_weights)["position_rmse"]
+            recording["fit_errors"]["anchored_pose_position_rmse"] = _position_errors(error, local_weights)["position_rmse"]
+            centered_errors.append(centered)
+            anchored_errors.append(error)
+        result["fit_errors"]["mapped_orientation_position_rmse"] = _position_errors(np.concatenate(centered_errors), weights)["position_rmse"]
+        result["fit_errors"]["anchored_pose_position_rmse"] = _position_errors(np.concatenate(anchored_errors), weights)["position_rmse"]
     return result
 
 
@@ -247,6 +380,8 @@ def map_relative_pose(delta_positions, delta_quaternions, calibration, *, relati
     chunk: dp = R(0)^T (p(t)-p(0)), D = R(0)^T R(t).
     For chunk coordinates supply both starting orientations; output deltas are
     expressed in the Piper chunk-start frame. No recorded position offset is used.
+    A tracked-point correction additionally requires the Piper starting
+    orientation, including for world coordinates.
     """
     if relative_frame not in ("world", "chunk"):
         raise ValueError("relative_frame must be world or chunk")
@@ -254,6 +389,7 @@ def map_relative_pose(delta_positions, delta_quaternions, calibration, *, relati
     if "orientation" not in calibration:
         raise ValueError("Calibration lacks an orientation fit; fit a pose CSV first")
     b = np.asarray(calibration["orientation"]["rotation_matrix"], dtype=float)
+    offset = tracked_point_offset(calibration)
     positions = np.asarray(delta_positions, dtype=float)
     rotations = _rotation_from_quat(delta_quaternions).as_matrix()
     if positions.shape[-1:] != (3,) or positions.shape[:-1] != rotations.shape[:-2]:
@@ -271,6 +407,14 @@ def map_relative_pose(delta_positions, delta_quaternions, calibration, *, relati
         rotations = rq0 @ rotations @ rq0.T
     mapped_positions = positions @ a.T
     mapped_rotations = b @ rotations @ b.T
+    if offset is not None:
+        if piper_start_quaternion is None:
+            raise ValueError("Tracked-point offset requires piper_start_quaternion")
+        rp0 = _rotation_from_quat(piper_start_quaternion).as_matrix()
+        if rp0.shape != (3, 3):
+            raise ValueError("Piper starting orientation must be one quaternion")
+        initial_offset = rp0 @ offset
+        mapped_positions = mapped_positions + mapped_rotations @ initial_offset - initial_offset
     if relative_frame == "chunk":
         mapped_positions = mapped_positions @ rp0
         mapped_rotations = rp0.T @ mapped_rotations @ rp0
@@ -296,14 +440,17 @@ def transform_chunk(quest_positions, quest_quaternions, piper_start_position,
         raise ValueError("Supply one finite Piper starting position and quaternion")
     dpositions, dquats = map_relative_pose(
         positions - positions[0],
-        Rotation.from_matrix(matrices @ matrices[0].T).as_quat(), calibration)
+        Rotation.from_matrix(matrices @ matrices[0].T).as_quat(), calibration,
+        piper_start_quaternion=piper_start_quaternion)
     targets = _rotation_from_quat(dquats).as_matrix() @ rp0
     return p0 + dpositions, Rotation.from_matrix(targets).as_quat()
 
 
-def fit_csvs(paths, *, position_only=False, model="rigid", allow_reflection=False, weighting="equal"):
+def fit_csvs(paths, *, position_only=False, model="rigid", allow_reflection=False, weighting="equal", fit_offset=False):
     """Joint fit with independent references and equal recording weight by default."""
     paths = [Path(path).expanduser() for path in paths]
+    if position_only and fit_offset:
+        raise ValueError("--fit-offset requires orientation data; omit --position-only")
     if not paths:
         raise ValueError("Provide at least one CSV")
     streams = []
@@ -322,7 +469,7 @@ def fit_csvs(paths, *, position_only=False, model="rigid", allow_reflection=Fals
     else:
         result = fit_pose_transform(quest, piper,
                                    np.concatenate([stream[3] for stream in streams]),
-                                   np.concatenate([stream[4] for stream in streams]), **options)
+                                   np.concatenate([stream[4] for stream in streams]), fit_offset=fit_offset, **options)
     for path, stream, recording in zip(paths, streams, result["recordings"]):
         recording.update(input_csv=str(path), duration_s=float(stream[0][-1] - stream[0][0]))
     result["input_csvs"] = [str(path) for path in paths]
@@ -340,12 +487,14 @@ def main():
     parser.add_argument("--model", choices=("rigid", "similarity", "linear"), default="rigid")
     parser.add_argument("--allow-reflection", action="store_true", help="Allow opposite handedness in rigid/similarity fits")
     parser.add_argument("--position-only", action="store_true", help="Fit old XYZ-only CSVs without orientation")
+    parser.add_argument("--fit-offset", action="store_true",
+                        help="Fit a rotating controller-to-flange position correction in Piper flange coordinates")
     parser.add_argument("--weighting", choices=("equal", "samples"), default="equal",
                         help="Equal weight per CSV (default), or equal weight per sample")
     args = parser.parse_args()
     try:
         result = fit_csvs(args.input, position_only=args.position_only, model=args.model,
-                          allow_reflection=args.allow_reflection, weighting=args.weighting)
+                          allow_reflection=args.allow_reflection, weighting=args.weighting, fit_offset=args.fit_offset)
         output = args.output.expanduser()
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("w" if args.force else "x", encoding="utf-8") as stream:
@@ -357,6 +506,10 @@ def main():
     print(f"Position RMSE: {result['fit_errors']['position_rmse']:.6g} (Piper units)")
     if "orientation" in result:
         print(f"Orientation RMSE: {np.degrees(result['orientation']['fit_rmse_rad']):.6g} degrees")
+    if args.fit_offset:
+        print("Tracked-point correction (Piper flange frame):", result["tracked_point_offset"]["vector"])
+        print(f"Position RMSE using mapped orientations: {result['fit_errors']['mapped_orientation_position_rmse']:.6g}")
+        print(f"Position RMSE anchored at each recording start: {result['fit_errors']['anchored_pose_position_rmse']:.6g}")
     print(f"Saved {args.model} fit from {result['sample_count']} samples "
           f"across {result['recording_count']} CSV(s) to {output}")
 
