@@ -145,3 +145,30 @@ python scripts/calib/coordinate_record.py --output output/calib/coords.csv --jum
 ```
 
 Every consecutive raw Quest packet and Piper sample is checked before interpolation. Steps strictly above the threshold print a flushed `WARNING: [quest] POSITION JUMP` or `[piper]` message with a per-device count, time since recording began, distance, sample interval, and XYZ displacement. A final summary prints both counts. The threshold is in each device's native position units; all samples remain in the recording, and no filtering or calibration changes are applied.
+
+### Visualize ROS 2 mocap detections
+
+Source your ROS 2 installation and Vicon receiver workspace, then run:
+
+```bash
+python scripts/calib/mocap_detection.py
+# Select a specific topic and an arrow length in the receiver's position units:
+python scripts/calib/mocap_detection.py --mocap-topic /your/pose/topic --axis-length 50
+```
+
+The interactive 3D plot automatically discovers `vicon_receiver/msg/Position`
+and `vicon_receiver/msg/MarkerPositions` topics. Repeat `--mocap-topic` (or
+`--topic`) to select several topics. Segment poses appear as labeled black dots
+with red/green/blue local X/Y/Z orientation arrows. Marker positions appear as
+orange dots without orientation. Zero or invalid quaternions show position only
+and an “orientation unavailable” label.
+
+Coordinates and translation units are preserved from the receiver, with no
+coordinate frame transforms. The status line shows source frame IDs and
+`translation_type`; select topics in the same coordinate frame and units when
+comparing objects. Occluded markers and nonfinite positions are hidden, and
+objects disappear after two seconds without an update (`--stale-after-s`).
+`--refresh-hz` controls display refresh (default 20); `--axis-length` defaults
+to an automatic display scale. Drag to rotate the view. Close the window or
+press Ctrl-C to stop and release the ROS subscriptions. This viewer does not
+command hardware or write a CSV.

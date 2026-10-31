@@ -28,6 +28,7 @@ class EpisodePaths:
     follower_path: Path
     piper_path: Path
     quest_path: Path
+    mocap_path: Path
     metadata_path: Path
 
 
@@ -56,6 +57,7 @@ def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
         follower_path=episode_dir / "follower.csv",
         piper_path=episode_dir / "piper.csv",
         quest_path=episode_dir / "quest.csv",
+        mocap_path=episode_dir / "mocap.csv",
         metadata_path=episode_dir / "metadata.json",
     )
 
@@ -96,6 +98,7 @@ class EpisodeBuffer:
         self.follower_rows: list[dict[str, object]] = []
         self.piper_rows: list[dict[str, object]] = []
         self.quest_rows: list[dict[str, object]] = []
+        self.mocap_rows: list[dict[str, object]] = []
         self.video_done = threading.Event()
 
     def elapsed_s(self, sample_ns: int) -> float:
@@ -121,6 +124,11 @@ class EpisodeBuffer:
         with self.lock:
             self.quest_rows.append(row)
 
+    def append_mocap(self, row: dict[str, object]) -> None:
+        with self.lock:
+            if self.stop_ns is None and row["monotonic_ns"] >= self.start_ns:
+                self.mocap_rows.append(row)
+
     def mark_stopped(self, reason: str) -> None:
         self.stop_ns = time.monotonic_ns()
         self.stopped_utc = utc_stamp()
@@ -139,6 +147,7 @@ class EpisodeBuffer:
             follower_rows = list(self.follower_rows)
             piper_rows = list(self.piper_rows)
             quest_rows = list(self.quest_rows)
+            mocap_rows = list(self.mocap_rows)
         write_csv(self.paths.camera_timestamps_path, camera_rows)
         write_csv(self.paths.leader_hand_path, leader_hand_rows)
         if getattr(self.config, "follower_hand_config", None) is not None:
@@ -146,6 +155,10 @@ class EpisodeBuffer:
         write_csv(self.paths.piper_path, piper_rows)
         if getattr(self.config, "use_quest", False):
             write_csv(self.paths.quest_path, quest_rows)
+        if getattr(self.config, "use_mocap", False):
+            from .mocap_worker import write_mocap_csv
+
+            write_mocap_csv(self.paths.mocap_path, mocap_rows)
         write_json(
             self.paths.metadata_path,
             self._metadata(
@@ -154,6 +167,7 @@ class EpisodeBuffer:
                 follower_rows,
                 piper_rows,
                 quest_rows,
+                mocap_rows,
             ),
         )
 
@@ -164,6 +178,7 @@ class EpisodeBuffer:
         follower_rows: list[dict[str, object]],
         piper_rows: list[dict[str, object]],
         quest_rows: list[dict[str, object]],
+        mocap_rows: list[dict[str, object]],
     ) -> dict[str, Any]:
         stop_ns = self.stop_ns or time.monotonic_ns()
         follower_config = getattr(self.config, "follower_hand_config", None)
@@ -196,6 +211,7 @@ class EpisodeBuffer:
                 ),
                 "piper_csv": self.paths.piper_path.name,
                 "quest_csv": self.paths.quest_path.name if has_quest else None,
+                "mocap_csv": self.paths.mocap_path.name if getattr(self.config, "use_mocap", False) else None,
             },
             "counts": {
                 "camera_frames": len(camera_rows),
@@ -203,6 +219,7 @@ class EpisodeBuffer:
                 "follower_samples": len(follower_rows),
                 "piper_samples": len(piper_rows),
                 "quest_samples": len(quest_rows),
+                "mocap_rows": len(mocap_rows),
             },
             "camera": {
                 "device": "oak1_depthai" if has_camera else None,
@@ -312,6 +329,15 @@ class EpisodeBuffer:
                     getattr(self.config, "quest_jump_threshold", None) if has_quest else None
                 ),
                 "raw_fields": list(QUEST_PACKET_FIELDS) if has_quest else [],
+            },
+            "mocap": {
+                "enabled": bool(getattr(self.config, "use_mocap", False)),
+                "requested_topics": list(getattr(self.config, "mocap_topics", ())),
+                "recorded_topics": sorted({row["topic"] for row in mocap_rows}),
+                "translation_units": "raw receiver units; see translation_type for Position",
+                "rotation_fields": "raw quaternion x_rot, y_rot, z_rot, w; blank for markers",
+                "source_clock": "ROS header stamp (sec, nanosec)",
+                "receipt_clock": "host monotonic_ns and Unix wall_time_s",
             },
             "errors": self.errors,
         }

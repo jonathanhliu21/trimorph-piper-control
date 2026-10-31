@@ -12,3 +12,6 @@ output/
 *.csv
 *.json
 !thumb_retarget_model.json
+*.zip
+msg/
+.venv-mocap/

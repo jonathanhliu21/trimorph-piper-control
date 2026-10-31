@@ -153,6 +153,8 @@ class HandOnlyCollectionConfig(HandRuntimeConfig):
     add_camera: bool = False
     use_piper: bool = False
     use_quest: bool = False
+    use_mocap: bool = False
+    mocap_topics: tuple[str, ...] = ()
     quest_host: str = DEFAULT_QUEST_HOST
     quest_port: int = DEFAULT_QUEST_PORT
     quest_jump_threshold: float = DEFAULT_QUEST_JUMP_THRESHOLD

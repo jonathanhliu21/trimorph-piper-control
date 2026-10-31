@@ -128,3 +128,59 @@ python3 data_collection/replay_episode.py 0 --dataset-root data_trimorph_quest \
 ```
 
 The replay command moves the hardware. For the original raw Piper CSV behavior, add `--read-piper-raw`; this flag is required with `--joint-level`. Missing processed poses produce an error with no silent fallback to raw data. `--hand-only` does not require processed Piper files. The calibration quality and any Quest tracking discontinuities carry through into the converted data; postprocessing does not filter samples or establish workspace reachability.
+
+### Optional ROS 2 mocap CSV logging
+
+Source the ROS 2 installation and the Vicon receiver workspace in the same shell
+used to run collection/replay. The Python interpreter must be able to import
+`rclpy` and the generated `vicon_receiver.msg` package. The `.msg` files under
+`msg/` describe the wire schema; they do not themselves install Python messages
+or identify the running publisher's topic names.
+
+| Message | Fields and format | CSV behavior |
+| --- | --- | --- |
+| `vicon_receiver/msg/Position` | `std_msgs/Header`; `float32` translation `x_trans/y_trans/z_trans`; four `float32` rotation components `x_rot/y_rot/z_rot/w`; string subject, segment, translation type; `int32 frame_number` | One row per segment pose, preserving translation and quaternion components as received. |
+| `vicon_receiver/msg/MarkerPositions` | `std_msgs/Header`; `uint32 frame_number`; array of `vicon_receiver/MarkerPosition` | One row per marker; array header and frame number repeated on every row. |
+| `vicon_receiver/MarkerPosition` (nested) | Three `float32` translation values; string marker, subject, segment names; `bool occluded` | Position, names and occlusion recorded. Orientation columns are empty because markers have no orientation. Occluded markers are retained. |
+
+The rotation fields are treated as quaternion components and are saved without
+normalization or conversion. The definitions specify no translation units or
+coordinate convention. Values remain in receiver units; `translation_type` is
+preserved for segment poses. No orientation is computed for marker data.
+
+```bash
+python3 data_collection/collect_hand_only.py --use-mocap --episode-s 10
+python3 data_collection/replay_episode.py 0 --hand-only \
+  --use-mocap --mocap-output replay_mocap.csv
+```
+
+Add your usual hand/dataset arguments as needed. Collection writes
+`raw/episode_XXXXXX/mocap.csv`, and records its path, row count, and topic names
+in episode metadata. Mocap can be combined with Piper or Quest logging.
+Replay records **live** mocap during the replay interval, excluding prepositioning
+and settling, and saves partial data on Ctrl-C or an exception. It does not use
+mocap to command the hardware. Retarget-only mode does not save episodes.
+
+With `--use-mocap`, the recorder discovers all topics advertising the two
+supported top-level ROS 2 types above, including topics that appear later.
+To select particular topics, repeat `--mocap-topic /actual/topic/name` on either
+command. An explicitly selected topic must advertise a supported type. Startup
+fails after 10 seconds if no matching topic is discovered or a selected topic is
+missing. Discovery does not guarantee that the publisher sends samples.
+
+CSV columns include the source `topic`, `message_type`, `frame_id`, frame and
+subject/segment/marker identifiers, all raw pose/marker fields, and:
+
+- `ros_stamp_sec`, `ros_stamp_nanosec`: original ROS header timestamp, stored as
+  separate integers to preserve precision. Nested markers share their array's stamp.
+- `monotonic_ns`: host receipt time for synchronization with the hand/camera.
+- `wall_time_s`: host Unix receipt time in seconds.
+- `elapsed_s`: host receipt time relative to episode/replay start.
+- `sample_idx`: sequential CSV row index; multiple markers in one message share
+  timestamps but have separate row indices.
+
+ROS timestamps may use a different clock from host receipt timestamps; no clock
+offset is estimated. An enabled recording with no samples still writes a CSV
+header. Without `--use-mocap`, no ROS imports, discovery, initialization, or
+subscriptions occur. Replay requires `--mocap-output` with `--use-mocap`;
+`--mocap-topic` and `--mocap-output` require mocap to be enabled.

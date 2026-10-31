@@ -50,6 +50,7 @@ from data_collection.collection.follower_hand_worker import run_follower_hand_wo
 from data_collection.collection.leader_hand_worker import run_leader_hand_worker
 from data_collection.collection.piper_worker import run_piper_worker
 from data_collection.collection.quest_worker import run_quest_worker
+from data_collection.collection.mocap_worker import run_mocap_worker
 from data_collection.collection.shared_state import SharedState
 from data_collection.collection.tactile_worker import run_tactile_worker
 from data_collection.collection.utils import WorkerError, import_cv2, worker_wrapper
@@ -99,6 +100,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="record the DepthAI wrist camera and show its live feed",
     )
+    parser.add_argument("--use-mocap", action="store_true", help="Record ROS 2 Vicon poses/markers to each episode's mocap.csv.")
+    parser.add_argument("--mocap-topic", dest="mocap_topics", action="append", default=[], help="Select a Vicon topic (repeatable); default: discover all supported topics. Requires --use-mocap.")
     pose_source_group = parser.add_mutually_exclusive_group()
     pose_source_group.add_argument(
         "--use-piper",
@@ -237,6 +240,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     args = parser.parse_args()
+    if args.mocap_topics and not args.use_mocap:
+        parser.error("--mocap-topic requires --use-mocap")
     if args.episode_time is not None:
         args.use_foot_pedal = False
     return args
@@ -250,6 +255,8 @@ def worker_specs(config: HandOnlyCollectionConfig):
         specs.append(("piper", run_piper_worker))
     if config.use_quest:
         specs.append(("quest", run_quest_worker))
+    if config.use_mocap:
+        specs.append(("mocap", run_mocap_worker))
     specs.append(("leader_hand", run_leader_hand_worker))
     if config.follower_hand_config is not None:
         specs.append(("follower", run_follower_hand_worker))
@@ -340,7 +347,8 @@ def stop_episode(recorder: RecordingManager, reason: str) -> EpisodeBuffer | Non
         f"{len(session.follower_rows)} follower samples, "
         f"{len(session.camera_rows)} camera frames, "
         f"{len(session.piper_rows)} Piper samples, "
-        f"{len(session.quest_rows)} Quest samples"
+        f"{len(session.quest_rows)} Quest samples, "
+        f"{len(session.mocap_rows)} mocap rows"
     )
     return session
 
@@ -680,6 +688,8 @@ def main() -> int:
         add_camera=args.add_camera,
         use_piper=args.use_piper,
         use_quest=args.use_quest,
+        use_mocap=args.use_mocap,
+        mocap_topics=tuple(args.mocap_topics),
         quest_jump_threshold=args.quest_jump_threshold,
         piper_joint_level=args.piper_joint_level,
         piper_rate_hz=args.piper_rate_hz,

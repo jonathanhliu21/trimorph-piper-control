@@ -39,6 +39,7 @@ from data_collection.collection.depthai_utils import (
     warmup_color_queue,
 )
 from data_collection.collection.episode import raw_root
+from data_collection.collection.mocap_worker import ReplayMocapRecorder
 from data_collection.collection.hand_common import (
     load_follower_config,
     load_hand_config,
@@ -362,6 +363,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hand-only", action="store_true")
     parser.add_argument("--arm-only", action="store_true")
+    parser.add_argument("--use-mocap", action="store_true", help="Record live ROS 2 Vicon data during replay.")
+    parser.add_argument("--mocap-output", type=Path, help="Destination CSV; required with --use-mocap.")
+    parser.add_argument("--mocap-topic", dest="mocap_topics", action="append", default=[], help="Select a Vicon topic (repeatable); default: discover all supported topics.")
     parser.add_argument(
         "--output-current",
         type=Path,
@@ -803,6 +807,10 @@ def move_to_first_pose(hand, api, hand_stream, piper_stream, start_s: float, arg
 
 def main() -> int:
     args = parse_args()
+    if args.use_mocap and args.mocap_output is None:
+        raise ValueError("--use-mocap requires --mocap-output")
+    if not args.use_mocap and (args.mocap_output is not None or args.mocap_topics):
+        raise ValueError("--mocap-output and --mocap-topic require --use-mocap")
     if not math.isfinite(args.rate_hz) or args.rate_hz <= 0:
         raise ValueError("--rate-hz must be finite and greater than 0")
     if not math.isfinite(args.piper_rate_hz) or args.piper_rate_hz <= 0:
@@ -890,6 +898,7 @@ def main() -> int:
     arm_thread: threading.Thread | None = None
     arm_errors: list[Exception] = []
     video_recorder: ReplayVideoRecorder | None = None
+    mocap_recorder: ReplayMocapRecorder | None = None
     try:
         if replay_hand:
             from midas_hand_api import MidasHand
@@ -971,10 +980,16 @@ def main() -> int:
             video_recorder = ReplayVideoRecorder(args.output_video, config)
             video_recorder.prepare()
 
+        if args.use_mocap:
+            mocap_recorder = ReplayMocapRecorder(args.mocap_output, args.mocap_topics)
+            mocap_recorder.prepare()
+
         hand_period_s = 1.0 / args.rate_hz
         current_sample_period_s = 1.0 / CURRENT_TELEMETRY_HZ
         next_current_sample_s = 0.0
         wall_start = time.monotonic()
+        if mocap_recorder is not None:
+            mocap_recorder.start(wall_start, end_s - start_s)
         if video_recorder is not None:
             video_recorder.start(wall_start, end_s - start_s)
         print(
@@ -998,6 +1013,8 @@ def main() -> int:
             tick = 0
             duration_s = end_s - start_s
             while True:
+                if mocap_recorder is not None:
+                    mocap_recorder.raise_if_failed()
                 if video_recorder is not None:
                     video_recorder.raise_if_failed()
                 if arm_errors:
@@ -1036,6 +1053,8 @@ def main() -> int:
         if arm_thread is not None:
             while arm_thread.is_alive():
                 arm_thread.join(timeout=0.05)
+                if mocap_recorder is not None:
+                    mocap_recorder.raise_if_failed()
                 if video_recorder is not None:
                     video_recorder.raise_if_failed()
             if arm_errors:
@@ -1044,6 +1063,8 @@ def main() -> int:
             video_recorder.finish()
         if current_recorder is not None:
             output_current_csv(current_recorder, args.output_current)
+        if mocap_recorder is not None:
+            mocap_recorder.raise_if_failed()
         print("Replay complete.")
         return 0
     except KeyboardInterrupt:
@@ -1053,14 +1074,18 @@ def main() -> int:
         return 130
     finally:
         arm_stop.set()
-        if video_recorder is not None:
-            video_recorder.stop()
-        if arm_thread is not None:
-            arm_thread.join()
-        if api is not None:
-            api.disconnect()
-        if hand is not None:
-            hand.shutdown()
+        try:
+            if mocap_recorder is not None:
+                mocap_recorder.stop()
+        finally:
+            if video_recorder is not None:
+                video_recorder.stop()
+            if arm_thread is not None:
+                arm_thread.join()
+            if api is not None:
+                api.disconnect()
+            if hand is not None:
+                hand.shutdown()
 
 
 if __name__ == "__main__":
