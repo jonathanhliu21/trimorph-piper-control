@@ -234,3 +234,53 @@ on all segments to `<run>/calibration/quest_calibration.json` (plus `latency_s`)
 with `model_comparison.json`, leave-one-segment-out errors and `report.png`.
 Apply it with `transform_chunk` after shifting Quest timestamps by `latency_s`. A
 calibration only holds for the Quest tracking session it was recorded in.
+
+### Quest teleoperation with the calibration
+
+`scripts/teleop/quest_teleop.py` drives Piper from Quest deltas using a
+`quest_calibration.json`. It first moves to the fixed home joints (same default as
+the calibration sequence), then, while the foot pedal is held, maps Quest motion
+since the moment of engagement onto the robot target (position only by default,
+`--with-orientation` to follow rotation). Releasing holds the arm; re-engaging
+re-anchors at the current target.
+
+```bash
+CAL=output/quest_calibration/<run>/calibration_quest/quest_calibration.json
+python scripts/teleop/quest_teleop.py --calibration $CAL --quest-port 5005 --dry-run   # no arm, print targets
+python scripts/teleop/quest_teleop.py --calibration $CAL --quest-port 5005
+```
+
+Targets are limited to `--max-offset-mm` (100) from home, `--max-rotation-deg`
+(45), `--max-speed-mm-s` (300) and `--max-angular-speed-deg-s` (180). The clutch
+disengages on stale Quest data, a Quest jump, or a tracking error above
+`--max-tracking-error-mm`. Type `h` + Enter to go home, `q` + Enter to go home and
+quit; Ctrl-C stops streaming without moving. `--no-pedal` uses Enter as a toggle.
+Each session is logged to `output/teleop/<timestamp>/`.
+
+### Record a Quest demonstration and replay it in absolute coordinates
+
+`scripts/teleop/quest_replay.py` maps every Quest sample to an absolute flange
+target with the full calibration, `p = A q + R l + c` (`c` is the origin of the
+calibration recordings), so the arm goes where the hand-held controller was rather
+than moving by deltas from a clutch anchor. Orientation is held at home by default;
+`--with-orientation` adds the controller's rotation since the first sample.
+
+```bash
+CAL=output/quest_calibration/<run>/calibration_quest/quest_calibration.json
+python scripts/teleop/quest_replay.py --calibration $CAL --quest-port 5005 --dry-run   # no arm: record + check
+python scripts/teleop/quest_replay.py --calibration $CAL --quest-port 5005
+python scripts/teleop/quest_replay.py --calibration $CAL --replay output/quest_replay/<session>/rec_01
+```
+
+The arm moves to home and holds still while you record (pedal press = start, press
+again = stop; `--no-pedal` uses Enter). The status line shows where the arm would
+go relative to home. A recording is replayed only if it stays within
+`--max-offset-mm` (150) and `--max-rotation-deg` (30) of home, under
+`--max-speed-mm-s` / `--max-angular-speed-deg-s` at `--playback-speed`, and has no
+Quest gap or jump. Before each replay the arm moves to the first target along a
+minimum-jerk path (`--approach-speed-mm-s`, 50), holds it for `--settle-s` and
+checks it within `--start-tolerance-mm`. The playback rate eases in and out over
+`--ease-s`, so the arm starts and stops at rest. Streaming stops on the same
+faults as teleop. The origin `c` is only valid while the Quest keeps the
+calibration's tracking session; it drifted about 1 cm over 30 min on 2026-10-31.
+Recordings are saved to `output/quest_replay/<session>/rec_NN/`.

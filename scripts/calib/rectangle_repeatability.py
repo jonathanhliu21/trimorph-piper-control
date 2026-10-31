@@ -197,6 +197,7 @@ class PiperLogger:
         self.period_s = 1.0 / rate_hz
         self.rows = []
         self.latest = None
+        self.latest_joints = None
         self.status = {}
         self.lock = threading.Lock()
         self.stop_event = threading.Event()
@@ -234,6 +235,7 @@ class PiperLogger:
                         row.update(self.status)
                         self.rows.append(row)
                         self.latest = fk
+                        self.latest_joints = [float(angle) for angle in joints.joints]
                 next_t += self.period_s
                 self.stop_event.wait(max(0.0, next_t - time.monotonic()))
         except Exception as exc:
@@ -242,6 +244,10 @@ class PiperLogger:
     def latest_pose(self):
         with self.lock:
             return self.latest
+
+    def latest_joint_angles(self):
+        with self.lock:
+            return self.latest_joints
 
     def latest_status(self):
         with self.lock:
