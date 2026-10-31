@@ -13,5 +13,7 @@ output/
 *.json
 !thumb_retarget_model.json
 *.zip
-msg/
 .venv-mocap/
+/ros2/build/
+/ros2/install/
+/ros2/log/

@@ -131,10 +131,16 @@ The replay command moves the hardware. For the original raw Piper CSV behavior, 
 
 ### Optional ROS 2 mocap CSV logging
 
+The repository now includes a [ROS 2 workspace](../ros2/README.md). Build it with
+`bash ros2/build.sh`, then source `/opt/ros/foxy/setup.bash` and
+`ros2/install/local_setup.bash` from the repository root. The existing collection
+and replay imports forward to the `trimorph_mocap` package.
+
 Source the ROS 2 installation and the Vicon receiver workspace in the same shell
 used to run collection/replay. The Python interpreter must be able to import
 `rclpy` and the generated `vicon_receiver.msg` package. The `.msg` files under
-`msg/` describe the wire schema; they do not themselves install Python messages
+`ros2/src/vicon_receiver/msg/` (also linked from `msg/`) describe the wire schema;
+they do not themselves install Python messages
 or identify the running publisher's topic names.
 
 | Message | Fields and format | CSV behavior |
