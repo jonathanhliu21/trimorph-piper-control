@@ -166,6 +166,10 @@ class HandOnlyCollectionConfig(HandRuntimeConfig):
     piper_firmware: str = DEFAULT_PIPER_FIRMWARE
     piper_installation_pos: str | None = DEFAULT_PIPER_INSTALLATION_POS
     piper_payload: str | None = DEFAULT_PIPER_PAYLOAD
+    # Commanded joint start pose (deg) and the flange pose measured there (m, rad).
+    piper_start_joints_deg: tuple[float, ...] | None = None
+    piper_start_speed_deg_s: float = 10.0
+    piper_start_pose: tuple[float, ...] | None = None
     teacher_mode_poll_hz: float = DEFAULT_TEACHER_MODE_POLL_HZ
     add_tactile: bool = False
     paxini_port: str | None = None

@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # Support both direct execution and package imports.
@@ -157,6 +157,29 @@ def parse_args() -> argparse.Namespace:
         "--piper-payload",
         choices=("unchanged", "empty", "half", "full"),
         default=DEFAULT_PIPER_PAYLOAD,
+    )
+    start_group = parser.add_mutually_exclusive_group()
+    start_group.add_argument(
+        "--piper-start-joints-deg",
+        type=float,
+        nargs=6,
+        metavar="DEG",
+        help=(
+            "Before collecting, enable Piper and move it in joint space to these "
+            "angles, leaving it holding there; its measured flange pose is saved "
+            "in every episode's metadata as the postprocessing start pose."
+        ),
+    )
+    start_group.add_argument(
+        "--piper-start-home",
+        action="store_true",
+        help="Like --piper-start-joints-deg, using the teleop home (config/teleop_home.json).",
+    )
+    parser.add_argument(
+        "--piper-start-speed-deg-s",
+        type=float,
+        default=10.0,
+        help="Joint speed of the move to the start pose (default: %(default)s).",
     )
     parser.add_argument(
         "--add-tactile",
@@ -521,12 +544,68 @@ def run_camera_view(
     return reason
 
 
+def move_piper_to_start(config: HandOnlyCollectionConfig) -> tuple[float, ...]:
+    """Enable Piper, ramp it in joint space to the start joints and leave it holding.
+
+    Returns the measured flange pose [x, y, z, roll, pitch, yaw] (m, rad).
+    """
+
+    import numpy as np
+
+    from scripts.piper_api.piper_api import PiperAPI
+    from scripts.teleop.quest_teleop import POSITION_MODE_SETTLE_S, go_home, home_warnings
+
+    for warning in home_warnings(config.piper_start_joints_deg):
+        print(f"WARNING: start pose {warning}")
+    api = PiperAPI(
+        firmware=config.piper_firmware,
+        interface=config.piper_interface,
+        channel=config.piper_channel,
+        installation_pos=config.piper_installation_pos,
+        payload=config.piper_payload,
+    )
+    api.connect()
+    try:
+        if not api.is_ok():
+            raise RuntimeError("Piper is not responding on the CAN bus")
+        input(
+            "Clear the workspace, keep a hand near the e-stop, and press Enter to "
+            "move Piper to the start pose..."
+        )
+        if not api.enable():
+            raise RuntimeError("Timed out while enabling Piper")
+        api.set_position_mode()
+        time.sleep(POSITION_MODE_SETTLE_S)
+        api.set_speed_percent(100)
+        go_home(
+            api,
+            np.radians(config.piper_start_joints_deg),
+            config.piper_start_speed_deg_s,
+            50.0,
+        )
+        pose = tuple(float(value) for value in api.get_eef_pose())
+    finally:
+        # Disconnecting does not disable the arm: it keeps holding the start pose.
+        api.disconnect()
+    return pose
+
+
 def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     shared = SharedState()
     recorder = RecordingManager()
     errors: queue.Queue[WorkerError] = queue.Queue()
     pedal: FootPedalTrigger | None = None
     pedal_controller: FootPedalCollectionController | None = None
+
+    if getattr(config, "piper_start_joints_deg", None) is not None:
+        pose = move_piper_to_start(config)
+        config = replace(config, piper_start_pose=pose)
+        print(
+            "Piper is holding the start pose; postprocessing uses it from each "
+            "episode's metadata (--piper-start-pose "
+            + " ".join(f"{value:.4f}" for value in pose)
+            + ")."
+        )
 
     if config.mode == DATA_COLLECTION_MODE:
         print(f"Warming up for {config.warmup_time}s")
@@ -671,6 +750,17 @@ def main() -> int:
         or args.paxini_port is not None
         or args.tactile_debug_log is not None
     )
+    piper_start_joints_deg = args.piper_start_joints_deg
+    if args.piper_start_home:
+        from scripts.teleop.quest_teleop import saved_home_deg
+
+        piper_start_joints_deg = saved_home_deg()
+    if piper_start_joints_deg is not None:
+        piper_start_joints_deg = tuple(piper_start_joints_deg)
+        if not all(math.isfinite(value) for value in piper_start_joints_deg):
+            raise ValueError("--piper-start-joints-deg must be finite")
+        if not math.isfinite(args.piper_start_speed_deg_s) or args.piper_start_speed_deg_s <= 0:
+            raise ValueError("--piper-start-speed-deg-s must be finite and greater than 0")
     config = HandOnlyCollectionConfig(
         dataset_root=args.dataset_root.expanduser(),
         hand_config=args.hand_config.expanduser(),
@@ -699,6 +789,8 @@ def main() -> int:
         piper_firmware=args.piper_firmware,
         piper_installation_pos=args.piper_installation_pos,
         piper_payload=args.piper_payload,
+        piper_start_joints_deg=piper_start_joints_deg,
+        piper_start_speed_deg_s=args.piper_start_speed_deg_s,
         add_tactile=add_tactile,
         paxini_port=args.paxini_port,
         tactile_debug_log=(

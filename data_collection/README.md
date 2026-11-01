@@ -19,6 +19,13 @@ python3 data_collection/collect_hand_only.py \
   --episode-s 30
 ```
 
+Add `--piper-start-joints-deg J1 J2 J3 J4 J5 J6` (or `--piper-start-home` for
+the teleop home in `config/teleop_home.json`) to enable Piper and move it in joint
+space to that pose before collection starts (Enter confirms; `--piper-start-speed-deg-s`,
+default 10). The arm keeps holding the pose while you collect, and its measured flange
+pose is saved as `piper.start_pose` in every episode's `metadata.json`;
+`postprocess_dataset.py` uses it as the start pose when `--piper-start-pose` is omitted.
+
 Omit `--episode-s 30` for the default foot-pedal episode control. Camera and Piper workers stay disabled unless their respective flags are supplied. Start the Quest sender streaming to the collector's configured UDP endpoint (default `0.0.0.0:5005`). With Quest enabled, the collector prints flushed `POSITION JUMP` warnings when consecutive received packets move farther than `--quest-jump-threshold` in native position units. Each warning includes a worker-lifetime count, time since the first packet, sequence number, step distance, packet interval, and XYZ delta. Checks include packets received between episodes, while CSV recording remains limited to active episodes. Samples are recorded unchanged. The threshold is saved in episode metadata; a flagged step is a review cue, not a tracking-loss diagnosis.
 
 `collection/config.py` defines shared hardware and retargeting settings in

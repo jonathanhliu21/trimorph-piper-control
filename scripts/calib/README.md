@@ -175,9 +175,20 @@ command hardware or write a CSV.
 
 ### Rectangle repeatability: Piper FK vs Vicon / Quest
 
-Commands the arm (it moves). Start with the tracked marker or controller rigidly
-mounted on the flange and the arm at a safe pose with ~20 mm of clearance in the
-chosen plane; that pose becomes the rectangle's first corner.
+Commands the arm (it moves). Mount the tracked marker or controller rigidly on
+the flange. The arm first moves in joint space to `--start-joints-deg` (default:
+the calibration-sequence home `2.4 161.4 -91.8 -8.1 25.6 105.0`), whose flange
+pose becomes the rectangle's first corner; `--start-here` keeps the current pose
+instead. Before anything moves, IK is solved along the whole rectangle and a
+table shows every joint's range, its margin to the limits (`--joint-margin-deg`,
+10) and the smallest `|J5|` (wrist singularity at 0, `--wrist-singularity-margin-deg`,
+15); the run is refused if any is too small. Check a candidate start without
+hardware:
+
+```bash
+python scripts/calib/rectangle_repeatability.py --check-only --start-joints-deg 2.4 161.4 -91.8 -8.1 25.6 105.0
+python scripts/calib/rectangle_repeatability.py --check-only --start-here   # reads the arm's current joints
+```
 
 ```bash
 # Vicon marker on the arm (uses .venv-mocap + ros2/mocap_env.sh automatically):
@@ -201,6 +212,21 @@ repeatability across loops and edge lengths, plus FK vs commanded error. It
 writes `summary.json` and `analysis.png` in the run directory. Rigid alignment
 absorbs the tracker frame and the marker's constant offset from the flange,
 not scale or shape errors.
+
+To compare Piper joint FK, Vicon and Quest against the commanded path on the
+same motion, mount both on the flange and record them together (Vicon is on
+by default):
+
+```bash
+python scripts/calib/rectangle_repeatability.py --label both --quest-port 5005
+python scripts/calib/analyze_rectangle.py output/rect_repeatability/<timestamp>_both
+```
+
+Each source keeps its latency from the FK alignment and gets its own rigid fit
+to the commanded positions over the settled corner holds; the "Vs commanded"
+table (`vs_commanded` in `summary.json`, `vs_commanded.png`) then gives RMSE
+settled at corners and moving along edges, per-axis, per loop and per-corner
+bias. Moving errors include the arm lagging the moving target.
 
 ### Quest calibration sequence (shapes, rotations, dynamic trajectory)
 
@@ -234,6 +260,27 @@ on all segments to `<run>/calibration/quest_calibration.json` (plus `latency_s`)
 with `model_comparison.json`, leave-one-segment-out errors and `report.png`.
 Apply it with `transform_chunk` after shifting Quest timestamps by `latency_s`. A
 calibration only holds for the Quest tracking session it was recorded in.
+
+To use Vicon instead of joint FK as the ground truth, mount the Vicon markers
+and the Quest controller rigidly on the flange together and record the sequence
+with Vicon on (the default):
+
+```bash
+python scripts/calib/quest_calibration_sequence.py --quest-port 5005
+python scripts/calib/fit_quest_calibration.py output/quest_calibration/<timestamp>_quest_calib --reference mocap
+```
+
+The Vicon pose is shifted by its own latency onto the Piper clock and mapped
+into the Piper base frame as `T_flange = W T_vicon X`. Only the constant
+transforms `W` (Vicon world to Piper base) and `X` (flange in the Vicon body
+frame) are fitted to FK, over the whole run, so the motion itself comes from
+Vicon and FK's pose-dependent errors stay out of the Quest fit. The wrist
+segments are required: without rotation `X` is unobservable. Samples without a
+Vicon pose (stream gaps) or with a Vicon-vs-FK residual over max(5 mm, 5 x
+median) are left out. The output is the same Quest-to-Piper
+`quest_calibration.json` (in `calibration_quest_vicon_ref/`), usable by teleop
+and replay, with the fitted `W`, `X`, Vicon latency and Vicon-vs-FK residuals
+under `vicon_reference`; held-out errors are measured against Vicon.
 
 ### Quest teleoperation with the calibration
 

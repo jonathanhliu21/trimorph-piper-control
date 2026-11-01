@@ -106,6 +106,94 @@ def load_run(run_dir, tracker="quest"):
                 q_position=q_position[valid], q_quat=q_quat[valid] / np.linalg.norm(q_quat[valid], axis=1)[:, None])
 
 
+def project_rotation(matrix):
+    """Nearest proper rotation (polar decomposition via SVD)."""
+    u, _s, vt = np.linalg.svd(matrix)
+    return u @ np.diag([1.0, 1.0, np.sign(np.linalg.det(u @ vt))]) @ vt
+
+
+def fit_vicon_to_flange(p_vicon, r_vicon, p_fk, r_fk, iterations=200):
+    """Constant transforms with T_flange = W @ T_vicon @ X (robot-world / hand-eye).
+
+    W = (r_world, t_world) maps Vicon world to the Piper base; X = (r_body,
+    t_body) is the flange pose in the Vicon object's body frame. Rotations are
+    fitted by alternating Procrustes steps, then both translations by linear
+    least squares. Needs rotation about at least two axes (the wrist segments).
+    """
+    centered = (p_fk - p_fk.mean(axis=0)).T @ (p_vicon - p_vicon.mean(axis=0))
+    r_world = project_rotation(centered)
+    r_body = np.eye(3)
+    for _ in range(iterations):
+        r_body_new = project_rotation(np.einsum("nji,njk->ik", r_world @ r_vicon, r_fk))
+        r_world_new = project_rotation(np.einsum("nij,nkj->ik", r_fk, r_vicon @ r_body_new))
+        change = max(np.abs(r_body_new - r_body).max(), np.abs(r_world_new - r_world).max())
+        r_body, r_world = r_body_new, r_world_new
+        if change < 1e-12:
+            break
+    design = np.concatenate([r_world @ r_vicon, np.broadcast_to(np.eye(3), r_vicon.shape)], axis=2).reshape(-1, 6)
+    singular = np.linalg.svd(design, compute_uv=False)
+    if singular[-1] < 1e-3 * singular[0]:
+        raise ValueError("Vicon/FK recording lacks wrist rotation about several axes; the flange offset in the "
+                         "Vicon body frame is unobservable. Record the full calibration sequence (rot_j4..j6).")
+    target = (p_fk - p_vicon @ r_world.T).reshape(-1)
+    solution = np.linalg.lstsq(design, target, rcond=None)[0]
+    return r_world, solution[3:], r_body, solution[:3]
+
+
+def vicon_flange(transform, p_vicon, r_vicon):
+    """Flange positions and rotation matrices in the Piper base frame as seen by Vicon."""
+    r_world, t_world, r_body, t_body = transform
+    return (np.einsum("nij,j->ni", r_world @ r_vicon, t_body) + p_vicon @ r_world.T + t_world,
+            r_world @ r_vicon @ r_body)
+
+
+def vicon_reference(run_dir, run, max_lag_s, outlier_mm=5.0):
+    """Replace the FK reference of a Quest run with the Vicon-observed flange pose.
+
+    Vicon is shifted by its own latency to the Piper clock, mapped into the
+    Piper base frame with fit_vicon_to_flange (fitted to FK over the whole run,
+    so FK only sets the constant frame and lever arm), and samples without a
+    valid Vicon pose or with a residual over max(outlier_mm, 5 x median) to FK
+    are excluded. Returns the modified run and diagnostics.
+    """
+    vicon = load_run(run_dir, "mocap")
+    lag, _cost = estimate_latency(vicon, ~np.isin(vicon["labels"], ("warmup",)), max_lag_s)
+    position, ok = resample_positions(vicon["tq"], vicon["q_position"], run["t"] + lag)
+    ok &= (run["t"] + lag >= vicon["tq"][0]) & (run["t"] + lag <= vicon["tq"][-1])
+    rotation = np.tile(np.eye(3), (len(run["t"]), 1, 1))
+    rotation[ok] = Slerp(vicon["tq"], Rotation.from_quat(vicon["q_quat"]))(run["t"][ok] + lag).as_matrix()
+    r_fk = Rotation.from_quat(run["quat"]).as_matrix()
+    used = ok.copy()
+    for _ in range(2):  # fit, drop outliers (marker swaps, occlusion glitches), refit
+        transform = fit_vicon_to_flange(position[used], rotation[used], run["position"][used], r_fk[used])
+        p_ref, r_ref = vicon_flange(transform, position, rotation)
+        error_mm = 1000 * np.linalg.norm(p_ref - run["position"], axis=1)
+        limit = max(outlier_mm, 5 * float(np.median(error_mm[ok])))
+        used = ok & (error_mm <= limit)
+    angle = Rotation.from_matrix(r_ref[used] @ np.transpose(r_fk[used], (0, 2, 1))).magnitude()
+    r_world, t_world, r_body, t_body = transform
+    diagnostics = {
+        "latency_s": lag, "valid_fraction": float(ok.mean()), "used_fraction": float(used.mean()),
+        "vicon_vs_fk_position_rmse_mm": float(np.sqrt(np.mean(error_mm[used] ** 2))),
+        "vicon_vs_fk_orientation_rmse_deg": float(np.degrees(np.sqrt(np.mean(angle ** 2)))),
+        "vicon_to_piper_rotation": r_world.tolist(), "vicon_to_piper_translation_m": t_world.tolist(),
+        "flange_in_vicon_body_rotation": r_body.tolist(), "flange_in_vicon_body_translation_m": t_body.tolist(),
+    }
+    run = dict(run, position=p_ref, quat=Rotation.from_matrix(r_ref).as_quat(), reference_ok=used)
+    return run, diagnostics
+
+
+def load_reference_run(run_dir, tracker, reference, max_lag_s):
+    run = load_run(run_dir, tracker)
+    if reference == "fk":
+        return run, None
+    run, diagnostics = vicon_reference(run_dir, run, max_lag_s)
+    print(f"{run_dir.name}: Vicon reference latency {1000 * diagnostics['latency_s']:+.0f} ms, "
+          f"{100 * diagnostics['used_fraction']:.1f}% of samples usable; Vicon flange vs FK "
+          f"{diagnostics['vicon_vs_fk_position_rmse_mm']:.2f} mm / {diagnostics['vicon_vs_fk_orientation_rmse_deg']:.2f} deg RMSE")
+    return run, diagnostics
+
+
 def resample_positions(t_src, values, t_query):
     i1 = np.clip(np.searchsorted(t_src, t_query), 1, len(t_src) - 1)
     i0 = i1 - 1
@@ -138,7 +226,7 @@ def synchronized(run, lag, step):
     rotations = Rotation.from_quat(run["q_quat"])
     q_quat = np.full((len(run["t"]), 4), np.nan)
     q_quat[inside] = Slerp(run["tq"], rotations)(run["t"][inside] + lag).as_quat()
-    keep = ok & inside & ~np.isin(run["labels"], EXCLUDED_LABELS)
+    keep = ok & inside & ~np.isin(run["labels"], EXCLUDED_LABELS) & run.get("reference_ok", True)
     keep &= np.arange(len(keep)) % step == 0
     return dict(label=run["labels"][keep], quest=q[keep], quest_quat=q_quat[keep],
                 piper=run["position"][keep], piper_quat=run["quat"][keep])
@@ -190,6 +278,9 @@ def main(argv=None):
     parser.add_argument("run_dirs", type=Path, nargs="+")
     parser.add_argument("--tracker", choices=sorted(TRACKERS), default="quest",
                         help="Which recorded tracker to calibrate against Piper FK (mocap = Vicon reference run).")
+    parser.add_argument("--reference", choices=("fk", "mocap"), default="fk",
+                        help="Ground truth for the flange pose: joint FK, or Vicon (recorded in the same run, its "
+                             "marker rigidly on the flange) mapped into the Piper base frame.")
     parser.add_argument("--holdout", nargs="+", default=list(DEFAULT_HOLDOUT),
                         help="Segment labels kept out of model selection fitting.")
     parser.add_argument("--output-dir", type=Path, help="Default: <first run>/calibration")
@@ -201,13 +292,15 @@ def main(argv=None):
                         help="Do not select a model: score this existing calibration on the given run(s), "
                              "next to fresh fits of the same model on the new data.")
     args = parser.parse_args(argv)
+    if args.reference == "mocap" and args.tracker == "mocap":
+        parser.error("--reference mocap calibrates the Quest; it cannot be combined with --tracker mocap")
     if args.apply is not None:
         return apply_existing(args)
 
-    runs, datasets, latencies = [], [], []
+    runs, datasets, latencies, references = [], [], [], {}
     for run_dir in args.run_dirs:
-        run = load_run(run_dir, args.tracker)
-        moving = ~np.isin(run["labels"], EXCLUDED_LABELS)
+        run, references[str(run_dir)] = load_reference_run(run_dir, args.tracker, args.reference, args.max_lag_s)
+        moving = ~np.isin(run["labels"], EXCLUDED_LABELS) & run.get("reference_ok", True)
         lag, lag_cost = estimate_latency(run, moving, args.max_lag_s)
         if abs(abs(lag) - args.max_lag_s) < 0.002:
             print(f"WARNING: {run_dir.name}: latency at the search limit; increase --max-lag-s")
@@ -288,11 +381,16 @@ def main(argv=None):
     final["latency_note"] = "Quest sample at t + latency_s corresponds to Piper FK at t; shift Quest timestamps before mapping."
     final["calibration_runs"] = [str(path) for path in runs]
     final["selected_model"] = best
-    final["piper_reference"] = "joint-feedback FK (pyAgxArm robot.fk), meters"
+    if args.reference == "mocap":
+        final["piper_reference"] = ("Vicon-observed flange pose in the Piper base frame (T = W T_vicon X, W and X "
+                                    "fitted to joint FK over each run), meters")
+        final["vicon_reference"] = references
+    else:
+        final["piper_reference"] = "joint-feedback FK (pyAgxArm robot.fk), meters"
     final["validation"] = {"heldout_segments": holdout, "heldout": scored[best]["heldout"],
                            "rigid_heldout": scored["rigid"]["heldout"],
                            "leave_one_segment_out": loso}
-    output_dir = args.output_dir or args.run_dirs[0] / f"calibration_{args.tracker}"
+    output_dir = args.output_dir or args.run_dirs[0] / output_name(args.tracker, args.reference)
     final["tracker"] = args.tracker
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "quest_calibration.json").write_text(json.dumps(final, indent=2, allow_nan=False) + "\n")
@@ -303,6 +401,10 @@ def main(argv=None):
            best_model, best_reflection, best_offset)
     print(f"\nWrote {output_dir / 'quest_calibration.json'}, model_comparison.json and report.png")
     return 0
+
+
+def output_name(tracker, reference):
+    return f"calibration_{tracker}" + ("_vicon_ref" if reference == "mocap" else "")
 
 
 def apply_existing(args):
@@ -326,8 +428,9 @@ def apply_existing(args):
 
     datasets = []
     for run_dir in args.run_dirs:
-        run = load_run(run_dir, tracker)
-        own_lag, _ = estimate_latency(run, ~np.isin(run["labels"], EXCLUDED_LABELS), args.max_lag_s)
+        run, _diagnostics = load_reference_run(run_dir, tracker, args.reference, args.max_lag_s)
+        own_lag, _ = estimate_latency(run, ~np.isin(run["labels"], EXCLUDED_LABELS) & run.get("reference_ok", True),
+                                      args.max_lag_s)
         rate = 1.0 / np.median(np.diff(run["t"]))
         datasets.append(synchronized(run, lag, max(1, round(rate / args.fit_rate_hz))))
         print(f"{run_dir.name}: own latency estimate {1000 * own_lag:+.0f} ms (using the saved {1000 * lag:+.0f} ms)")
@@ -367,7 +470,7 @@ def apply_existing(args):
     if rotation_change is not None:
         print(f"Frame rotation between saved and fresh fit: {rotation_change:.2f} deg")
 
-    output_dir = args.output_dir or args.run_dirs[0] / f"calibration_{tracker}"
+    output_dir = args.output_dir or args.run_dirs[0] / output_name(tracker, args.reference)
     output_dir.mkdir(parents=True, exist_ok=True)
     out = output_dir / f"applied_{args.apply.parent.parent.name}.json"
     out.write_text(json.dumps({"calibration": str(args.apply), "model": name, "latency_s": lag,

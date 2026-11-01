@@ -2,6 +2,7 @@ import csv
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -128,6 +129,45 @@ class PostprocessTests(unittest.TestCase):
                     calibration['tracked_point_offset'] = invalid
                     with self.assertRaisesRegex(ValueError, 'tracked_point_offset'):
                         post.validate_calibration(calibration)
+
+    def test_start_pose_recorded_at_collection_is_used_when_not_given(self):
+        recorded = [.4, -.1, .3, .2, -.4, .1]
+        with tempfile.TemporaryDirectory() as directory:
+            config, raw, *_ = self.fixture(Path(directory))
+            metadata = json.loads(raw.metadata_path.read_text())
+            raw.metadata_path.write_text(json.dumps(dict(metadata, piper=dict(start_pose=recorded))))
+            summary = post.process_episode(config, raw)
+            np.testing.assert_allclose(load_piper_stream(Path(summary['piper_csv']))[1][0], recorded, atol=1e-10)
+            self.assertEqual(resolve_piper_source(raw.path)[1], 'piper_base')
+            processing = json.loads(Path(summary['metadata']).read_text())
+            self.assertEqual(processing['piper_start_pose'], recorded)
+
+    def test_absolute_mode_keeps_controller_position_and_rejects_far_starts(self):
+        start = (.4, -.1, .3, .2, -.4, .1)
+        with tempfile.TemporaryDirectory() as directory:
+            config, raw, qxyz, rq, a, b = self.fixture(Path(directory), start_pose=start)
+            calibration = json.loads(config.calibration_json.read_text())
+            offset = np.array([-.09, .03, -.04])
+            origin = np.array(start[:3]) - qxyz[0] @ a.T + np.array([.02, -.01, .03])  # hand 20/-10/30 mm off
+            calibration.update(tracked_point_offset=dict(vector=offset.tolist(), frame='piper_flange'),
+                               position_offset=origin.tolist())
+            config.calibration_json.write_text(json.dumps(calibration))
+            config = replace(config, absolute=True)
+            summary = post.process_episode(config, raw)
+            rp0 = Rotation.from_euler('xyz', start[3:]).as_matrix()
+            mapped_r = b @ (rq.as_matrix() @ rq.as_matrix()[0].T) @ b.T @ rp0
+            expected = qxyz @ a.T + mapped_r @ offset + origin
+            poses = load_piper_stream(Path(summary['piper_csv']))[1]
+            np.testing.assert_allclose(poses[:, :3], expected, atol=1e-10)
+            np.testing.assert_allclose(Rotation.from_euler('xyz', poses[0, 3:]).as_matrix(), rp0, atol=1e-10)
+            processing = json.loads(Path(summary['metadata']).read_text())
+            self.assertEqual(processing['position_mapping'], 'absolute_calibration_origin')
+            np.testing.assert_allclose(processing['first_pose_offset_from_start_m'],
+                                       expected[0] - start[:3], atol=1e-10)
+
+            far = replace(config, max_start_offset_mm=10.0, overwrite_processed_files=True)
+            with self.assertRaisesRegex(ValueError, 'Quest tracking frame'):
+                post.process_episode(far, raw)
 
     def test_replay_default_anchors_processed_and_raw_flag_preserves_raw_behavior(self):
         with tempfile.TemporaryDirectory() as directory:

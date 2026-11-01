@@ -311,6 +311,16 @@ class EpisodeBuffer:
                     if has_piper and getattr(self.config, "piper_joint_level", False)
                     else []
                 ),
+                "start_joints_deg": (
+                    list(self.config.piper_start_joints_deg)
+                    if getattr(self.config, "piper_start_joints_deg", None) is not None
+                    else None
+                ),
+                "start_pose": (
+                    list(self.config.piper_start_pose)
+                    if getattr(self.config, "piper_start_pose", None) is not None
+                    else None
+                ),
             },
             "quest": {
                 "mode": "udp_pose_logging" if has_quest else None,

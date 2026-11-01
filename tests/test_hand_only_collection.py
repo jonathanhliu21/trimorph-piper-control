@@ -295,6 +295,27 @@ class HandOnlyCollectionTests(unittest.TestCase):
 
         self.assertTrue(run.call_args.args[0].use_piper)
 
+    def test_piper_start_pose_options_are_copied_to_config(self):
+        joints = ["-17.8", "112.3", "-73.9", "45", "-39.4", "25"]
+        with (
+            patch("sys.argv", ["collect_hand_only.py", "--use-quest", "--piper-start-joints-deg", *joints]),
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+        self.assertEqual(run.call_args.args[0].piper_start_joints_deg, tuple(map(float, joints)))
+        self.assertEqual(run.call_args.args[0].piper_start_speed_deg_s, 10.0)
+
+        with (
+            patch("sys.argv", ["collect_hand_only.py", "--piper-start-home"]),
+            patch("scripts.teleop.quest_teleop.saved_home_deg", return_value=(1, 2, 3, 4, 5, 6)),
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+        self.assertEqual(run.call_args.args[0].piper_start_joints_deg, (1, 2, 3, 4, 5, 6))
+
+        with patch("sys.argv", ["collect_hand_only.py"]):
+            self.assertIsNone(parse_args().piper_start_joints_deg)
+
     def test_tactile_options_are_opt_in(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
             args = parse_args()
@@ -410,6 +431,29 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertEqual(metadata["piper"]["mode"], "passive_drag_teach_logging")
             self.assertEqual(metadata["piper"]["target_rate_hz"], 250.0)
             self.assertEqual(metadata["counts"]["piper_samples"], 1)
+            self.assertIsNone(metadata["piper"]["start_pose"])
+
+    def test_piper_start_pose_is_recorded_in_metadata(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = HandOnlyCollectionConfig(
+                dataset_root=Path(temp_dir),
+                hand_config=Path("config/hand.yaml"),
+                hand_port="/dev/hand",
+                hand_measure_rate_hz=100.0,
+                warmup_time=0.0,
+                episode_time=30.0,
+                use_quest=True,
+                piper_start_joints_deg=(-17.8, 112.3, -73.9, 45.0, -39.4, 25.0),
+                piper_start_pose=(0.41, -0.18, 0.25, 1.63, 0.5, 0.82),
+            )
+            recorder = RecordingManager()
+            session = start_episode(config, recorder)
+            with patch("data_collection.collection.episode._hand_metadata", return_value={}):
+                stop_episode(recorder, "duration_complete")
+
+            metadata = json.loads(session.paths.metadata_path.read_text())
+            self.assertEqual(metadata["piper"]["start_joints_deg"], [-17.8, 112.3, -73.9, 45.0, -39.4, 25.0])
+            self.assertEqual(metadata["piper"]["start_pose"], [0.41, -0.18, 0.25, 1.63, 0.5, 0.82])
 
     def test_quest_csv_and_metadata_are_written_only_when_enabled(self):
         with tempfile.TemporaryDirectory() as temp_dir:

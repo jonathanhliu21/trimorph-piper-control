@@ -4,9 +4,11 @@
     python data_collection/postprocess_dataset.py data_trimorph_quest --episode 0
         --calibration-json calibration.json --no-camera
 
-Quest conversion uses relative XYZ and rotation mappings. Without an explicit
---piper-start-pose the result starts at zero/identity and is marked relative;
-replay anchors this motion at the measured Piper pose. Raw files are preserved.
+Quest conversion uses relative XYZ and rotation mappings. The start pose is
+--piper-start-pose, else the one recorded by collect_hand_only.py
+--piper-start-joints-deg; without either the result starts at zero/identity and
+is marked relative, and replay anchors this motion at the measured Piper pose.
+Raw files are preserved.
 """
 from __future__ import annotations
 
@@ -34,6 +36,8 @@ class PostprocessConfig(base.PostprocessConfig):
     calibration_json: Path | None = None
     no_camera: bool = False
     piper_start_pose: tuple[float, ...] | None = None
+    absolute: bool = False
+    max_start_offset_mm: float = 150.0
 
 
 def processed_episode_dir(episode_dir: Path) -> Path:
@@ -56,10 +60,10 @@ def validate_calibration(calibration):
     tracked_point_offset(calibration)
 
 
-def convert_quest(episode, calibration, start_pose=None):
-    if tracked_point_offset(calibration) is not None and start_pose is None:
-        raise ValueError("Tracked-point offset calibration requires --piper-start-pose with the actual "
-                         "Piper starting XYZ/roll/pitch/yaw; the correction depends on flange orientation")
+def convert_quest(episode, calibration, start_pose=None, absolute=False, max_start_offset_mm=150.0):
+    if (absolute or tracked_point_offset(calibration) is not None) and start_pose is None:
+        raise ValueError("Tracked-point offset calibration and --absolute require --piper-start-pose with the "
+                         "actual Piper starting XYZ/roll/pitch/yaw; the correction depends on flange orientation")
     path = episode.path / "quest.csv"
     rows = base.read_csv_rows(path)
     if not rows:
@@ -78,6 +82,22 @@ def convert_quest(episode, calibration, start_pose=None):
     xyz, quats = transform_chunk(poses[:, :3], poses[:, 3:], start[:3],
                                 Rotation.from_euler("xyz", start[3:]).as_quat(), calibration)
     rotations = Rotation.from_quat(quats)
+    start_offset = None
+    if absolute:
+        # Keep where the controller actually was: p = A q + R l + c with the calibration's origin c,
+        # instead of pinning the first sample to the start pose. Orientation stays relative to it.
+        from scripts.teleop.quest_replay import calibration_origin
+
+        origin, _spread = calibration_origin(calibration)
+        lever = tracked_point_offset(calibration)
+        xyz = (poses[:, :3] @ np.asarray(calibration["linear_matrix"], float).T + origin
+               + (rotations.apply(lever) if lever is not None else 0.0))
+        start_offset = xyz[0] - start[:3]
+        if 1000 * np.linalg.norm(start_offset) > max_start_offset_mm:
+            raise ValueError(
+                f"Absolute first pose is {1000 * np.linalg.norm(start_offset):.0f} mm from the Piper start pose "
+                f"(limit {max_start_offset_mm:g} mm, --max-start-offset-mm); the Quest tracking frame has "
+                "probably changed since calibration, so recalibrate or process without --absolute")
     # Equivalent continuous Euler representations reduce +/-pi replay discontinuities.
     rpy = np.unwrap(rotations.as_euler("xyz"), axis=0)
     metadata = base.read_json(episode.metadata_path)
@@ -91,7 +111,7 @@ def convert_quest(episode, calibration, start_pose=None):
         row.update({key: float(value) for key, value in zip(base.RAW_EEF_FIELDS, [*position, *angles])})
         converted.append(row)
     eef = np.column_stack((xyz, rotations.as_rotvec())).astype(np.float32)
-    return converted, eef, stamps
+    return converted, eef, stamps, start_offset
 
 
 def validate_outputs(out, replay_csv, no_camera):
@@ -140,11 +160,15 @@ def process_episode(config, episode):
             raise FileExistsError(f"Outputs already exist; use -f to overwrite: {existing}")
     hand, hand_ns = base.load_leader_hand(episode)
     calibration = None
+    start_offset = None
+    # Collection with --piper-start-joints-deg records the arm's measured start pose.
+    start_pose = config.piper_start_pose or (metadata.get("piper") or {}).get("start_pose")
     if config.calibration_json is not None:
         calibration = base.read_json(config.calibration_json)
         validate_calibration(calibration)
-        converted, eef, eef_ns = convert_quest(episode, calibration, config.piper_start_pose)
-        pose_frame = "relative_to_episode_start" if config.piper_start_pose is None else "piper_base"
+        converted, eef, eef_ns, start_offset = convert_quest(
+            episode, calibration, start_pose, config.absolute, config.max_start_offset_mm)
+        pose_frame = "relative_to_episode_start" if start_pose is None else "piper_base"
     else:
         eef, eef_ns = base.load_piper(episode)
         converted = base.read_csv_rows(episode.piper_path)
@@ -175,7 +199,10 @@ def process_episode(config, episode):
         sync_reference="hand" if config.no_camera else "camera",
         max_sync_error_s=config.max_sync_error_s,
         trim_camera_frames=0 if config.no_camera else config.trim_camera_frames,
-        piper_start_pose=list(config.piper_start_pose) if config.piper_start_pose is not None else None,
+        piper_start_pose=list(start_pose) if start_pose is not None else None,
+        position_mapping=("absolute_calibration_origin" if config.absolute
+                          else "relative_to_start_pose" if calibration is not None else None),
+        first_pose_offset_from_start_m=start_offset.tolist() if start_offset is not None else None,
         calibration_json=str(config.calibration_json.resolve()) if config.calibration_json else None,
         calibration_sha256=hashlib.sha256(config.calibration_json.read_bytes()).hexdigest() if config.calibration_json else None,
         quest_start_position=([float(quest_first[key]) for key in ("px", "py", "pz")]
@@ -202,6 +229,9 @@ def process_episode(config, episode):
                    hand=str(out.hand_path), eef=str(out.eef_path), sync=str(out.sync_path),
                    piper_csv=str(replay_csv), metadata=str(processing_path), pose_frame=pose_frame)
     print(f"Processed {episode.name}: {len(hand)} hand samples, {len(eef)} EEF samples; {pose_frame}.")
+    if start_offset is not None:
+        print(f"  Absolute first pose is {np.round(1000 * start_offset, 1).tolist()} mm "
+              f"({1000 * np.linalg.norm(start_offset):.1f} mm) from the Piper start pose.")
     return summary
 
 
@@ -214,6 +244,12 @@ def main():
     parser.add_argument("--no-camera", action="store_true", help="Skip all camera reads, copies, and validation")
     parser.add_argument("--piper-start-pose", nargs=6, type=float, metavar=("X", "Y", "Z", "ROLL", "PITCH", "YAW"),
                         help="Absolute Piper starting pose (radians); otherwise Quest output is relative")
+    parser.add_argument("--absolute", action="store_true",
+                        help="Keep the controller's actual position (calibration origin) instead of starting the "
+                             "trajectory at the Piper start pose; needs the calibration's Quest tracking session")
+    parser.add_argument("--max-start-offset-mm", type=float, default=150.0,
+                        help="With --absolute, reject episodes whose first pose is farther than this from the "
+                             "Piper start pose (a changed Quest tracking frame; default: %(default)s)")
     parser.add_argument("--max-sync-error-s", type=float, default=base.MAX_SYNC_ERROR_S)
     parser.add_argument("--trim-camera-frames", type=int, default=base.TRIM_CAMERA_FRAMES)
     parser.add_argument("-f", "--force", action="store_true")
@@ -222,10 +258,15 @@ def main():
         parser.error("--max-sync-error-s must be finite and positive")
     if args.piper_start_pose is not None and (args.calibration_json is None or not np.isfinite(args.piper_start_pose).all()):
         parser.error("--piper-start-pose requires --calibration-json and finite values")
+    if args.absolute and args.calibration_json is None:
+        parser.error("--absolute requires --calibration-json")
+    if not np.isfinite(args.max_start_offset_mm) or args.max_start_offset_mm <= 0:
+        parser.error("--max-start-offset-mm must be finite and positive")
     root = args.dataset_root.expanduser()
     config = PostprocessConfig(root, root / "raw", args.force, {"complete"}, args.max_sync_error_s,
                                args.trim_camera_frames, args.calibration_json.expanduser() if args.calibration_json else None,
-                               args.no_camera, tuple(args.piper_start_pose) if args.piper_start_pose is not None else None)
+                               args.no_camera, tuple(args.piper_start_pose) if args.piper_start_pose is not None else None,
+                               args.absolute, args.max_start_offset_mm)
     base.validate_config(config)
     episodes = base.discover_raw_episodes(config)
     if args.episode is not None:

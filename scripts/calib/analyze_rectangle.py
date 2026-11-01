@@ -18,7 +18,15 @@ dwell), per-loop RMSE, corner repeatability across loops, and edge lengths
 measured from corner means. Piper FK is the joint-feedback FK (fk_* columns);
 FK vs commanded tracking is reported as displacement from the start, and the
 firmware-reported pose (fw_*) is compared against joint FK.
-Outputs summary.json and analysis.png in the run directory. Residuals are
+
+Every source (FK, Vicon, Quest) is also scored against the commanded path
+(summary.json "vs_commanded", vs_commanded.png): trackers keep their latency
+from the FK alignment, then each source gets its own rigid fit to the
+commanded positions over the settled corner holds, and RMSE is reported
+settled, moving, per loop and as per-corner bias. Record Vicon and Quest in
+the same run (both mounted on the flange) to compare all three on one motion.
+
+Outputs summary.json, analysis.png and vs_commanded.png in the run directory. Residuals are
 training errors of the alignment fit: they combine FK error, tracker noise,
 and any residual timing mismatch.
 """
@@ -97,8 +105,55 @@ def align_tracker(t_src, src_mm, t_ref, ref_mm, lags_s):
     if best is None:
         raise ValueError("Tracker and Piper logs do not overlap")
     _error, lag, rotation, translation = best
-    aligned = resample(t_src, src_mm, t_ref + lag) @ rotation.T + translation
-    return aligned, lag, rotation, translation
+    sampled = resample(t_src, src_mm, t_ref + lag)
+    return sampled @ rotation.T + translation, sampled, lag, rotation, translation
+
+
+def compare_to_commanded(sources, cmd_mm, in_dwell, loop_of, loops, frame, windows, t_fk, corners_mm):
+    """Score every source against the commanded path with the same treatment.
+
+    Each source (FK in the Piper frame, trackers in their own frame, already
+    shifted by their latency relative to FK) gets its own rigid fit to the
+    commanded positions over the settled corner holds only, so the arm lagging
+    the moving target does not bias the alignment. Errors are then measured
+    over all samples; moving errors include that lag, which is real tracking
+    error the arm has whichever sensor observes it.
+    """
+    results, aligned = {}, {}
+    names = [AXIS_NAMES[axis] for axis in frame]
+    for name, values in sources.items():
+        ok = np.isfinite(values).all(axis=1)
+        fit = ok & in_dwell
+        fit_on = "dwell"
+        if fit.sum() < 100:
+            fit, fit_on = ok, "all"
+        rotation, translation = fit_rigid(values[fit], cmd_mm[fit])
+        moved = values @ rotation.T + translation
+        error = moved - cmd_mm
+        dwell, moving = ok & in_dwell, ok & ~in_dwell
+        corner_errors = {}
+        for _loop, corner, w0, w1 in windows:
+            mask = (t_fk >= w0) & (t_fk <= w1) & ok
+            if mask.any():
+                corner_errors.setdefault(corner, []).append(moved[mask].mean(axis=0) - corners_mm[corner])
+        corner_bias = {str(corner): float(np.linalg.norm(np.mean(items, axis=0)))
+                       for corner, items in sorted(corner_errors.items())}
+        results[name] = {
+            "fit_on": fit_on, "coverage": float(ok.mean()),
+            "fit_rotation_deg": float(np.degrees(np.arccos(np.clip((np.trace(rotation) - 1) / 2, -1, 1)))),
+            "rmse_mm": rmse(error[ok]),
+            "dwell_rmse_mm": rmse(error[dwell]),
+            "dwell_max_mm": float(np.linalg.norm(error[dwell], axis=1).max()) if dwell.any() else float("nan"),
+            "moving_rmse_mm": rmse(error[moving]),
+            "moving_max_mm": float(np.linalg.norm(error[moving], axis=1).max()) if moving.any() else float("nan"),
+            "dwell_axis_rmse_mm": dict(zip(names, np.sqrt(np.mean(error[dwell][:, frame]**2, axis=0)).tolist())),
+            "per_loop_dwell_rmse_mm": [rmse(error[dwell & (loop_of == loop)]) for loop in range(loops)],
+            "per_loop_moving_rmse_mm": [rmse(error[moving & (loop_of == loop)]) for loop in range(loops)],
+            "corner_bias_mm": corner_bias,
+            "corner_errors_mm": {str(corner): np.array(items).tolist() for corner, items in sorted(corner_errors.items())},
+        }
+        aligned[name] = moved
+    return results, aligned
 
 
 def dwell_windows(commands, t_cmd):
@@ -218,6 +273,7 @@ def analyze(run_dir, max_lag_s, lag_step_s):
         in_dwell |= (t_fk >= w0) & (t_fk <= w1)
 
     series = {"fk": fk}
+    raw = {"fk": fk}
     summary = {"run": str(run_dir), "plane": meta["plane"], "status": meta.get("status"),
                "loops": int(loop_of.max()) + 1, "frame_axes": [AXIS_NAMES[axis] for axis in frame],
                "units": "mm", "trackers": {}}
@@ -247,7 +303,7 @@ def analyze(run_dir, max_lag_s, lag_step_s):
         stamps, unique = np.unique(stamps, return_index=True)
         t_src = stamps / 1e9
         src = scale * np.column_stack([column(rows, field) for field in fields])[unique]
-        aligned, lag, rotation, translation = align_tracker(t_src, src, t_fk, fk, lags)
+        aligned, raw[name], lag, rotation, translation = align_tracker(t_src, src, t_fk, fk, lags)
         ok = np.isfinite(aligned).all(axis=1)
         residual = aligned - fk
         per_loop = [rmse(residual[ok & (loop_of == loop)]) for loop in range(summary["loops"])]
@@ -280,27 +336,36 @@ def analyze(run_dir, max_lag_s, lag_step_s):
     summary["per_loop"] = per_loop_table(summary, series, fk_error, loop_of, corner_means)
     summary["commanded_edge_lengths_mm"] = [float(np.linalg.norm(1000 * np.subtract(meta["corners"][(k + 1) % 4], meta["corners"][k])))
                                             for k in range(4)]
+    corners_mm = 1000 * (np.array(meta["corners"]) - np.array(meta["start_pose"][:3])) + start_mm
+    summary["vs_commanded"], on_cmd = compare_to_commanded(raw, cmd_on_fk, in_dwell, loop_of, summary["loops"],
+                                                           frame, windows, t_fk, corners_mm)
 
     plot(run_dir, summary, t_fk - t0, series, cmd_on_fk, start_mm, frame, loop_of, corner_means)
+    plot_vs_commanded(run_dir, summary, t_fk - t0, on_cmd, cmd_on_fk, frame, loop_of)
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     return summary
 
 
-def plot(run_dir, summary, t, series, cmd, start_mm, frame, loop_of, corner_means):
+def _figure(rows, cols, figsize):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    names = [AXIS_NAMES[axis] for axis in frame]
-    local = {key: (values - start_mm)[:, frame] for key, values in {**series, "cmd": cmd}.items()}
-    trackers = [name for name in series if name != "fk"]
     plt.rcParams.update({"axes.spines.top": False, "axes.spines.right": False, "axes.grid": True,
                          "grid.color": "#e4e3df", "grid.linewidth": 0.6, "axes.edgecolor": "#8a8984",
                          "axes.labelcolor": "#52514e", "xtick.color": "#52514e", "ytick.color": "#52514e",
                          "font.size": 9})
-    figure, axes = plt.subplots(2, 2, figsize=(12, 10), facecolor="#fcfcfb")
+    figure, axes = plt.subplots(rows, cols, figsize=figsize, facecolor="#fcfcfb")
     for axis in axes.flat:
         axis.set_facecolor("#fcfcfb")
+    return plt, figure, axes
+
+
+def plot(run_dir, summary, t, series, cmd, start_mm, frame, loop_of, corner_means):
+    names = [AXIS_NAMES[axis] for axis in frame]
+    local = {key: (values - start_mm)[:, frame] for key, values in {**series, "cmd": cmd}.items()}
+    trackers = [name for name in series if name != "fk"]
+    plt, figure, axes = _figure(2, 2, (12, 10))
 
     ax = axes[0, 0]
     for name in (*trackers, "fk"):
@@ -368,6 +433,69 @@ def plot(run_dir, summary, t, series, cmd, start_mm, frame, loop_of, corner_mean
     plt.close(figure)
 
 
+def plot_vs_commanded(run_dir, summary, t, on_cmd, cmd, frame, loop_of):
+    results = summary["vs_commanded"]
+    names = [AXIS_NAMES[axis] for axis in frame]
+    sources = list(results)
+    plt, figure, axes = _figure(2, 2, (12, 9))
+
+    ax = axes[0, 0]
+    for name in sources:
+        ax.plot(t, np.linalg.norm(on_cmd[name] - cmd, axis=1), color=COLORS[name], lw=0.8, alpha=0.8,
+                label=f"{LABELS[name]} (dwell RMSE {results[name]['dwell_rmse_mm']:.2f} mm)")
+    for boundary in t[np.flatnonzero(np.diff(loop_of)) + 1]:
+        ax.axvline(boundary, color="#d6d5d0", lw=0.6, zorder=0)
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel("Time (s); vertical lines mark loop starts")
+    ax.set_ylabel("Distance from commanded position (mm)")
+    ax.set_title("Error vs commanded over time", loc="left")
+    ax.legend(frameon=False, loc="upper left")
+
+    ax = axes[0, 1]
+    width = 0.8 / len(sources)
+    for index, name in enumerate(sources):
+        values = [results[name]["dwell_rmse_mm"], results[name]["moving_rmse_mm"]]
+        bars = ax.bar(np.arange(2) + (index - (len(sources) - 1) / 2) * width, values, width * 0.92,
+                      color=COLORS[name], label=LABELS[name])
+        ax.bar_label(bars, fmt="%.2f", padding=2, color="#52514e", fontsize=8)
+    ax.set_xticks(np.arange(2), ["Settled at corners", "Moving along edges"])
+    ax.grid(axis="x", visible=False)
+    ax.set_ylabel("RMSE vs commanded (mm)")
+    ax.set_title("RMSE vs commanded", loc="left")
+    ax.legend(frameon=False, loc="upper left")
+
+    ax = axes[1, 0]
+    loops = np.arange(1, summary["loops"] + 1)
+    for name in sources:
+        ax.plot(loops, results[name]["per_loop_dwell_rmse_mm"], color=COLORS[name], lw=2, marker="o", ms=5,
+                label=LABELS[name])
+    ax.set_xticks(loops)
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel("Loop (trial)")
+    ax.set_ylabel("Settled RMSE vs commanded (mm)")
+    ax.set_title("Per-trial settled RMSE vs commanded", loc="left")
+    ax.legend(frameon=False, loc="lower right")
+
+    ax = axes[1, 1]
+    for name in sources:
+        points = np.concatenate([np.array(items) for items in results[name]["corner_errors_mm"].values()])
+        ax.scatter(points[:, frame[0]], points[:, frame[1]], s=22, color=COLORS[name], alpha=0.75,
+                   edgecolors="#fcfcfb", linewidths=1, label=LABELS[name])
+    ax.axhline(0, color="#8a8984", lw=0.6)
+    ax.axvline(0, color="#8a8984", lw=0.6)
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_xlabel(f"{names[0]} error at corner (mm)")
+    ax.set_ylabel(f"{names[1]} error at corner (mm)")
+    ax.set_title("Settled corner position minus commanded corner (every visit)", loc="left")
+    ax.legend(frameon=False, loc="best")
+
+    figure.suptitle(f"{' / '.join(LABELS[name] for name in sources)} vs commanded: {run_dir.name}\n"
+                    "Each source rigidly aligned to the commanded path on settled holds", x=0.01, ha="left", fontsize=12)
+    figure.tight_layout()
+    figure.savefig(run_dir / "vs_commanded.png", dpi=150, facecolor=figure.get_facecolor())
+    plt.close(figure)
+
+
 def print_per_loop(summary):
     trackers = list(summary["trackers"])
     header = f"{'loop':>4} {'FK-cmd':>7}"
@@ -417,6 +545,19 @@ def print_summary(summary):
                   f"({'/'.join(summary['frame_axes'])})")
 
 
+def print_vs_commanded(summary):
+    axes = "/".join(summary["frame_axes"])
+    print("Vs commanded (each source rigidly aligned to the commanded path on settled holds; mm):")
+    print(f"{'source':>9} {'settled':>8} {'max':>6} {'moving':>8} {'max':>6} {'overall':>8}"
+          f"  {'settled ' + axes:>20}  {'corner bias 0/1/2/3':>23} {'cov%':>6}")
+    for name, info in summary["vs_commanded"].items():
+        per_axis = "/".join(f"{value:.2f}" for value in info["dwell_axis_rmse_mm"].values())
+        bias = "/".join(f"{value:.2f}" for value in info["corner_bias_mm"].values())
+        print(f"{LABELS[name]:>9} {info['dwell_rmse_mm']:8.3f} {info['dwell_max_mm']:6.2f} "
+              f"{info['moving_rmse_mm']:8.3f} {info['moving_max_mm']:6.2f} {info['rmse_mm']:8.3f}"
+              f"  {per_axis:>20}  {bias:>23} {100 * info['coverage']:6.1f}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run_dir", type=Path)
@@ -428,7 +569,8 @@ def main(argv=None):
     summary = analyze(args.run_dir, args.max_lag_s, args.lag_step_s)
     print_per_loop(summary)
     print_summary(summary)
-    print(f"Wrote {args.run_dir / 'summary.json'} and {args.run_dir / 'analysis.png'}")
+    print_vs_commanded(summary)
+    print(f"Wrote {args.run_dir / 'summary.json'}, {args.run_dir / 'analysis.png'} and {args.run_dir / 'vs_commanded.png'}")
     return 0
 
 

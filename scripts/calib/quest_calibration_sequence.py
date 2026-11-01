@@ -51,20 +51,17 @@ if __package__ in (None, ""):
 
 from data_collection.collection import config as defaults  # noqa: E402
 from scripts.calib.rectangle_repeatability import (  # noqa: E402
-    PIPER_FIELDS, MOCAP_FIELDS, QUEST_FIELDS, PLANES, POSITION_MODE_SETTLE_S,
+    DEFAULT_HOME_DEG, JOINT_STEP_LIMIT_RAD, PIPER_FIELDS, MOCAP_FIELDS, QUEST_FIELDS, PLANES, POSITION_MODE_SETTLE_S,
     MocapRelay, PiperLogger, QuestReceiver, git_commit, joint_fk, write_csv,
 )
 from scripts.piper_api.piper_api import PiperAPI  # noqa: E402
 from scripts.piper_api.replay_trajectory import command_bounded_joint_step, read_joint_angles  # noqa: E402
 
-# Last good pose from the 2026-10-31 rectangle runs (J5 well clear of 0 and its limits).
-DEFAULT_HOME_DEG = (2.4, 161.4, -91.8, -8.1, 25.6, 105.0)
 JOINT_FIELDS = tuple(f"joint_{joint}" for joint in range(1, 7))
 COMMAND_FIELDS = ("monotonic_ns", "segment", "label", "mode",
                   *defaults.RAW_EEF_FIELDS, *(f"cmd_{name}" for name in JOINT_FIELDS))
 # Two incommensurate frequencies per joint (Hz at --dynamic-speed 1); amplitudes split between them.
 DYNAMIC_FREQUENCIES_HZ = ((0.11, 0.29), (0.13, 0.31), (0.17, 0.37), (0.19, 0.41), (0.23, 0.43), (0.07, 0.47))
-JOINT_STEP_LIMIT_RAD = 0.05
 HOME_TOLERANCE_DEG = 1.0
 HOME_SETTLE_S = 1.0
 SEGMENT_HOLD_S = 1.0
