@@ -28,13 +28,23 @@ POSITION_TYPE = "vicon_receiver/msg/Position"
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--mocap-topic", default="/vicon/Yori/Yori")
+    parser.add_argument("--mocap-topic", dest="mocap_topics", action="append",
+                        help="Topic to relay (repeatable); default /vicon/Yori/Yori, or every "
+                             "supported topic with --raw-rows")
+    parser.add_argument("--raw-rows", action="store_true",
+                        help="Relay complete mocap CSV rows (poses and markers) for the "
+                             "collection/replay recorders instead of the compact pose lines")
     args = parser.parse_args()
+    topics = args.mocap_topics or ([] if args.raw_rows else ["/vicon/Yori/Yori"])
 
     out = sys.stdout
     sys.stdout = sys.stderr  # MocapSubscriber prints status lines.
 
     def on_row(row):
+        if args.raw_rows:
+            out.write(json.dumps(row) + "\n")
+            out.flush()
+            return
         if row["message_type"] != POSITION_TYPE:
             return
         out.write(json.dumps({
@@ -44,7 +54,7 @@ def main():
         }) + "\n")
         out.flush()
 
-    subscriber = MocapSubscriber(on_row, [args.mocap_topic])
+    subscriber = MocapSubscriber(on_row, topics)
     try:
         while True:
             subscriber.poll()

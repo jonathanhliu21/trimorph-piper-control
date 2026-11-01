@@ -361,6 +361,12 @@ def parse_args() -> argparse.Namespace:
         default=PIPER_REPLAY_SPEED_PERCENT,
         help="Piper speed during replay (default: %(default)s%%).",
     )
+    parser.add_argument(
+        "--playback-speed",
+        type=float,
+        default=1.0,
+        help="Replay time scale for hand and arm together: 1 = recorded speed, 0.2 = five times slower.",
+    )
     parser.add_argument("--hand-only", action="store_true")
     parser.add_argument("--arm-only", action="store_true")
     parser.add_argument("--use-mocap", action="store_true", help="Record live ROS 2 Vicon data during replay.")
@@ -644,6 +650,7 @@ def replay_piper_commands(
 
     period_s = 1.0 / args.piper_rate_hz
     duration_s = end_s - start_s
+    playback_speed = getattr(args, "playback_speed", 1.0)
     tick = 0
     next_arm_diag_s = 0.0
     if args.joint_level:
@@ -654,7 +661,7 @@ def replay_piper_commands(
         wait_s = deadline - time.monotonic()
         if wait_s > 0 and stop_event.wait(wait_s):
             return
-        elapsed_s = min(max(time.monotonic() - wall_start, 0.0), duration_s)
+        elapsed_s = min(max(time.monotonic() - wall_start, 0.0) * playback_speed, duration_s)
         piper_target = sample_stream(*piper_stream, start_s + elapsed_s)
         if args.joint_level:
             command_bounded_joint_step(api, piper_target, args.max_joint_step_rad)
@@ -824,6 +831,8 @@ def main() -> int:
     for name in ("preposition_speed_percent", "replay_speed_percent"):
         if not 0 <= getattr(args, name) <= 100:
             raise ValueError(f"--{name.replace('_', '-')} must be between 0 and 100")
+    if not math.isfinite(args.playback_speed) or not 0 < args.playback_speed <= 1:
+        raise ValueError("--playback-speed must be greater than 0 and at most 1")
     if args.hand_only and args.arm_only:
         raise ValueError("--hand-only and --arm-only are mutually exclusive")
     if args.output_current is not None and args.arm_only:
@@ -988,13 +997,16 @@ def main() -> int:
         current_sample_period_s = 1.0 / CURRENT_TELEMETRY_HZ
         next_current_sample_s = 0.0
         wall_start = time.monotonic()
+        wall_duration_s = (end_s - start_s) / args.playback_speed
         if mocap_recorder is not None:
-            mocap_recorder.start(wall_start, end_s - start_s)
+            mocap_recorder.start(wall_start, wall_duration_s)
         if video_recorder is not None:
-            video_recorder.start(wall_start, end_s - start_s)
+            video_recorder.start(wall_start, wall_duration_s)
         print(
             f"Replaying {episode_dir} from {start_s:.3f}s to {end_s:.3f}s "
-            f"(hand {args.rate_hz:.1f} Hz, Piper {args.piper_rate_hz:.1f} Hz)."
+            f"(hand {args.rate_hz:.1f} Hz, Piper {args.piper_rate_hz:.1f} Hz"
+            + (f", {args.playback_speed:g}x speed over {wall_duration_s:.1f}s" if args.playback_speed != 1 else "")
+            + ")."
         )
         if api is not None and piper_stream is not None:
             def run_arm() -> None:
@@ -1025,7 +1037,9 @@ def main() -> int:
                     time.sleep(sleep_s)
                 if arm_errors:
                     raise arm_errors[0]
-                replay_elapsed_s = min(max(time.monotonic() - wall_start, 0.0), duration_s)
+                replay_elapsed_s = min(
+                    max(time.monotonic() - wall_start, 0.0) * args.playback_speed, duration_s
+                )
                 episode_t = start_s + replay_elapsed_s
                 hand_target = hand.clip_positions(
                     sample_stream(*hand_stream, episode_t)

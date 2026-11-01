@@ -132,6 +132,76 @@ class MocapSubscriber:
             self.context.shutdown()
 
 
+class MocapRelay:
+    """MocapSubscriber run under the Foxy venv when this Python cannot load Foxy's rclpy.
+
+    The Piper/hand venv is Python 3.12 while Foxy's rclpy is built for 3.8, so the
+    subscriber runs as scripts/calib/mocap_stream.py --raw-rows in .venv-mocap and
+    sends its CSV rows as JSON lines. monotonic_ns is CLOCK_MONOTONIC, shared by
+    both processes, so rows stay synchronized with the hand and camera.
+    """
+
+    def __init__(self, on_row, topics=()) -> None:
+        import shlex
+        import subprocess
+
+        repo = Path(__file__).resolve().parents[4]
+        topic_args = "".join(f" --mocap-topic {shlex.quote(topic)}" for topic in topics)
+        # No positional args: a sourced script inherits the caller's $1 as its interface name.
+        script = ("source ros2/mocap_env.sh >&2 && exec .venv-mocap/bin/python -u "
+                  f"scripts/calib/mocap_stream.py --raw-rows{topic_args}")
+        self.on_row = on_row
+        self.rows_seen = 0
+        self.error = None
+        self.startup_timeout_s = 20.0  # sourcing ROS and DDS discovery take a few seconds
+        self.process = subprocess.Popen(["bash", "-c", script], cwd=repo, stdout=subprocess.PIPE, text=True)
+        self.thread = threading.Thread(target=self._read, name="mocap-relay", daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        import json
+
+        try:
+            for line in self.process.stdout:
+                self.on_row(json.loads(line))
+                self.rows_seen += 1
+        except Exception as exc:
+            self.error = exc
+
+    def ready(self):
+        return self.rows_seen > 0
+
+    def poll(self):
+        time.sleep(0.05)
+        if self.error is not None:
+            raise RuntimeError(f"Mocap relay failed: {self.error}") from self.error
+        if self.process.poll() is not None:
+            raise RuntimeError(f"Mocap relay exited with code {self.process.returncode}; see its stderr above")
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except Exception:
+                self.process.kill()
+
+
+def open_subscriber(on_row, topics=()):
+    """Subscribe in this process, or through MocapRelay when rclpy cannot be imported here."""
+    try:
+        return MocapSubscriber(on_row, topics)
+    except RuntimeError as exc:
+        if not isinstance(exc.__cause__, ImportError):
+            raise
+        print("[mocap_worker] rclpy is unavailable in this Python; relaying Vicon through .venv-mocap")
+        return MocapRelay(on_row, topics)
+
+
+def startup_timeout_s(subscriber) -> float:
+    return subscriber.startup_timeout_s if isinstance(subscriber, MocapRelay) else 10.0
+
+
 def run_mocap_worker(config, shared, recorder, *, init_done) -> None:
     sample_session = None
     sample_idx = 0
@@ -147,8 +217,8 @@ def run_mocap_worker(config, shared, recorder, *, init_done) -> None:
         session.append_mocap(row)
         sample_idx += 1
 
-    subscriber = MocapSubscriber(on_row, config.mocap_topics)
-    deadline = time.monotonic() + 10.0
+    subscriber = open_subscriber(on_row, config.mocap_topics)
+    deadline = time.monotonic() + startup_timeout_s(subscriber)
     try:
         while not shared.shutdown.is_set():
             subscriber.poll()
@@ -176,8 +246,8 @@ class ReplayMocapRecorder:
         self.error = None
 
     def prepare(self):
-        self.subscriber = MocapSubscriber(self.on_row, self.topics)
-        deadline = time.monotonic() + 10.0
+        self.subscriber = open_subscriber(self.on_row, self.topics)
+        deadline = time.monotonic() + startup_timeout_s(self.subscriber)
         while not self.subscriber.ready():
             self.subscriber.poll()
             if time.monotonic() >= deadline:

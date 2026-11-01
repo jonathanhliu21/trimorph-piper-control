@@ -1,4 +1,6 @@
 import csv
+import io
+import json
 import sys
 import tempfile
 import threading
@@ -103,6 +105,34 @@ class MocapTests(unittest.TestCase):
             subscriber.close.assert_called_once()
         self.assertEqual([call.args[0]["sample_idx"] for call in session_a.append_mocap.call_args_list], [0, 1])
         self.assertEqual(session_b.append_mocap.call_args.args[0]["sample_idx"], 0)
+
+    def test_missing_rclpy_falls_back_to_the_foxy_relay(self):
+        missing = RuntimeError("Mocap requires ROS 2 rclpy")
+        missing.__cause__ = ImportError("No module named 'rclpy._rclpy'")
+        on_row = MagicMock()
+        with patch.object(mocap, "MocapSubscriber", side_effect=missing), \
+                patch.object(mocap, "MocapRelay") as relay:
+            self.assertIs(mocap.open_subscriber(on_row, ["/vicon/Hand/Hand"]), relay.return_value)
+        relay.assert_called_once_with(on_row, ["/vicon/Hand/Hand"])
+        with patch.object(mocap, "MocapSubscriber", side_effect=RuntimeError("context failed")), \
+                patch.object(mocap, "MocapRelay") as relay, self.assertRaisesRegex(RuntimeError, "context failed"):
+            mocap.open_subscriber(on_row)
+        relay.assert_not_called()
+
+    def test_relay_forwards_json_rows_and_reports_exit(self):
+        rows = [{"monotonic_ns": 5, "topic": "/vicon/Hand/Hand"}, {"monotonic_ns": 6, "topic": "/vicon/Hand/Hand"}]
+        process = MagicMock(stdout=io.StringIO("".join(json.dumps(row) + "\n" for row in rows)))
+        process.poll.return_value = 1
+        received = []
+        with patch("subprocess.Popen", return_value=process) as popen:
+            relay = mocap.MocapRelay(received.append, ["/vicon/Hand/Hand"])
+            relay.thread.join(timeout=2)
+        self.assertIn("--raw-rows --mocap-topic /vicon/Hand/Hand", popen.call_args.args[0][2])
+        self.assertEqual(received, rows)
+        self.assertTrue(relay.ready())
+        self.assertEqual(mocap.startup_timeout_s(relay), 20.0)
+        with patch.object(mocap.time, "sleep"), self.assertRaisesRegex(RuntimeError, "exited"):
+            relay.poll()
 
     def test_worker_timeout_closes_subscription(self):
         with patch.object(mocap, "MocapSubscriber") as factory, patch.object(mocap.time, "monotonic", side_effect=[0., 11.]):

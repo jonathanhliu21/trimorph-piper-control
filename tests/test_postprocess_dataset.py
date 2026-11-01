@@ -169,6 +169,94 @@ class PostprocessTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Quest tracking frame'):
                 post.process_episode(far, raw)
 
+    def test_mocap_source_replays_the_flange_pose_of_the_calibrated_marker_plate(self):
+        start = (.4, -.1, .3, .2, -.4, .1)
+        w = Rotation.from_euler('zyx', [90, 2, -1], degrees=True)  # Vicon world -> Piper base
+        t_w = np.array([.1, -1.3, .8])
+        x = Rotation.from_euler('xyz', [180, 5, -90], degrees=True)  # flange in plate frame
+        t_x = np.array([-.069, .002, -.100])
+        # Flange-equivalent poses in Vicon world: a translation, then a 30 deg turn about the flange point.
+        f_world = Rotation.from_euler('xyz', [[0, 0, 0], [0, 0, 0], [30, 0, 0], [30, 10, 0]], degrees=True)
+        f_pos = np.array([[1.2, -.4, 1.25], [1.21, -.4, 1.25], [1.21, -.4, 1.25], [1.21, -.38, 1.24]])
+        plate_r = f_world * x.inv()
+        plate_pos = f_pos - plate_r.apply(t_x)
+        with tempfile.TemporaryDirectory() as directory:
+            config, raw, *_ = self.fixture(Path(directory), start_pose=start)
+            calibration = json.loads(config.calibration_json.read_text())
+            calibration['vicon_reference'] = {'run': dict(
+                vicon_to_piper_rotation=w.as_matrix().tolist(), vicon_to_piper_translation_m=t_w.tolist(),
+                flange_in_vicon_body_rotation=x.as_matrix().tolist(), flange_in_vicon_body_translation_m=t_x.tolist())}
+            config.calibration_json.write_text(json.dumps(calibration))
+            pose = 'vicon_receiver/msg/Position'
+            rows = [dict(monotonic_ns=1_000_000_000 + i * 20_000_000, topic='/vicon/Yori/Yori', message_type=pose,
+                         **dict(zip(['x_trans', 'y_trans', 'z_trans', 'x_rot', 'y_rot', 'z_rot', 'w'], [*p, *q])))
+                    for i, (p, q) in enumerate(zip(1000 * plate_pos, plate_r.as_quat()))]
+            rows.insert(2, dict(rows[1], monotonic_ns=1_030_000_000, x_trans=0, y_trans=0, z_trans=0,
+                                x_rot=0, y_rot=0, z_rot=0, w=0))  # lost object
+            rows.append(dict(rows[0], topic='/vicon/Hand/Hand'))
+            rows.append(dict(monotonic_ns=1_000_000_000, topic='/vicon/markers',
+                             message_type='vicon_receiver/msg/MarkerPositions', x_trans=1, y_trans=2, z_trans=3))
+            fields = ['monotonic_ns', 'topic', 'message_type', 'x_trans', 'y_trans', 'z_trans', 'x_rot', 'y_rot', 'z_rot', 'w']
+            self.write_csv(raw.path / 'mocap.csv', fields, rows)
+
+            mocap = replace(config, pose_source='mocap', mocap_smooth_s=0)  # exact geometry, no filtering
+            with self.assertRaisesRegex(ValueError, '--mocap-topic'):
+                post.process_episode(mocap, raw)
+            mocap = replace(mocap, mocap_topic='/vicon/Yori/Yori')
+            summary = post.process_episode(mocap, raw)
+            poses = load_piper_stream(Path(summary['piper_csv']))[1]
+            flange_base = f_pos @ w.as_matrix().T + t_w
+            # Relative: the plate-to-flange offset is removed, so turning about the flange does not move it.
+            np.testing.assert_allclose(poses[:, :3], np.array(start[:3]) + flange_base - flange_base[0], atol=1e-6)
+            np.testing.assert_allclose(poses[1, :3], poses[2, :3], atol=1e-6)
+            r_base = w * f_world * Rotation.from_matrix(np.eye(3))
+            expected_r = (r_base * r_base[0].inv()).as_matrix() @ Rotation.from_euler('xyz', start[3:]).as_matrix()
+            np.testing.assert_allclose(Rotation.from_euler('xyz', poses[:, 3:]).as_matrix(), expected_r, atol=1e-6)
+            processing = json.loads(Path(summary['metadata']).read_text())
+            self.assertEqual((processing['source'], processing['mocap_topic']), ('mocap.csv', '/vicon/Yori/Yori'))
+
+            absolute = replace(mocap, absolute=True, overwrite_processed_files=True,
+                               max_start_offset_mm=1e6, max_start_rotation_deg=180)
+            summary = post.process_episode(absolute, raw)
+            poses = load_piper_stream(Path(summary['piper_csv']))[1]
+            np.testing.assert_allclose(poses[:, :3], flange_base, atol=1e-6)
+            np.testing.assert_allclose(Rotation.from_euler('xyz', poses[:, 3:]).as_matrix(),
+                                       (w * f_world).as_matrix(), atol=1e-6)
+            with self.assertRaisesRegex(ValueError, 'mount near the arm'):
+                post.process_episode(replace(absolute, max_start_offset_mm=150.0), raw)
+
+            del calibration['vicon_reference']
+            config.calibration_json.write_text(json.dumps(calibration))
+            with self.assertRaisesRegex(ValueError, 'reference mocap'):
+                post.process_episode(absolute, raw)
+
+    def test_vicon_smoothing_removes_orientation_flicks_and_keeps_slow_motion(self):
+        n = 300
+        t = np.arange(n) / 300.0
+        positions = np.column_stack([.1 * np.sin(2 * np.pi * t), np.zeros(n), np.zeros(n)])
+        rotations = Rotation.from_euler('z', (40 * np.sin(2 * np.pi * t))[:, None], degrees=True)
+        quats = rotations.as_quat()
+        quats[[50, 120, 121]] = Rotation.from_euler('x', 16, degrees=True).as_quat()  # marker flicks
+        quats[200:] *= -1  # equivalent sign flip must not be averaged away
+        smoothed_p, smoothed_q = post.smooth_poses(positions, quats, 1 / 300.0, 0.02)
+        error = np.degrees((Rotation.from_quat(smoothed_q) * rotations.inv()).magnitude())
+        self.assertLess(error[20:-20].max(), 1.0)  # ends: the test signal is already moving at t=0
+        np.testing.assert_allclose(smoothed_p[20:-20], positions[20:-20], atol=2e-3)
+        raw_p, raw_q = post.smooth_poses(positions, quats, 1 / 300.0, 0)
+        np.testing.assert_array_equal(raw_q, quats)
+
+    def test_vicon_frame_clock_undoes_bursty_delivery(self):
+        frames = np.arange(100, 400, dtype=np.int64)
+        true_ns = 5_000_000_000 + (frames - 100) * 3_333_333
+        latency = np.where((frames // 30) % 2 == 0, 2_000_000, 0)  # alternate on-time and bursty arrivals
+        receipt = true_ns + latency + (frames % 30) * 0  # bursts: same latency, then catch up
+        receipt[30:60] = receipt[60]  # 30 frames delivered at once
+        clock = post.frame_clock(frames, receipt)
+        steps = np.diff(clock)
+        self.assertLess(np.ptp(steps), 10_000)  # evenly spaced to within 10 us
+        self.assertAlmostEqual(np.median(steps) / 1e6, 3.33, delta=0.2)
+        self.assertLessEqual(np.percentile(receipt - clock, 5), 1)  # anchored at the earliest arrivals
+
     def test_replay_default_anchors_processed_and_raw_flag_preserves_raw_behavior(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

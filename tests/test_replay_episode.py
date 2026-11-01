@@ -31,6 +31,7 @@ from data_collection.replay_episode import (
     resolve_leader_hand_path,
     sample_stream,
     scale_hand_stream,
+    main,
     parse_args,
     output_current_csv,
     prepare_hand_stream_for_replay,
@@ -84,6 +85,42 @@ class ReplayEpisodeTests(unittest.TestCase):
             replay_piper_commands(api, stream, 0.0, 0.008, 0.0, args, FakeStop())
 
         np.testing.assert_allclose(api.targets, [[0.0] * 6, [4.0] * 6, [8.0] * 6])
+
+    def test_piper_replay_playback_speed_stretches_the_episode_clock(self):
+        clock = SimpleNamespace(now=0.0)
+
+        class FakeStop:
+            def is_set(self):
+                return False
+
+            def wait(self, seconds):
+                clock.now += seconds
+                return False
+
+        class FakeAPI:
+            def __init__(self):
+                self.targets = []
+
+            def move_eef(self, target):
+                self.targets.append(target.copy())
+
+        api = FakeAPI()
+        args = SimpleNamespace(piper_rate_hz=250.0, joint_level=False, arm_diag=False, playback_speed=0.5)
+        stream = (np.asarray([0.0, 0.008]), np.asarray([[0.0] * 6, [8.0] * 6]))
+        with patch("data_collection.replay_episode.time.monotonic", side_effect=lambda: clock.now):
+            replay_piper_commands(api, stream, 0.0, 0.008, 0.0, args, FakeStop())
+
+        # Half speed: the 8 ms episode takes 16 ms, so 250 Hz ticks land every 2 ms of episode time.
+        np.testing.assert_allclose(api.targets, [[0.0] * 6, [2.0] * 6, [4.0] * 6, [6.0] * 6, [8.0] * 6])
+        self.assertAlmostEqual(clock.now, 0.016)
+
+    def test_playback_speed_cli_defaults_to_recorded_speed_and_is_validated(self):
+        with patch("sys.argv", ["replay_episode.py"]):
+            self.assertEqual(parse_args().playback_speed, 1.0)
+        for value in ("0", "-0.5", "1.5", "nan"):
+            with self.subTest(value=value), patch("sys.argv", ["replay_episode.py", "--playback-speed", value]), \
+                    self.assertRaisesRegex(ValueError, "--playback-speed"):
+                main()
 
     def test_action_scale_is_a_module_constant(self):
         self.assertEqual(ACTION_SCALE, 1.0)

@@ -192,6 +192,21 @@ subject/segment/marker identifiers, all raw pose/marker fields, and:
 - `sample_idx`: sequential CSV row index; multiple markers in one message share
   timestamps but have separate row indices.
 
+When the running Python cannot import Foxy's `rclpy` (the Python 3.12 `.venv`),
+collection and replay start `scripts/calib/mocap_stream.py --raw-rows` under
+`.venv-mocap` after sourcing `ros2/mocap_env.sh`, and receive the same rows from it.
+
+To demonstrate with the Vicon marker plate of the calibration (the mount
+carried by hand) instead of the Quest, collect with `--use-mocap --mocap-topic
+/vicon/Yori/Yori` and postprocess with `--pose-source mocap --mocap-topic
+/vicon/Yori/Yori` and a calibration fitted with `fit_quest_calibration.py
+--reference mocap`. That calibration stores the Vicon-to-Piper transform and the
+plate-to-flange offset, so every sample becomes the pose the flange would have
+if the mount sat on the arm. Lost-object (all-zero) samples are dropped. Without
+`--absolute` the first sample is pinned to the recorded Piper start pose; with it
+the flange pose is replayed as measured, after checking that it starts within
+`--max-start-offset-mm` and `--max-start-rotation-deg` of the start pose.
+
 ROS timestamps may use a different clock from host receipt timestamps; no clock
 offset is estimated. An enabled recording with no samples still writes a CSV
 header. Without `--use-mocap`, no ROS imports, discovery, initialization, or
