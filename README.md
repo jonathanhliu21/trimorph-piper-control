@@ -554,3 +554,9 @@ python3 -m unittest discover -s tests
 These checks do not exercise hardware. Before a full run, perform a low-current
 open/mid/fist smoke test and compare the leader target, follower command, and
 follower measurement for every motor.
+
+## Learned policy inference
+
+See [inference/README.md](inference/README.md) for the GPU predictor, Trimorph/Piper
+executor, coordinate conventions, hardware-free link test, and timing limitations.
+The executor uses the sibling `trimorph_hand_api` checkout in leader coordinates.
