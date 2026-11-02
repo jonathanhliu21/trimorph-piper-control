@@ -67,8 +67,16 @@ def validate_calibration(calibration):
     tracked_point_offset(calibration)
 
 
+def controller_rotation(calibration):
+    """C with Rp = B Rq C (fit_quest_calibration.py), or None for calibrations fitted before it was saved."""
+    matrix = calibration.get("orientation", {}).get("controller_rotation", {}).get("matrix")
+    return None if matrix is None else Rotation.from_matrix(matrix)
+
+
 def convert_quest(episode, calibration, start_pose=None, absolute=False, max_start_offset_mm=150.0):
-    if (absolute or tracked_point_offset(calibration) is not None) and start_pose is None:
+    # With C, --absolute maps orientation without a start pose: Rp = B Rq C.
+    quest_only = absolute and controller_rotation(calibration) is not None
+    if (absolute or tracked_point_offset(calibration) is not None) and start_pose is None and not quest_only:
         raise ValueError("Tracked-point offset calibration and --absolute require --piper-start-pose with the "
                          "actual Piper starting XYZ/roll/pitch/yaw; the correction depends on flange orientation")
     path = episode.path / "quest.csv"
@@ -86,22 +94,28 @@ def convert_quest(episode, calibration, start_pose=None, absolute=False, max_sta
     start = np.zeros(6) if start_pose is None else np.asarray(start_pose, dtype=float)
     if start.shape != (6,) or not np.isfinite(start).all():
         raise ValueError("Piper start pose must be six finite XYZ/roll/pitch/yaw values")
-    xyz, quats = transform_chunk(poses[:, :3], poses[:, 3:], start[:3],
-                                Rotation.from_euler("xyz", start[3:]).as_quat(), calibration)
-    rotations = Rotation.from_quat(quats)
+    if quest_only:
+        rotations = (Rotation.from_matrix(calibration["orientation"]["rotation_matrix"])
+                     * Rotation.from_quat(poses[:, 3:]) * controller_rotation(calibration))
+    else:
+        xyz, quats = transform_chunk(poses[:, :3], poses[:, 3:], start[:3],
+                                     Rotation.from_euler("xyz", start[3:]).as_quat(), calibration)
+        rotations = Rotation.from_quat(quats)
     start_offset = None
     if absolute:
         # Keep where the controller actually was: p = A q + R l + c with the calibration's origin c,
-        # instead of pinning the first sample to the start pose. Orientation stays relative to it.
+        # instead of pinning the first sample to the start pose. Orientation stays relative to it
+        # unless the calibration has C.
         from scripts.teleop.quest_replay import calibration_origin
 
         origin, _spread = calibration_origin(calibration)
         lever = tracked_point_offset(calibration)
         xyz = (poses[:, :3] @ np.asarray(calibration["linear_matrix"], float).T + origin
                + (rotations.apply(lever) if lever is not None else 0.0))
-        start_offset = check_start_offset(xyz, start, max_start_offset_mm,
-                                          "the Quest tracking frame has probably changed since calibration, "
-                                          "so recalibrate")
+        if start_pose is not None:
+            start_offset = check_start_offset(xyz, start, max_start_offset_mm,
+                                              "the Quest tracking frame has probably changed since calibration, "
+                                              "so recalibrate")
     converted, eef = replay_rows(episode, rows, stamps, xyz, rotations)
     return converted, eef, stamps, start_offset
 
@@ -202,11 +216,13 @@ def convert_mocap(episode, calibration, start_pose, topic=None, absolute=False, 
 
     The object must be the marker plate of the calibration (same body-to-flange offset X),
     so each sample becomes the pose the flange would have if the mount sat on the arm.
-    --absolute replays that pose as is (Vicon world is fixed); otherwise the first sample
-    is pinned to the start pose and the flange-equivalent motion since then is added.
+    --absolute replays that pose as is (Vicon world is fixed), checked against the start pose
+    when one is known; otherwise the first sample is pinned to the start pose and the
+    flange-equivalent motion since then is added.
     """
-    if start_pose is None:
-        raise ValueError("Mocap conversion requires a Piper start pose (recorded at collection or --piper-start-pose)")
+    if start_pose is None and not absolute:
+        raise ValueError("Relative mocap conversion requires a Piper start pose (recorded at collection or "
+                         "--piper-start-pose); use --absolute to keep the Vicon-observed flange pose instead")
     path = episode.path / "mocap.csv"
     rows = [row for row in base.read_csv_rows(path) if row.get("message_type") == "vicon_receiver/msg/Position"]
     topics = sorted({row["topic"] for row in rows})
@@ -233,27 +249,27 @@ def convert_mocap(episode, calibration, start_pose, topic=None, absolute=False, 
     base.require_monotonic_ns("Mocap", stamps, path)
     if np.any(np.diff(stamps) <= 0):
         raise ValueError(f"Mocap timestamps must be increasing in {path}")
-    start = np.asarray(start_pose, dtype=float)
-    if start.shape != (6,) or not np.isfinite(start).all():
+    start = None if start_pose is None else np.asarray(start_pose, dtype=float)
+    if start is not None and (start.shape != (6,) or not np.isfinite(start).all()):
         raise ValueError("Piper start pose must be six finite XYZ/roll/pitch/yaw values")
     positions, quaternions = smooth_poses(poses[:, :3] / 1000.0, poses[:, 3:],  # Vicon millimetres
                                           float(np.median(np.diff(stamps))) / 1e9, smooth_s)
     flange_xyz, flange_rotations = vicon_flange_poses(
         vicon_to_piper(calibration), positions, Rotation.from_quat(quaternions))
-    start_rotation = Rotation.from_euler("xyz", start[3:])
     start_offset = None
     if absolute:
         xyz, rotations = flange_xyz, flange_rotations
-        cause = "start each episode with the mount near the arm's start pose"
-        start_offset = check_start_offset(xyz, start, max_start_offset_mm, cause)
-        angle = np.degrees((rotations[0] * start_rotation.inv()).magnitude())
-        if angle > max_start_rotation_deg:
-            raise ValueError(f"Absolute first orientation is {angle:.0f} deg from the Piper start pose (limit "
-                             f"{max_start_rotation_deg:g} deg, --max-start-rotation-deg); {cause} "
-                             "or process without --absolute")
+        if start is not None:
+            cause = "start each episode with the mount near the arm's start pose"
+            start_offset = check_start_offset(xyz, start, max_start_offset_mm, cause)
+            angle = np.degrees((rotations[0] * Rotation.from_euler("xyz", start[3:]).inv()).magnitude())
+            if angle > max_start_rotation_deg:
+                raise ValueError(f"Absolute first orientation is {angle:.0f} deg from the Piper start pose (limit "
+                                 f"{max_start_rotation_deg:g} deg, --max-start-rotation-deg); {cause} "
+                                 "or process without --absolute")
     else:
         xyz = start[:3] + flange_xyz - flange_xyz[0]
-        rotations = flange_rotations * flange_rotations[0].inv() * start_rotation
+        rotations = flange_rotations * flange_rotations[0].inv() * Rotation.from_euler("xyz", start[3:])
     steps = 1000 * np.linalg.norm(np.diff(xyz, axis=0), axis=1)
     gaps = np.diff(stamps) / 1e6
     print(f"  {topic}: {len(rows)} valid poses ({np.count_nonzero(~valid)} lost-object samples dropped), "
@@ -261,6 +277,22 @@ def convert_mocap(episode, calibration, start_pose, topic=None, absolute=False, 
           f"largest flange step {steps.max():.1f} mm, peak flange speed {np.max(steps / gaps) * 1000:.0f} mm/s")
     converted, eef = replay_rows(episode, rows, stamps, xyz, rotations)
     return converted, eef, stamps, start_offset, topic
+
+
+def episode_start_pose(start_pose, eef, calibration, self_anchored=False):
+    """Piper-base start pose [x, y, z, rotvec] saved with the sync indices.
+
+    Converted poses are anchored at the start pose; a raw Piper recording, or an
+    absolute Vicon or Quest-with-C one without a start pose, starts at its first
+    pose. Relative Quest output without a start pose has no physical anchor, so
+    NaNs mark it as unusable in absolute terms.
+    """
+    if calibration is None or (self_anchored and start_pose is None):
+        return eef[0].astype(np.float64)
+    if start_pose is None:
+        return np.full(6, np.nan)
+    start = np.asarray(start_pose, dtype=float)
+    return np.r_[start[:3], Rotation.from_euler("xyz", start[3:]).as_rotvec()]
 
 
 def validate_outputs(out, replay_csv, no_camera):
@@ -313,8 +345,12 @@ def process_episode(config, episode):
     mocap_topic = None
     # Collection with --piper-start-joints-deg records the arm's measured start pose.
     start_pose = config.piper_start_pose or (metadata.get("piper") or {}).get("start_pose")
+    self_anchored = False
     if config.calibration_json is not None:
         calibration = base.read_json(config.calibration_json)
+        # Absolute poses that need no start pose: Vicon, or Quest when the calibration has C.
+        self_anchored = config.absolute and (config.pose_source == "mocap"
+                                             or controller_rotation(calibration) is not None)
         if config.pose_source == "mocap":
             converted, eef, eef_ns, start_offset, mocap_topic = convert_mocap(
                 episode, calibration, start_pose, config.mocap_topic, config.absolute, config.max_start_offset_mm,
@@ -323,7 +359,7 @@ def process_episode(config, episode):
             validate_calibration(calibration)
             converted, eef, eef_ns, start_offset = convert_quest(
                 episode, calibration, start_pose, config.absolute, config.max_start_offset_mm)
-        pose_frame = "relative_to_episode_start" if start_pose is None else "piper_base"
+        pose_frame = "piper_base" if start_pose is not None or self_anchored else "relative_to_episode_start"
     else:
         eef, eef_ns = base.load_piper(episode)
         converted = base.read_csv_rows(episode.piper_path)
@@ -344,7 +380,9 @@ def process_episode(config, episode):
             frame_idx, camera_ns = frame_idx[trim:-trim], camera_ns[trim:-trim]
         sync = base.make_sync(config, frame_idx, camera_ns, hand_ns, eef_ns, episode)
         frame_count = len(frame_idx)
-    sync.update(encoder_monotonic_ns=hand_ns, pose_monotonic_ns=eef_ns)
+    sync.update(encoder_monotonic_ns=hand_ns, pose_monotonic_ns=eef_ns,
+                start_pose=episode_start_pose(start_pose, eef, calibration, self_anchored),
+                pose_frame=np.array(pose_frame))
     from_quest = calibration is not None and config.pose_source == "quest"
     quest_first = base.read_csv_rows(episode.path / "quest.csv")[0] if from_quest else None
     processing = dict(

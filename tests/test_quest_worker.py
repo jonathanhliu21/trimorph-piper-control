@@ -5,7 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from data_collection.collection.quest_worker import _decode_packet, run_quest_worker
+from data_collection.collection.quest_worker import QUEST_TRACKER_NAME, _decode_packet, run_quest_worker
+from data_collection.collection.shared_state import SharedState
 
 
 VALID_PACKET = {
@@ -29,8 +30,8 @@ class QuestWorkerTests(unittest.TestCase):
         )
 
     def test_valid_packet_is_recorded_without_pose_transforms(self):
-        shutdown = threading.Event()
-        shared = SimpleNamespace(shutdown=shutdown)
+        shared = SharedState()
+        shutdown = shared.shutdown
         rows = []
         session = SimpleNamespace(
             elapsed_s=lambda sample_ns: sample_ns / 1e9,
@@ -64,6 +65,10 @@ class QuestWorkerTests(unittest.TestCase):
         self.assertEqual(rows[0]["elapsed_s"], "2.000000000")
         for field, value in VALID_PACKET.items():
             self.assertEqual(rows[0][field], value)
+        live = shared.latest_tracker_poses()[QUEST_TRACKER_NAME]
+        self.assertEqual(live.position, (0.1, -0.2, 1.25))
+        self.assertEqual(live.quaternion, (0.0, 0.5, -0.5, 0.707))
+        self.assertEqual((live.monotonic_ns, live.lost, live.count), (2_000_000_000, False, 1))
 
     def test_startup_fails_when_no_packet_arrives_before_timeout(self):
         fake_socket = MagicMock()
@@ -75,7 +80,7 @@ class QuestWorkerTests(unittest.TestCase):
             with self.assertRaisesRegex(TimeoutError, "No valid Quest UDP data"):
                 run_quest_worker(
                     self.make_config(timeout_s=0.05),
-                    SimpleNamespace(shutdown=threading.Event()),
+                    SimpleNamespace(set_tracker_pose=lambda *a, **k: None, shutdown=threading.Event()),
                     SimpleNamespace(current=lambda: None),
                     init_done=threading.Event(),
                 )
@@ -99,7 +104,7 @@ class QuestWorkerTests(unittest.TestCase):
             init_done = threading.Event()
             run_quest_worker(
                 self.make_config(),
-                SimpleNamespace(shutdown=shutdown),
+                SimpleNamespace(set_tracker_pose=lambda *a, **k: None, shutdown=shutdown),
                 SimpleNamespace(current=lambda: None),
                 init_done=init_done,
             )
@@ -130,7 +135,7 @@ class QuestWorkerTests(unittest.TestCase):
                     side_effect=[1_000_000_000, 1_020_000_000, 1_040_000_000, 1_060_000_000]),
               patch('builtins.print') as log):
             socket_type.return_value.__enter__.return_value = fake_socket
-            run_quest_worker(config, SimpleNamespace(shutdown=shutdown), recorder, init_done=threading.Event())
+            run_quest_worker(config, SimpleNamespace(set_tracker_pose=lambda *a, **k: None, shutdown=shutdown), recorder, init_done=threading.Event())
         warnings = [call for call in log.call_args_list if 'POSITION JUMP' in str(call)]
         self.assertEqual(len(warnings), 2)
         self.assertIn('POSITION JUMP #1', warnings[0].args[0])

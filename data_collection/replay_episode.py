@@ -132,12 +132,14 @@ class ReplayVideoRecorder:
             dai = import_depthai()
             require_depthai_device(dai)
             with dai.Pipeline() as pipeline:
-                camera = pipeline.create(dai.node.Camera).build()
+                camera = pipeline.create(dai.node.Camera).build(
+                    sensorFps=self.config.task_camera_fps
+                )
                 apply_camera_control(
-                    dai,
                     camera,
-                    brightness=self.config.task_camera_brightness,
-                    anti_banding_hz=self.config.task_camera_anti_banding_hz,
+                    exposure_us=self.config.task_camera_exposure_us,
+                    iso=self.config.task_camera_iso,
+                    white_balance_k=self.config.task_camera_white_balance_k,
                 )
                 camera_output = camera.requestOutput(
                     (
@@ -145,6 +147,7 @@ class ReplayVideoRecorder:
                         self.config.task_camera_height,
                     ),
                     dai.ImgFrame.Type.NV12,
+                    fps=self.config.task_camera_fps,
                 )
                 queue = camera_output.createOutputQueue()
                 pipeline.start()

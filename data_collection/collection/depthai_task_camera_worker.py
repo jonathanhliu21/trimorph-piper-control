@@ -5,6 +5,8 @@ import time
 from .config import HandOnlyCollectionConfig
 from .depthai_utils import (
     apply_camera_control,
+    frame_capture_monotonic_ns,
+    host_clock_offset_ns,
     import_depthai,
     require_depthai_device,
     warmup_color_queue,
@@ -43,15 +45,17 @@ def run_depthai_task_camera_worker(
     fourcc = cv2.VideoWriter_fourcc(*config.video_codec)
 
     with dai.Pipeline() as pipeline:
-        cam = pipeline.create(dai.node.Camera).build()
+        cam = pipeline.create(dai.node.Camera).build(sensorFps=config.task_camera_fps)
         apply_camera_control(
-            dai,
             cam,
-            brightness=config.task_camera_brightness,
-            anti_banding_hz=config.task_camera_anti_banding_hz,
+            exposure_us=config.task_camera_exposure_us,
+            iso=config.task_camera_iso,
+            white_balance_k=config.task_camera_white_balance_k,
         )
         cam_out = cam.requestOutput(
-            (config.task_camera_width, config.task_camera_height), dai.ImgFrame.Type.NV12
+            (config.task_camera_width, config.task_camera_height),
+            dai.ImgFrame.Type.NV12,
+            fps=config.task_camera_fps,
         )
         queue = cam_out.createOutputQueue()
         pipeline.start()
@@ -60,19 +64,25 @@ def run_depthai_task_camera_worker(
         if size is None:
             raise RuntimeError("Task camera (OAK-1) produced no frames during warmup")
         actual_w, actual_h = size
+        clock_offset_ns = host_clock_offset_ns(dai)
 
         print(f"Task camera (depthai/OAK-1): {actual_w}x{actual_h} @{config.task_camera_fps}fps")
         init_done.set()
 
         try:
             while not shared.shutdown.is_set() and pipeline.isRunning():
-                bgr = queue.get().getCvFrame()
+                image = queue.get()
+                bgr = image.getCvFrame()
                 if bgr is None:
                     time.sleep(0.005)
                     continue
 
-                sample_ns = time.monotonic_ns()
+                # monotonic_ns is the device capture time; receipt_monotonic_ns
+                # keeps the host arrival time, so their difference is the latency.
+                receipt_ns = time.monotonic_ns()
                 wall_time_s = time.time()
+                sample_ns = frame_capture_monotonic_ns(dai, image, clock_offset_ns)
+                wall_time_s -= (receipt_ns - sample_ns) / 1e9
 
                 bgr = flip_frame(cv2, bgr, config.task_camera_flip)
                 shared.set_task_frame(bgr)
@@ -105,6 +115,8 @@ def run_depthai_task_camera_worker(
                         {
                             "frame_idx": frame_idx,
                             "monotonic_ns": sample_ns,
+                            "receipt_monotonic_ns": receipt_ns,
+                            "sequence_num": image.getSequenceNum(),
                             "wall_time_s": f"{wall_time_s:.6f}",
                             "elapsed_s": f"{writer_session.elapsed_s(sample_ns):.9f}",
                         }

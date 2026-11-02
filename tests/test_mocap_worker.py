@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from data_collection.collection import mocap_worker as mocap
 from data_collection.collection.config import HandOnlyCollectionConfig
 from data_collection.collection.episode import EpisodeBuffer, episode_paths
+from data_collection.collection.shared_state import SharedState
 from data_collection.collect_hand_only import parse_args as collect_args, worker_specs
 from data_collection.replay_episode import parse_args as replay_args
 
@@ -82,7 +83,8 @@ class MocapTests(unittest.TestCase):
         self.assertEqual(set(subscriber.subscriptions), {"/hand", "/markers"})
 
     def test_worker_records_only_active_episodes_and_resets_indices(self):
-        shutdown = threading.Event()
+        shared = SharedState()
+        shutdown = shared.shutdown
         session_a = NS(elapsed_s=lambda ns: 0.25, append_mocap=MagicMock())
         session_b = NS(elapsed_s=lambda ns: 0.5, append_mocap=MagicMock())
         sessions = iter([None, session_a, session_a, None, session_b])
@@ -100,9 +102,14 @@ class MocapTests(unittest.TestCase):
             subscriber.poll.side_effect = poll
             subscriber.ready.return_value = True
             ready = threading.Event()
-            mocap.run_mocap_worker(NS(mocap_topics=()), NS(shutdown=shutdown), recorder, init_done=ready)
+            mocap.run_mocap_worker(NS(mocap_topics=()), shared, recorder, init_done=ready)
             self.assertTrue(ready.is_set())
             subscriber.close.assert_called_once()
+        # Every pose is published for the live monitor, in meters, recording or not.
+        live = shared.latest_tracker_poses()["/hand"]
+        self.assertEqual(live.position, (0.00125, -0.0025, 0.00375))
+        self.assertEqual(live.quaternion, (0.0, 0.0, 0.6, 0.8))
+        self.assertEqual((live.lost, live.count), (False, 5))
         self.assertEqual([call.args[0]["sample_idx"] for call in session_a.append_mocap.call_args_list], [0, 1])
         self.assertEqual(session_b.append_mocap.call_args.args[0]["sample_idx"], 0)
 
@@ -138,7 +145,7 @@ class MocapTests(unittest.TestCase):
         with patch.object(mocap, "MocapSubscriber") as factory, patch.object(mocap.time, "monotonic", side_effect=[0., 11.]):
             factory.return_value.ready.return_value = False
             with self.assertRaises(TimeoutError):
-                mocap.run_mocap_worker(NS(mocap_topics=()), NS(shutdown=threading.Event()), NS(), init_done=threading.Event())
+                mocap.run_mocap_worker(NS(mocap_topics=()), SharedState(), NS(), init_done=threading.Event())
             factory.return_value.close.assert_called_once()
 
     def test_replay_filters_interval_and_saves_csv_on_stop(self):

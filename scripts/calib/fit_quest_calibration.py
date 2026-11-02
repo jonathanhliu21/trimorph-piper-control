@@ -265,6 +265,21 @@ def score(calibration, data, block):
             "samples": int(len(error))}, targets
 
 
+def fit_controller_rotation(calibration, arrays):
+    """Constant C with Rp = B Rq C: the flange orientation in the controller frame.
+
+    B maps relative rotations only; C adds the fixed controller-to-flange rotation so a
+    Quest orientation maps to an absolute flange orientation without a start pose.
+    """
+    mapped = Rotation.from_matrix(calibration["orientation"]["rotation_matrix"]) * Rotation.from_quat(arrays["quest_quat"])
+    reference = Rotation.from_quat(arrays["piper_quat"])
+    rotation = (mapped.inv() * reference).mean()
+    angle = (mapped * rotation * reference.inv()).magnitude()
+    return {"matrix": rotation.as_matrix().tolist(), "equation": "Rp = B @ Rq @ C",
+            "fit_rmse_deg": float(np.degrees(np.sqrt(np.mean(angle ** 2)))),
+            "fit_max_deg": float(np.degrees(angle.max()))}
+
+
 def fit(arrays, lengths, model, reflection, offset):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -376,7 +391,9 @@ def main(argv=None):
         row = [loso[name][label].get("anchored_rmse_mm", float("nan")) for name in ("rigid", best)]
         print(f"{'':42}{label:<12} {row[0]:7.2f} {row[1]:12.2f}")
 
-    final = fit(*concat(datasets, blocks), best_model, best_reflection, best_offset)
+    all_arrays, all_lengths = concat(datasets, blocks)
+    final = fit(all_arrays, all_lengths, best_model, best_reflection, best_offset)
+    final["orientation"]["controller_rotation"] = fit_controller_rotation(final, all_arrays)
     final["latency_s"] = float(np.mean(latencies))
     final["latency_note"] = "Quest sample at t + latency_s corresponds to Piper FK at t; shift Quest timestamps before mapping."
     final["calibration_runs"] = [str(path) for path in runs]

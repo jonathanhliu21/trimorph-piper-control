@@ -1,21 +1,38 @@
 # Collection pipeline
 
-`collect_hand_only.py` records the TRIMORPH leader hand. Add `--use-piper`
-for passive PiperX logging, `--use-quest` for Quest UDP poses, `--add-camera`
-for the OAK wrist camera, and both follower options for commanded MIDAS
-retargeting. Piper and Quest pose sources are mutually exclusive.
-All streams use host `monotonic_ns` timestamps. Foot-pedal recording is the
+For the end-to-end workflow (preparing, collecting, checking, postprocessing,
+and the output files) start with [PIPELINE.md](PIPELINE.md); this file holds
+the details.
+
+`collect_hand_only.py` records, by default, the TRIMORPH leader hand, Quest
+UDP poses, ROS 2 Vicon mocap, and the OAK wrist camera. Turn the defaults off
+with `--no-quest`, `--no-mocap`, or `--no-camera`. Optional streams: add
+`--use-piper` for passive PiperX logging (it replaces the Quest as the pose
+source; Piper and Quest are mutually exclusive), both follower options for
+commanded MIDAS retargeting, and `--add-tactile` for Paxini sensing. With
+`--retarget-only` nothing is recorded, so Quest and mocap default to off there.
+All streams use host `monotonic_ns` timestamps; camera frames are stamped with
+their DepthAI capture time on that clock. Foot-pedal recording is the
 default; use `--episode-s` for a fixed duration or `--retarget-only` to run
 without recording. `replay_episode.py` replays saved hand and Piper streams.
 
-Collect only the primary hand and Quest for a 30-second episode (replace the serial-port placeholder):
+Each run saves its episodes to the next free `data_collection_n` folder
+(`n = 0, 1, 2, ...`), printed at startup as `Saving episodes to ...`. Use
+`--dataset-name NAME` to save to `NAME_n` instead; `NAME` may include parent
+directories (`--dataset-name data/pick_cup` gives `data/pick_cup_0`, then
+`data/pick_cup_1`, ...). Change the default name with `DEFAULT_DATASET_NAME` in
+`collection/config.py`. To add episodes to an existing folder, pass
+`--dataset-root PATH` instead. The folder is created when the first episode
+starts. Pass the folder to `postprocess_dataset.py` and `replay_episode.py
+--dataset-root`.
+
+Collect only the primary hand and Quest (camera and mocap off) for a 30-second episode (replace the serial-port placeholder):
 
 ```bash
 python3 data_collection/collect_hand_only.py \
-  --dataset-root data_trimorph_quest \
   --hand-config config/xl330_test_config.yaml \
   --hand-port /dev/serial/by-id/TRIMORPH \
-  --use-quest --quest-jump-threshold 0.05 \
+  --no-camera --no-mocap --quest-jump-threshold 0.05 \
   --episode-s 30
 ```
 
@@ -26,14 +43,37 @@ default 10). The arm keeps holding the pose while you collect, and its measured 
 pose is saved as `piper.start_pose` in every episode's `metadata.json`;
 `postprocess_dataset.py` uses it as the start pose when `--piper-start-pose` is omitted.
 
-Omit `--episode-s 30` for the default foot-pedal episode control. Camera and Piper workers stay disabled unless their respective flags are supplied. Start the Quest sender streaming to the collector's configured UDP endpoint (default `0.0.0.0:5005`). With Quest enabled, the collector prints flushed `POSITION JUMP` warnings when consecutive received packets move farther than `--quest-jump-threshold` in native position units. Each warning includes a worker-lifetime count, time since the first packet, sequence number, step distance, packet interval, and XYZ delta. Checks include packets received between episodes, while CSV recording remains limited to active episodes. Samples are recorded unchanged. The threshold is saved in episode metadata; a flagged step is a review cue, not a tracking-loss diagnosis.
+Omit `--episode-s 30` for the default foot-pedal episode control. The camera, Quest, and mocap workers run unless disabled; the Piper worker runs only with `--use-piper`. Start the Quest sender streaming to the collector's configured UDP endpoint (default `0.0.0.0:5005`). With Quest enabled, the collector prints flushed `POSITION JUMP` warnings when consecutive received packets move farther than `--quest-jump-threshold` in native position units. Each warning includes a worker-lifetime count, time since the first packet, sequence number, step distance, packet interval, and XYZ delta. Checks include packets received between episodes, while CSV recording remains limited to active episodes. Samples are recorded unchanged. The threshold is saved in episode metadata; a flagged step is a review cue, not a tracking-loss diagnosis.
+
+### Live tracking monitor
+
+When Quest or mocap is recorded, a `trimorph_tracking` window shows both poses
+in 3D, with one status box per stream and a REC indicator. A box is green
+(`OK`, with the receive rate) while samples arrive and red otherwise:
+
+| Red status | Meaning |
+| --- | --- |
+| `NO DATA` | nothing received yet (for Vicon: no pose topic yet) |
+| `NO SIGNAL n s` | no sample for over 0.5 s (Vicon Wi-Fi gaps up to ~0.3 s are normal) |
+| `OBJECT LOST` | Vicon is publishing an all-zero pose: the marker plate is not tracked |
+| `POSITION FROZEN` | the Quest position moved less than 0.1 mm in 1 s: it lost positional tracking and keeps resending its last position (also shown while the controller lies still) |
+
+Each stream is drawn relative to its pose when the window opened, with a 10 s
+trail and an XYZ triad for the rotation since then. Without a calibration each
+tracker uses its own axes; `--monitor-calibration calibration.json` maps the
+Quest (`linear_matrix`) and, if present, Vicon (`vicon_reference`) motion to
+Piper base axes. Drag to rotate, right-drag or scroll to zoom, double-click to
+re-center; `q`/Escape stops collection as in the camera view. Disable it with
+`--no-monitor`. The window only displays; it does not change what is recorded.
 
 `collection/config.py` defines shared hardware and retargeting settings in
 `HandRuntimeConfig` and collection-specific options in
 `HandOnlyCollectionConfig`. Replay tuning lives in `collection/replay_config.py`.
-Standalone calibration and diagnostics are under `scripts/`; dataset conversion
-is `scripts/dataset/postprocess_dataset.py`. Run all commands from the repository
-root. See [the project README](../README.md) for the full directory map.
+Standalone calibration and diagnostics are under `scripts/`. Dataset conversion
+is `data_collection/postprocess_dataset.py`, which extends the Piper-only
+`scripts/dataset/postprocess_dataset.py`; [DATASET_SPEC.md](DATASET_SPEC.md)
+defines the format the diffusion-policy trainer reads. Run all commands from the
+repository root. See [the project README](../README.md) for the full directory map.
 
 The primary hand records its calibrated 13-motor `read_pos()` vector directly
 to `leader_hand.csv`. When configured, the follower clips and optionally
@@ -83,19 +123,29 @@ the normal interpolation and maximum-step safety logic is applied.
 
 There is no hand camera or MediaPipe path. The OAK-1 mounted at the
 robot wrist is retained solely as the policy observation camera. It is enabled
-for hand-only collection with `--add-camera`, which also opens a live preview
+by default (disable with `--no-camera`) and opens a live preview
 and records the standard `camera.mp4` and `camera_timestamps.csv` episode
-artifacts. Press `q` or Escape in the preview to stop and save. Brightness and
-50/60 Hz flicker prevention are controlled by the shared task-camera settings
-in `collection/config.py` and are applied before the DepthAI pipeline starts.
+artifacts. Press `q` or Escape in the preview to stop and save. Exposure, ISO,
+white balance and frame rate are fixed (no auto-exposure or auto white balance)
+by the shared task-camera settings in `collection/config.py` and are applied
+before the DepthAI pipeline starts.
 Set `TASK_CAMERA_FLIP = "180"` there to rotate both the preview and recording.
+
+In `camera_timestamps.csv`, `monotonic_ns` is the DepthAI mid-exposure capture
+time converted to the host clock, which synchronization uses.
+`receipt_monotonic_ns` is when the frame reached the host; the difference is the
+transfer and queueing latency (about 19 ms median, 30 ms p95, on the OAK-1).
+`sequence_num` is the device frame counter, so a gap means a dropped frame.
+Episodes recorded before this change stored the receipt time in `monotonic_ns`.
+The default 1280x720 recording is 16:9, while the trainer resizes frames to
+320x240 (4:3); see [DATASET_SPEC.md](DATASET_SPEC.md).
 
 ## Postprocess Quest episodes and replay
 
 Convert Quest motion using a calibration from `scripts/calib/get_coord_transform.py`:
 
 ```bash
-python3 data_collection/postprocess_dataset.py data_trimorph_quest \
+python3 data_collection/postprocess_dataset.py data_collection_0 \
   --episode 0 --calibration-json calibration.json --no-camera
 ```
 
@@ -106,7 +156,7 @@ The output layout follows the Midas/Piper postprocessor:
 - `processed_encoder_t/XXXXXX.npy`: float32 hand encoder array, shape `(N, 13)`.
 - `absolute_action_t/XXXXXX.npy`: float32 Piper XYZ plus rotation vector in radians, shape `(M, 6)`.
 - `camera/mp4_files/XXXXXX.mp4`: copied original video when camera processing is enabled.
-- `syncs/XXXXXX.npz`: `frame_idx`, `encoder_idx`, and `pose_idx` mappings for camera-based synchronization. Camera timestamps are trimmed by one frame at each end by default; video frames retain their original numbering. Nearest matches outside `--max-sync-error-s` (default 0.010) are reported and retained, matching the reference processor.
+- `syncs/XXXXXX.npz`: `frame_idx`, `encoder_idx`, and `pose_idx` mappings for camera-based synchronization, plus `start_pose` and `pose_frame` (below). Each camera frame is paired with the hand and pose samples nearest to it in time. Camera timestamps are trimmed by one frame at each end by default; video frames retain their original numbering. A pairing farther apart than `--max-sync-error-s` (default 0.010 s) is reported as a warning and kept; nothing is dropped or interpolated. The hand is sampled every 20 ms, so its nearest sample is normally 0–10 ms away, and the warning mostly flags timing jitter or gaps.
 - `processed/episode_XXXXXX/piper.csv`: full-rate replay poses with original Quest host timestamps and XYZ/roll/pitch/yaw radians, using the Piper API's Euler convention. Euler angles are unwrapped for continuity. This CSV's last three columns are **Euler angles**; the action array's last three columns are **rotation vectors**.
 - `processed/episode_XXXXXX/metadata.json`: pose frame, source, calibration path/hash, anchors, and processing settings.
 - `processing_summary.json`: per-episode output paths and counts.
@@ -115,10 +165,12 @@ The output layout follows the Midas/Piper postprocessor:
 
 Calibration is relative: `p(t) = p_start + A @ (quest(t) - quest(0))`, with orientation changes mapped independently by `B @ Dq @ B.T`. No fitted absolute-origin offset is applied. A Quest-only recording contains no physical Piper starting pose, so the default output starts at zero position/identity rotation and is marked `relative_to_episode_start`. Although stored under the reference folder name `absolute_action_t`, these values use an episode-local origin; they are not absolute robot-base targets until anchored. Replay detects this metadata and anchors the full trajectory at the Piper's measured XYZ/RPY starting pose before prepositioning. Position deltas remain in Piper base axes; rotation changes are spatial rotations multiplied on the left. Missing/invalid measured starting feedback stops replay rather than commanding unanchored coordinates.
 
+Every sync archive records the episode's anchor: `pose_frame` is `piper_base` or `relative_to_episode_start`, and `start_pose` is the Piper-base start pose as `[x, y, z, rotvec]` (the action array's convention). With the default relative mapping, `absolute_action_t[0]` equals `start_pose`. For a raw Piper recording, `start_pose` is the first measured pose. A relative Quest episode has no physical start pose, so its `start_pose` is all NaN rather than a misleading zero. The same start pose is in `processed/episode_XXXXXX/metadata.json` as `piper_start_pose` (XYZ + roll/pitch/yaw).
+
 To generate absolute robot-base targets, supply a known physical starting pose:
 
 ```bash
-python3 data_collection/postprocess_dataset.py data_trimorph_quest \
+python3 data_collection/postprocess_dataset.py data_collection_0 \
   --episode 0 --calibration-json calibration.json --no-camera \
   --piper-start-pose 0.4 0.0 0.3 0.0 0.0 0.0 -f
 ```
@@ -130,7 +182,7 @@ For a calibration fitted with `get_coord_transform.py --fit-offset`, `--piper-st
 Replay now reads `processed/episode_XXXXXX/piper.csv` by default, while the hand continues to use its original measured CSV:
 
 ```bash
-python3 data_collection/replay_episode.py 0 --dataset-root data_trimorph_quest \
+python3 data_collection/replay_episode.py 0 --dataset-root data_collection_0 \
   --hand-config config/xl330_test_config.yaml --hand-port /dev/serial/by-id/TRIMORPH
 ```
 
@@ -162,7 +214,7 @@ coordinate convention. Values remain in receiver units; `translation_type` is
 preserved for segment poses. No orientation is computed for marker data.
 
 ```bash
-python3 data_collection/collect_hand_only.py --use-mocap --episode-s 10
+python3 data_collection/collect_hand_only.py --episode-s 10
 python3 data_collection/replay_episode.py 0 --hand-only \
   --use-mocap --mocap-output replay_mocap.csv
 ```
@@ -174,7 +226,7 @@ Replay records **live** mocap during the replay interval, excluding prepositioni
 and settling, and saves partial data on Ctrl-C or an exception. It does not use
 mocap to command the hardware. Retarget-only mode does not save episodes.
 
-With `--use-mocap`, the recorder discovers all topics advertising the two
+With mocap enabled, the recorder discovers all topics advertising the two
 supported top-level ROS 2 types above, including topics that appear later.
 To select particular topics, repeat `--mocap-topic /actual/topic/name` on either
 command. An explicitly selected topic must advertise a supported type. Startup
@@ -197,7 +249,7 @@ collection and replay start `scripts/calib/mocap_stream.py --raw-rows` under
 `.venv-mocap` after sourcing `ros2/mocap_env.sh`, and receive the same rows from it.
 
 To demonstrate with the Vicon marker plate of the calibration (the mount
-carried by hand) instead of the Quest, collect with `--use-mocap --mocap-topic
+carried by hand) instead of the Quest, collect with `--mocap-topic
 /vicon/Yori/Yori` and postprocess with `--pose-source mocap --mocap-topic
 /vicon/Yori/Yori` and a calibration fitted with `fit_quest_calibration.py
 --reference mocap`. That calibration stores the Vicon-to-Piper transform and the
@@ -209,6 +261,6 @@ the flange pose is replayed as measured, after checking that it starts within
 
 ROS timestamps may use a different clock from host receipt timestamps; no clock
 offset is estimated. An enabled recording with no samples still writes a CSV
-header. Without `--use-mocap`, no ROS imports, discovery, initialization, or
+header. With `--no-mocap` (or `--retarget-only`), no ROS imports, discovery, initialization, or
 subscriptions occur. Replay requires `--mocap-output` with `--use-mocap`;
 `--mocap-topic` and `--mocap-output` require mocap to be enabled.

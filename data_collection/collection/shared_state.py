@@ -13,9 +13,21 @@ class FollowerContactSnapshot:
     normalized_joint_difference: tuple[float, ...]
 
 
+@dataclass(frozen=True)
+class TrackerSample:
+    """Latest pose of a tracked object; count increases with every sample."""
+
+    monotonic_ns: int
+    position: tuple[float, float, float]
+    quaternion: tuple[float, float, float, float]
+    lost: bool
+    count: int
+
+
 class SharedState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._tracker_samples: dict[str, TrackerSample] = {}
         self._latest_hand_target: np.ndarray | None = None
         self._latest_follower_position_error: np.ndarray | None = None
         self._latest_follower_motor_ids: tuple[int, ...] | None = None
@@ -114,6 +126,31 @@ class SharedState:
     def latest_tactile_contacts(self) -> tuple[bool, ...] | None:
         with self._lock:
             return self._latest_tactile_contacts
+
+    def set_tracker_pose(
+        self,
+        name: str,
+        monotonic_ns: int,
+        position,
+        quaternion,
+        *,
+        lost: bool = False,
+    ) -> None:
+        """Publish a tracker pose (meters, quaternion x, y, z, w) for live display."""
+
+        with self._lock:
+            previous = self._tracker_samples.get(name)
+            self._tracker_samples[name] = TrackerSample(
+                monotonic_ns=int(monotonic_ns),
+                position=tuple(float(value) for value in position),
+                quaternion=tuple(float(value) for value in quaternion),
+                lost=bool(lost),
+                count=1 if previous is None else previous.count + 1,
+            )
+
+    def latest_tracker_poses(self) -> dict[str, TrackerSample]:
+        with self._lock:
+            return dict(self._tracker_samples)
 
     def set_task_frame(self, bgr: np.ndarray) -> None:
         with self._lock:

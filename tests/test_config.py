@@ -36,7 +36,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(
             collection.follower_joint_command_offsets, runtime.follower_joint_command_offsets
         )
-        self.assertEqual(collection.task_camera_brightness, runtime.task_camera_brightness)
+        self.assertEqual(collection.task_camera_exposure_us, runtime.task_camera_exposure_us)
         collection.follower_joint_command_scales[4] = 9.0
         self.assertEqual(runtime.follower_joint_command_scales[4], 0.6)
 
@@ -53,24 +53,30 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(offsets, (-0.1, 0.0, 0.25))
 
     def test_camera_control_defaults_and_valid_boundaries(self):
-        self.assertEqual(self._config().task_camera_brightness, -1)
-        self.assertEqual(self._config().task_camera_anti_banding_hz, "60")
         base = self._config()
-        for brightness in (-10, 10):
-            validate_camera_settings(
-                replace(base, task_camera_brightness=brightness),
+        self.assertEqual(base.task_camera_exposure_us, 5829)
+        self.assertEqual(base.task_camera_iso, 100)
+        self.assertEqual(base.task_camera_white_balance_k, 2634)
+        validate_camera_settings(base)
+        validate_camera_settings(
+            replace(
+                base,
+                task_camera_exposure_us=1_000_000 // base.task_camera_fps,
+                task_camera_iso=1600,
+                task_camera_white_balance_k=12000,
             )
+        )
 
     def test_rejects_invalid_camera_controls(self):
         base = self._config()
-        with self.assertRaisesRegex(ValueError, "BRIGHTNESS"):
-            validate_camera_settings(
-                replace(base, task_camera_brightness=11),
-            )
-        with self.assertRaisesRegex(ValueError, "ANTI_BANDING"):
-            validate_camera_settings(
-                replace(base, task_camera_anti_banding_hz="invalid"),
-            )
+        with self.assertRaisesRegex(ValueError, "EXPOSURE"):
+            validate_camera_settings(replace(base, task_camera_exposure_us=0))
+        with self.assertRaisesRegex(ValueError, "EXPOSURE"):
+            validate_camera_settings(replace(base, task_camera_exposure_us=40_000))
+        with self.assertRaisesRegex(ValueError, "ISO"):
+            validate_camera_settings(replace(base, task_camera_iso=1601))
+        with self.assertRaisesRegex(ValueError, "WHITE_BALANCE"):
+            validate_camera_settings(replace(base, task_camera_white_balance_k=999))
 
     def test_accepts_180_degree_camera_flip(self):
         config = replace(

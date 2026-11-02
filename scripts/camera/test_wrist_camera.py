@@ -68,15 +68,19 @@ def main() -> int:
 
     try:
         with dai.Pipeline() as pipeline:
-            camera = pipeline.create(dai.node.Camera).build()
+            camera = pipeline.create(dai.node.Camera).build(
+                sensorFps=defaults.TASK_CAMERA_FPS
+            )
             apply_camera_control(
-                dai,
                 camera,
-                brightness=defaults.TASK_CAMERA_BRIGHTNESS,
-                anti_banding_hz=defaults.TASK_CAMERA_ANTI_BANDING_HZ,
+                exposure_us=defaults.TASK_CAMERA_EXPOSURE_US,
+                iso=defaults.TASK_CAMERA_ISO,
+                white_balance_k=defaults.TASK_CAMERA_WHITE_BALANCE_K,
             )
             camera_output = camera.requestOutput(
-                (args.width, args.height), dai.ImgFrame.Type.NV12
+                (args.width, args.height),
+                dai.ImgFrame.Type.NV12,
+                fps=defaults.TASK_CAMERA_FPS,
             )
             queue = camera_output.createOutputQueue()
             pipeline.start()

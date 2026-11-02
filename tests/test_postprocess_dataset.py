@@ -80,6 +80,9 @@ class PostprocessTests(unittest.TestCase):
                 self.assertNotIn('frame_idx', sync)
                 np.testing.assert_array_equal(sync['encoder_idx'], np.arange(4))
                 np.testing.assert_array_equal(sync['pose_idx'], np.arange(4))
+                # No physical anchor: the start pose is explicitly unknown.
+                self.assertEqual(str(sync['pose_frame']), 'relative_to_episode_start')
+                self.assertTrue(np.isnan(sync['start_pose']).all())
             self.assertEqual(resolve_piper_source(raw.path, read_piper_raw=True), (raw.piper_path, 'piper_base'))
             with self.assertRaises(FileExistsError):
                 post.process_episode(config, raw)
@@ -99,6 +102,13 @@ class PostprocessTests(unittest.TestCase):
                 np.testing.assert_array_equal(sync['frame_idx'], [1, 2])
                 np.testing.assert_array_equal(sync['encoder_idx'], [1, 2])
                 np.testing.assert_array_equal(sync['pose_idx'], [1, 2])
+                self.assertEqual(str(sync['pose_frame']), 'piper_base')
+                start = sync['start_pose']
+            eef = np.load(summary['eef'])
+            np.testing.assert_allclose(start[:3], config.piper_start_pose[:3])
+            np.testing.assert_allclose(Rotation.from_rotvec(start[3:]).as_euler('xyz'),
+                                       config.piper_start_pose[3:], atol=1e-10)
+            np.testing.assert_allclose(eef[0], start, atol=1e-6)
             self.assertEqual(resolve_piper_source(raw.path)[1], 'piper_base')
             first = load_piper_stream(Path(summary['piper_csv']))[1][0]
             np.testing.assert_allclose(first, config.piper_start_pose, atol=1e-10)
@@ -169,6 +179,25 @@ class PostprocessTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'Quest tracking frame'):
                 post.process_episode(far, raw)
 
+    def test_absolute_quest_with_controller_rotation_needs_no_start_pose(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, raw, qxyz, rq, a, b = self.fixture(Path(directory))
+            calibration = json.loads(config.calibration_json.read_text())
+            offset, origin = np.array([-.09, .03, -.04]), np.array([.3, -.2, .1])
+            c = Rotation.from_euler('xyz', [90, -10, 5], degrees=True)
+            calibration.update(tracked_point_offset=dict(vector=offset.tolist(), frame='piper_flange'),
+                               position_offset=origin.tolist())
+            calibration['orientation']['controller_rotation'] = dict(matrix=c.as_matrix().tolist())
+            config.calibration_json.write_text(json.dumps(calibration))
+            summary = post.process_episode(replace(config, absolute=True), raw)
+            rp = Rotation.from_matrix(b) * rq * c
+            poses = load_piper_stream(Path(summary['piper_csv']))[1]
+            np.testing.assert_allclose(poses[:, :3], qxyz @ a.T + rp.apply(offset) + origin, atol=1e-10)
+            np.testing.assert_allclose(Rotation.from_euler('xyz', poses[:, 3:]).as_matrix(), rp.as_matrix(), atol=1e-10)
+            self.assertEqual(summary['pose_frame'], 'piper_base')
+            with np.load(summary['sync']) as sync:
+                np.testing.assert_allclose(sync['start_pose'], np.load(summary['eef'])[0], atol=1e-6)
+
     def test_mocap_source_replays_the_flange_pose_of_the_calibrated_marker_plate(self):
         start = (.4, -.1, .3, .2, -.4, .1)
         w = Rotation.from_euler('zyx', [90, 2, -1], degrees=True)  # Vicon world -> Piper base
@@ -224,6 +253,16 @@ class PostprocessTests(unittest.TestCase):
                                        (w * f_world).as_matrix(), atol=1e-6)
             with self.assertRaisesRegex(ValueError, 'mount near the arm'):
                 post.process_episode(replace(absolute, max_start_offset_mm=150.0), raw)
+
+            # Absolute Vicon poses need no start pose: no check, Piper-base frame, first pose as the start.
+            with self.assertRaisesRegex(ValueError, 'use --absolute'):
+                post.process_episode(replace(mocap, overwrite_processed_files=True, piper_start_pose=None), raw)
+            summary = post.process_episode(replace(absolute, max_start_offset_mm=150.0, piper_start_pose=None), raw)
+            poses = load_piper_stream(Path(summary['piper_csv']))[1]
+            np.testing.assert_allclose(poses[:, :3], flange_base, atol=1e-6)
+            self.assertEqual(summary['pose_frame'], 'piper_base')
+            with np.load(summary['sync']) as sync:
+                np.testing.assert_allclose(sync['start_pose'][:3], flange_base[0], atol=1e-6)
 
             del calibration['vicon_reference']
             config.calibration_json.write_text(json.dumps(calibration))

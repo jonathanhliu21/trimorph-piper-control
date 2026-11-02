@@ -17,10 +17,30 @@ The dataset class is:
 shared/env/trimorph/trimorph_image_dataset.py
 ```
 
-Collect raw episodes with `data_collection/collect_hand_only.py --add-camera
---use-piper` plus the hand connection options. Convert them using
-`python3 scripts/dataset/postprocess_dataset.py DATASET_ROOT`. Shared raw column
-names are defined in `data_collection/collection/config.py`.
+## Producing The Dataset In This Repo
+
+Collect raw episodes with `data_collection/collect_hand_only.py` plus the hand
+connection options. By default it records the leader hand, Quest, Vicon mocap,
+and the OAK-1 camera into the next free `data_collection_n` folder
+(`--dataset-name` changes the name). The arm pose comes from one of:
+
+| Pose source | Collect with | Postprocess with |
+| --- | --- | --- |
+| Quest controller | defaults (add `--piper-start-home` to record a start pose) | `--calibration-json CAL` |
+| Vicon marker plate | defaults, `--mocap-topic /vicon/Yori/Yori`, plus a required start pose (`--piper-start-home`, or `--piper-start-pose` when postprocessing) | `--calibration-json CAL --pose-source mocap --mocap-topic /vicon/Yori/Yori` |
+| Piper drag-teach | `--use-piper` (turns the Quest off) | no calibration |
+
+Convert with `data_collection/postprocess_dataset.py`, which extends the
+Piper-only `scripts/dataset/postprocess_dataset.py`:
+
+```bash
+python3 data_collection/postprocess_dataset.py data_collection_0 --calibration-json calibration.json
+```
+
+Do not pass `--no-camera` for training data: it writes no video and no
+`frame_idx`, which the trainer requires. Raw column names are defined in
+`data_collection/collection/config.py`; see `data_collection/README.md` for
+collection and calibration details.
 
 ## High-Level Contract
 
@@ -51,7 +71,8 @@ does the relative conversion and normalization during training.
 
 ## Required Dataset Root Layout
 
-Create one dataset root with this exact structure:
+The postprocessor writes this structure into the collection folder (for example
+`data_collection_0/`):
 
 ```text
 <dataset_root>/
@@ -124,6 +145,11 @@ random_crop: True
 The collection code only needs to save readable MP4s. Keep exposure, camera
 pose, and camera intrinsics stable across episodes if possible.
 
+The collector records 1280x720 (16:9) by default (`TASK_CAMERA_WIDTH/HEIGHT` in
+`collection/config.py`). The loader's full-frame resize to 320x240 (4:3)
+therefore squeezes the image horizontally. Either record at a 4:3 size or crop
+before resizing, and use the same preprocessing at deployment.
+
 ## TRIMORPH Hand Array Requirements
 
 `processed_encoder_t/*.npy` must be a NumPy array:
@@ -193,25 +219,22 @@ where:
 - `x, y, z` are position in meters.
 - `rx, ry, rz` are rotation-vector components in radians.
 
-Important: the current Piper examples in this repo record flange pose as:
+The raw Piper stream and the replay CSV (`processed/episode_XXXXXX/piper.csv`)
+use the Piper API's `[x, y, z, roll, pitch, yaw]` Euler convention. The
+diffusion-policy SE(3) helper interprets the last three values as a rotation
+vector, so the postprocessor converts to `[x, y, z, rotvec]` before writing
+`absolute_action_t/*.npy`. The inference wrapper returns absolute EEF targets in
+the same rotvec convention; convert back to roll/pitch/yaw before commanding
+the Piper.
 
-```text
-[x, y, z, roll, pitch, yaw]
-```
-
-The diffusion-policy SE(3) helper currently interprets the last three values as
-a rotation vector, not Euler roll/pitch/yaw. Therefore the data curation code
-must either:
-
-1. Convert Piper roll/pitch/yaw to rotation vector before writing
-   `absolute_action_t/*.npy`, or
-2. Update the diffusion-policy SE(3) helper and TRIMORPH inference code to use the
-   same Euler convention.
-
-The intended path is option 1. Save `absolute_action_t` as `[x, y, z, rotvec]`.
-The inference wrapper will return absolute EEF targets in the same convention,
-so downstream robot execution must convert rotvec back to whatever Piper command
-API expects if the Piper API expects roll/pitch/yaw.
+The values are in the Piper base frame (`pose_frame = "piper_base"`) when the
+episode has a start pose: the measured pose recorded at collection with
+`--piper-start-joints-deg`/`--piper-start-home`, a `--piper-start-pose` given to
+the postprocessor, or the measured Piper stream itself. A Quest episode without
+a start pose is saved relative to its first sample (zero position, identity
+rotation; `pose_frame = "relative_to_episode_start"`). The trainer only uses
+relative windows, so both train identically, but relative episodes are not
+absolute robot targets. Each sync file records which case applies (see below).
 
 ## Sync File Requirements
 
@@ -237,6 +260,30 @@ Piper EEF pose     = absolute_action_t[pose_idx[k]]
 Use zero-based indices. Keep indices in range. The current loader clips indices
 to valid ranges, but the collection pipeline should treat out-of-range indices
 as a bug and fail validation rather than relying on clipping.
+
+The postprocessor builds one sync row per camera frame, dropping one frame at
+each end (`--trim-camera-frames`), and picks the hand and pose samples nearest
+in time to that frame. All streams share the host `monotonic_ns` clock. Camera
+frames are stamped with the DepthAI mid-exposure capture time, so USB and
+queueing delay (about 19 ms median, 30 ms p95, measured on the OAK-1) is not
+part of the sync. Matches farther than `--max-sync-error-s` (default 10 ms) are
+reported as warnings but kept.
+
+The trainer ignores the following additional keys, which the postprocessor also
+saves:
+
+```text
+encoder_monotonic_ns   int64 [T_hand]  timestamp of every processed_encoder_t row
+pose_monotonic_ns      int64 [T_eef]   timestamp of every absolute_action_t row
+start_pose             float64 [6]     Piper-base start pose [x, y, z, rotvec]; NaN if unknown
+pose_frame             str             "piper_base" or "relative_to_episode_start"
+```
+
+For a `piper_base` episode, `start_pose` is the anchor of the trajectory: with
+the default relative mapping, `absolute_action_t[0] == start_pose`. A
+`relative_to_episode_start` episode has `start_pose` all NaN, because no
+physical start pose was recorded. To make it absolute, reprocess with
+`--piper-start-pose`, or collect with `--piper-start-home` in the first place.
 
 Each sync row should represent one policy/control timestep. The training config
 uses:
@@ -315,18 +362,25 @@ Therefore:
 - Do not pre-normalize.
 - Do not pre-scale for neural-network training.
 
-## Recommended Raw/Processed Split
+## Raw And Processed Files
 
-It is fine to keep richer raw recordings elsewhere, for example:
+The collection folder also holds the raw recordings and replay data:
 
 ```text
-<dataset_root>/raw/
-  episode_000000/
-    camera_original.mp4
-    piper.csv
-    leader_hand.csv
-    timestamps.json
-    metadata.json
+<dataset_root>/
+  raw/episode_000000/
+    camera.mp4               OAK-1 video, frame i = camera_timestamps.csv row i
+    camera_timestamps.csv    frame_idx, monotonic_ns (capture), receipt_monotonic_ns, sequence_num
+    leader_hand.csv          monotonic_ns, pos_0..pos_12
+    quest.csv                monotonic_ns, seq, px..pz, qx..qw          (Quest)
+    mocap.csv                Vicon poses/markers, frame_number, ROS stamps (mocap)
+    piper.csv                monotonic_ns, x..yaw [, joint_1..6]         (--use-piper)
+    follower.csv             MIDAS measured positions                    (follower)
+    metadata.json            status, counts, settings, piper.start_pose
+  processed/episode_000000/
+    piper.csv                full-rate replay poses, XYZ + Euler
+    metadata.json            pose source/frame, calibration hash, start pose
+  processing_summary.json
 ```
 
 The diffusion trainer ignores that. The trainer only consumes:
@@ -414,5 +468,5 @@ The task YAML owns the default dataset path:
 dataset_path: data_trimorph
 ```
 
-Override it per collected dataset root, for example `data_trimorph1`,
-`data_trimorph2`, or an absolute path.
+Override it per collected dataset root, for example `data_collection_0`,
+`data_collection_1`, or an absolute path.

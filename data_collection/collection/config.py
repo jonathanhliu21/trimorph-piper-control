@@ -20,15 +20,19 @@ TASK_CAMERA_FPS = 30
 # One of: "none", "horizontal", "vertical", "both", or "180".
 # "180" is the readable alias for flipping both axes.
 TASK_CAMERA_FLIP = "both"
-# DepthAI brightness compensation, in the device-supported range -10..10.
-TASK_CAMERA_BRIGHTNESS = -1
-# Match the room's AC mains frequency to prevent exposure/flicker banding.
-TASK_CAMERA_ANTI_BANDING_HZ = "60"
+# Fixed exposure, sensitivity and white balance (auto-exposure and auto white
+# balance are off). Measured from the auto values under the lab lighting on
+# 2026-11-01; no frame-to-frame flicker at this exposure.
+TASK_CAMERA_EXPOSURE_US = 5829
+TASK_CAMERA_ISO = 100
+TASK_CAMERA_WHITE_BALANCE_K = 2634
 TASK_VIEW_WINDOW_NAME = "trimorph_task_view"
 VIDEO_CODEC = "mp4v"
 
 
 DEFAULT_DATASET_ROOT = Path("data_trimorph")
+# Each collection run saves to the next free <name>_<n> folder (n = 0, 1, 2, ...).
+DEFAULT_DATASET_NAME = "data_collection_1"
 PIPER_JOINT_FIELDS = tuple(f"joint_{joint}" for joint in range(1, 7))
 
 
@@ -88,8 +92,9 @@ class HandRuntimeConfig:
     task_camera_height: int = TASK_CAMERA_HEIGHT
     task_camera_fps: int = TASK_CAMERA_FPS
     task_camera_flip: str = TASK_CAMERA_FLIP
-    task_camera_brightness: int = TASK_CAMERA_BRIGHTNESS
-    task_camera_anti_banding_hz: str = TASK_CAMERA_ANTI_BANDING_HZ
+    task_camera_exposure_us: int = TASK_CAMERA_EXPOSURE_US
+    task_camera_iso: int = TASK_CAMERA_ISO
+    task_camera_white_balance_k: int = TASK_CAMERA_WHITE_BALANCE_K
     video_codec: str = VIDEO_CODEC
     active_motors: list[int] = field(
         default_factory=lambda: list(TRIMORPH_MOTOR_IDS)
@@ -155,6 +160,9 @@ class HandOnlyCollectionConfig(HandRuntimeConfig):
     use_quest: bool = False
     use_mocap: bool = False
     mocap_topics: tuple[str, ...] = ()
+    # Live 3D Quest/Vicon view with signal status; the calibration maps both to Piper axes.
+    show_tracking_monitor: bool = False
+    monitor_calibration: Path | None = None
     quest_host: str = DEFAULT_QUEST_HOST
     quest_port: int = DEFAULT_QUEST_PORT
     quest_jump_threshold: float = DEFAULT_QUEST_JUMP_THRESHOLD
@@ -235,11 +243,13 @@ def validate_camera_settings(config) -> None:
         raise ValueError(
             "TASK_CAMERA_FLIP must be one of: none, horizontal, vertical, both, 180"
         )
-    if not -10 <= config.task_camera_brightness <= 10:
-        raise ValueError("TASK_CAMERA_BRIGHTNESS must be in range -10..10")
-    if config.task_camera_anti_banding_hz not in {"off", "50", "60", "auto"}:
+    if not 0 < config.task_camera_exposure_us <= 1_000_000 / config.task_camera_fps:
         raise ValueError(
-            "TASK_CAMERA_ANTI_BANDING_HZ must be one of: off, 50, 60, auto"
+            "TASK_CAMERA_EXPOSURE_US must be greater than 0 and fit in one frame"
         )
+    if not 100 <= config.task_camera_iso <= 1600:
+        raise ValueError("TASK_CAMERA_ISO must be in range 100..1600")
+    if not 1000 <= config.task_camera_white_balance_k <= 12000:
+        raise ValueError("TASK_CAMERA_WHITE_BALANCE_K must be in range 1000..12000")
     if len(config.video_codec) != 4:
         raise ValueError("VIDEO_CODEC must be a 4-character fourcc")

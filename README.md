@@ -45,7 +45,7 @@ cp config/hand.example.yaml config/hand.yaml
 | `scripts/thumb_retargeting/` | Paired thumb calibration and model fitting |
 | `scripts/motion_smoothness/` | Deterministic joint motion tests |
 | `scripts/tracking_error/` | Leader/follower tracking diagnostics |
-| `scripts/dataset/` | Raw episode postprocessing and dataset validation |
+| `scripts/dataset/` | Piper-only postprocessing base and dataset validation (`data_collection/postprocess_dataset.py` extends it) |
 | `scripts/trimorph_api_test/` | Hand bring-up, contact UI, telemetry, and plotting |
 | `scripts/piper_api/`, `scripts/camera/`, `scripts/quest/` | Arm utilities and standalone sensor checks |
 | `tests/` | Automated tests |
@@ -275,14 +275,14 @@ to 250 Hz; `--piper-rate-hz`, `--piper-teacher-mode-poll-hz`,
 Add `--add-camera` to start the DepthAI/OAK wrist camera, display its live feed,
 and save `camera.mp4` plus populated `camera_timestamps.csv` and camera metadata
 in the standard raw episode format. Press `q` or Escape in the camera
-window to stop through the normal episode-save path. Camera brightness and
-anti-banding defaults are configured by `TASK_CAMERA_BRIGHTNESS` and
-`TASK_CAMERA_ANTI_BANDING_HZ` in `data_collection/collection/config.py`; the
-default anti-banding mode is `60` Hz.
+window to stop through the normal episode-save path. Auto-exposure and auto
+white balance are off: the camera uses the fixed `TASK_CAMERA_EXPOSURE_US`,
+`TASK_CAMERA_ISO`, `TASK_CAMERA_WHITE_BALANCE_K` and `TASK_CAMERA_FPS` in
+`data_collection/collection/config.py`. Re-measure them if the lighting changes.
 Set `TASK_CAMERA_FLIP = "180"` in the same config file to rotate the saved and
 previewed image by 180 degrees.
 
-To check the camera and its configured brightness, anti-banding, resolution,
+To check the camera and its configured exposure, white balance, resolution,
 and flip before collection, run:
 
 ```bash
@@ -524,25 +524,28 @@ low-current hardware tests.
 
 ## Full PiperX/OAK-1 collection and dataset conversion
 
-Use the current collector with both optional workers for synchronized camera,
-PiperX, and hand data:
+The collector records the hand, Quest, Vicon mocap, and OAK-1 camera by
+default, into the next free `data_collection_n` folder. Add `--use-piper` to
+record PiperX drag-teach poses instead of the Quest:
 
 ```bash
-python3 data_collection/collect_hand_only.py --add-camera --use-piper \
+python3 data_collection/collect_hand_only.py --use-piper \
   --hand-config config/hand.yaml \
   --hand-port /dev/serial/by-id/TRIMORPH
 ```
 
 Its raw episode contains `camera.mp4`, `camera_timestamps.csv`,
-`leader_hand.csv`, optional `follower.csv`, `piper.csv`, and `metadata.json`.
-Convert raw episodes with:
+`leader_hand.csv`, `piper.csv` (or `quest.csv`), `mocap.csv`, optional
+`follower.csv`, and `metadata.json`. Convert raw episodes with (add
+`--calibration-json` for Quest or mocap poses):
 
 ```bash
-python3 scripts/dataset/postprocess_dataset.py data_trimorph
+python3 data_collection/postprocess_dataset.py data_collection_0
 ```
 
-See `data_collection/DATASET_SPEC.md` for the processed format and
-`data_collection/README.md` for additional implementation details.
+See `data_collection/PIPELINE.md` for the end-to-end collection and
+postprocessing workflow, `data_collection/DATASET_SPEC.md` for the processed
+format, and `data_collection/README.md` for additional implementation details.
 
 ## Verification
 

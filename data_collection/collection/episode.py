@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import hashlib
 import threading
 import time
@@ -44,6 +45,25 @@ def next_episode_index(root: Path) -> int:
         if path.is_dir() and suffix.isdigit():
             indices.append(int(suffix))
     return max(indices, default=-1) + 1
+
+
+def next_dataset_root(name: Path) -> Path:
+    """Return the next unused NAME_n folder; NAME may include parent directories.
+
+    The folder is not created, so a run that records nothing leaves no folder.
+    """
+
+    name = Path(name)
+    if not name.name or name.name in {".", ".."}:
+        raise ValueError(f"Invalid dataset name: {str(name)!r}")
+    prefix = f"{name.name}_"
+    indices = []
+    if name.parent.is_dir():
+        for path in name.parent.glob(f"{glob.escape(prefix)}*"):
+            suffix = path.name.removeprefix(prefix)
+            if path.is_dir() and suffix.isdigit():
+                indices.append(int(suffix))
+    return name.parent / f"{prefix}{max(indices, default=-1) + 1}"
 
 
 def episode_paths(dataset_root: Path, episode_index: int) -> EpisodePaths:
@@ -243,13 +263,24 @@ class EpisodeBuffer:
                     if has_camera
                     else None
                 ),
-                "brightness": (
-                    getattr(self.config, "task_camera_brightness", None)
+                "exposure_us": (
+                    getattr(self.config, "task_camera_exposure_us", None)
                     if has_camera
                     else None
                 ),
-                "anti_banding_hz": (
-                    getattr(self.config, "task_camera_anti_banding_hz", None)
+                "iso": (
+                    getattr(self.config, "task_camera_iso", None)
+                    if has_camera
+                    else None
+                ),
+                "white_balance_k": (
+                    getattr(self.config, "task_camera_white_balance_k", None)
+                    if has_camera
+                    else None
+                ),
+                "timestamp": (
+                    "monotonic_ns: DepthAI mid-exposure capture time on the host "
+                    "clock; receipt_monotonic_ns: host arrival time"
                     if has_camera
                     else None
                 ),

@@ -5,6 +5,7 @@ scripts/recordings/*.csv
 __pycache__
 data_midas*/
 data_trimorph*/
+data_collection_*/
 config/leader_hand.yaml
 config/follower_hand.yaml
 hand_recording.csv

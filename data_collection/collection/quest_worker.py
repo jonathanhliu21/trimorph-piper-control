@@ -14,6 +14,8 @@ from .shared_state import SharedState
 QUEST_POSE_FIELDS = QUEST_PACKET_FIELDS[1:]
 QUEST_MAX_DATAGRAM_BYTES = 2048
 QUEST_SOCKET_POLL_TIMEOUT_S = 0.2
+# Name of the Quest pose in SharedState.latest_tracker_poses().
+QUEST_TRACKER_NAME = "quest"
 
 
 def _decode_packet(data: bytes) -> dict[str, int | float]:
@@ -121,6 +123,12 @@ def run_quest_worker(
                 previous_position = position
                 previous_sample_ns = sample_ns
 
+            shared.set_tracker_pose(
+                QUEST_TRACKER_NAME,
+                sample_ns,
+                (packet["px"], packet["py"], packet["pz"]),
+                (packet["qx"], packet["qy"], packet["qz"], packet["qw"]),
+            )
             if not initialized:
                 initialized = True
                 init_done.set()

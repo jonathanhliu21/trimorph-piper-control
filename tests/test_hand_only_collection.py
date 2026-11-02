@@ -1,4 +1,5 @@
 import json
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from data_collection.collection.config import (
     DATA_COLLECTION_MODE,
+    DEFAULT_DATASET_NAME,
     DEFAULT_FOLLOWER_MEASURE_RATE_HZ,
     DEFAULT_FORCE_FEEDBACK_RATE_HZ,
     DEFAULT_HAND_MEASURE_RATE_HZ,
@@ -24,7 +26,7 @@ from data_collection.collect_hand_only import (
     stop_episode,
     worker_specs,
 )
-from data_collection.collection.episode import RecordingManager
+from data_collection.collection.episode import RecordingManager, next_dataset_root
 from data_collection.collection.config import TRIMORPH_MOTOR_IDS
 
 
@@ -125,6 +127,46 @@ class HandOnlyCollectionTests(unittest.TestCase):
         self.assertEqual(config.piper_rate_hz, 300.0)
         self.assertEqual(config.piper_channel, "can1")
 
+    def test_next_dataset_root_uses_next_free_index(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.assertEqual(next_dataset_root(root / "pick"), root / "pick_0")
+            for name in ("pick_0", "pick_2", "pick_x", "pick2_7"):
+                (root / name).mkdir()
+            (root / "pick_9").touch()
+            self.assertEqual(next_dataset_root(root / "pick"), root / "pick_3")
+            self.assertEqual(next_dataset_root(root / "new" / "pick"), root / "new" / "pick_0")
+            self.assertFalse((root / "new").exists())
+
+    def test_main_saves_each_run_to_a_named_numbered_folder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            name = Path(temp_dir) / "cup"
+            (Path(temp_dir) / "cup_0").mkdir()
+            with (
+                patch("sys.argv", ["collect_hand_only.py", "--dataset-name", str(name)]),
+                patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
+            ):
+                self.assertEqual(main(), 0)
+            self.assertEqual(run.call_args.args[0].dataset_root, Path(temp_dir) / "cup_1")
+
+    def test_default_dataset_name_and_explicit_root(self):
+        with patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run:
+            with patch("sys.argv", ["collect_hand_only.py"]):
+                main()
+            self.assertRegex(
+                run.call_args.args[0].dataset_root.name,
+                rf"^{re.escape(DEFAULT_DATASET_NAME)}_\d+$",
+            )
+            with patch("sys.argv", ["collect_hand_only.py", "--dataset-root", "existing"]):
+                main()
+            self.assertEqual(run.call_args.args[0].dataset_root, Path("existing"))
+        with (
+            patch("sys.argv", ["collect_hand_only.py", "--dataset-root", "a", "--dataset-name", "b"]),
+            patch("sys.stderr"),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
     def test_joint_position_alias_enables_piper_joint_recording(self):
         with (
             patch("sys.argv", ["collect_hand_only.py", "--use-piper", "--joint-position"]),
@@ -189,11 +231,40 @@ class HandOnlyCollectionTests(unittest.TestCase):
         with patch("sys.argv", ["collect_hand_only.py", "--show-ui"]):
             self.assertTrue(parse_args().show_ui)
 
-    def test_camera_flag_is_opt_in(self):
+    def test_camera_flag_is_on_by_default(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
-            self.assertFalse(parse_args().add_camera)
+            self.assertTrue(parse_args().add_camera)
         with patch("sys.argv", ["collect_hand_only.py", "--add-camera"]):
             self.assertTrue(parse_args().add_camera)
+        with patch("sys.argv", ["collect_hand_only.py", "--no-camera"]):
+            self.assertFalse(parse_args().add_camera)
+
+    def test_mocap_flag_is_on_by_default_when_recording(self):
+        with patch("sys.argv", ["collect_hand_only.py"]):
+            self.assertTrue(parse_args().use_mocap)
+        with patch("sys.argv", ["collect_hand_only.py", "--no-mocap"]):
+            self.assertFalse(parse_args().use_mocap)
+        with patch("sys.argv", ["collect_hand_only.py", "--retarget-only"]):
+            self.assertFalse(parse_args().use_mocap)
+        with patch("sys.argv", ["collect_hand_only.py", "--retarget-only", "--use-mocap"]):
+            self.assertTrue(parse_args().use_mocap)
+        with (
+            patch("sys.argv", ["collect_hand_only.py", "--no-mocap", "--mocap-topic", "/hand"]),
+            patch("sys.stderr"),
+            self.assertRaises(SystemExit),
+        ):
+            parse_args()
+
+    def test_default_streams_are_hand_camera_quest_and_mocap(self):
+        with (
+            patch("sys.argv", ["collect_hand_only.py"]),
+            patch("data_collection.collect_hand_only.run_hand_only", return_value=0) as run,
+        ):
+            self.assertEqual(main(), 0)
+        self.assertEqual(
+            [name for name, _ in worker_specs(run.call_args.args[0])],
+            ["task_camera", "quest", "mocap", "leader_hand"],
+        )
 
     def test_piper_flag_is_opt_in(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
@@ -201,15 +272,23 @@ class HandOnlyCollectionTests(unittest.TestCase):
         with patch("sys.argv", ["collect_hand_only.py", "--use-piper"]):
             self.assertTrue(parse_args().use_piper)
 
-    def test_quest_flag_is_opt_in_and_mutually_exclusive_with_piper(self):
+    def test_quest_flag_is_on_by_default_and_mutually_exclusive_with_piper(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
-            self.assertFalse(parse_args().use_quest)
+            self.assertTrue(parse_args().use_quest)
         with patch("sys.argv", ["collect_hand_only.py", "--use-quest"]):
             self.assertTrue(parse_args().use_quest)
+        with patch("sys.argv", ["collect_hand_only.py", "--no-quest"]):
+            self.assertFalse(parse_args().use_quest)
+        with patch("sys.argv", ["collect_hand_only.py", "--retarget-only"]):
+            self.assertFalse(parse_args().use_quest)
+        with patch("sys.argv", ["collect_hand_only.py", "--use-piper"]):
+            args = parse_args()
+            self.assertTrue(args.use_piper)
+            self.assertFalse(args.use_quest)
         with patch(
             "sys.argv", ["collect_hand_only.py", "--use-piper", "--use-quest"]
         ):
-            with self.assertRaises(SystemExit):
+            with patch("sys.stderr"), self.assertRaises(SystemExit):
                 parse_args()
 
     def test_camera_worker_is_conditional(self):
@@ -279,7 +358,7 @@ class HandOnlyCollectionTests(unittest.TestCase):
             self.assertEqual(main(), 0)
         self.assertEqual(run.call_args.args[0].quest_jump_threshold, .1)
         self.assertFalse(run.call_args.args[0].use_piper)
-        self.assertFalse(run.call_args.args[0].add_camera)
+        self.assertTrue(run.call_args.args[0].add_camera)
         for value in ("0", "-1", "nan", "inf"):
             with (self.subTest(value=value),
                   patch("sys.argv", ["collect_hand_only.py", "--use-quest", "--quest-jump-threshold", value]),
@@ -542,8 +621,9 @@ class HandOnlyCollectionTests(unittest.TestCase):
 
             metadata = json.loads(session.paths.metadata_path.read_text())
             self.assertEqual(metadata["camera"]["device"], "oak1_depthai")
-            self.assertEqual(metadata["camera"]["brightness"], -1)
-            self.assertEqual(metadata["camera"]["anti_banding_hz"], "60")
+            self.assertEqual(metadata["camera"]["exposure_us"], 5829)
+            self.assertEqual(metadata["camera"]["iso"], 100)
+            self.assertEqual(metadata["camera"]["white_balance_k"], 2634)
             self.assertEqual(metadata["counts"]["camera_frames"], 1)
 
     def test_run_hand_only_owns_timing_and_episode_lifecycle(self):

@@ -208,6 +208,12 @@ def run_mocap_worker(config, shared, recorder, *, init_done) -> None:
 
     def on_row(row):
         nonlocal sample_session, sample_idx
+        if row["message_type"] == "vicon_receiver/msg/Position":
+            position = [float(row[key]) / 1000.0 for key in ("x_trans", "y_trans", "z_trans")]  # mm -> m
+            # Vicon reports a lost object as an all-zero pose.
+            shared.set_tracker_pose(row["topic"], row["monotonic_ns"], position,
+                                    [float(row[key]) for key in ("x_rot", "y_rot", "z_rot", "w")],
+                                    lost=not any(position))
         session = recorder.current()
         if session is None:
             return
