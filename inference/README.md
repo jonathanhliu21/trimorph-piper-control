@@ -11,13 +11,13 @@ On the robot machine, in its control environment:
 
 ```bash
 python -m pip install -r requirements.txt
-python -m pip install -e ../trimorph_hand_api
+python -m pip install -e ../trimorph-hand-api
 python -c 'import midas_hand_api; print(midas_hand_api.__file__)'
 ```
 
 The Trimorph fork retains the `midas-hand` distribution name, `midas_hand_api`
 module, and `MidasHand` class. The executor defaults to the sibling
-`../trimorph_hand_api` source directory and checks the imported module location.
+`../trimorph-hand-api` source directory and checks the imported module location.
 Use `--hand-api-repo` if it lives elsewhere. Keep the GPU training environment
 separate from the hardware dependencies.
 
@@ -55,13 +55,13 @@ python -m unittest discover -s tests -p 'test_inference.py'
 ## Execute on Trimorph and Piper
 
 ```bash
-python inference/executor/executor.py \
-  --predictor GPU_HOST \
-  --hand-api-repo /path/to/trimorph_hand_api \
-  --hand-config config/hand.yaml \
-  --hand-port /dev/serial/by-id/YOUR_TRIMORPH_HAND \
-  --piper-channel can0 --hz 15
+python inference/executor/executor.py --predictor GPU_HOST --hz 15
 ```
+
+The hand defaults are the bench TriMi: `../trimorph-hand-api`,
+`config/xl330_test_config.yaml`, and the FTDI `FTBEO9P0` serial port. That
+adapter is shared with the glove, so confirm TriMi is on it, or pass
+`--hand-api-repo`, `--hand-config`, and `--hand-port`.
 
 This enables and commands the actual hand and arm. There is no automatic home
 motion: start from the intended task pose. Hand setup follows the repository's
@@ -70,8 +70,8 @@ torque, configured velocity/acceleration profiles, then nonblocking position
 writes. It does not start the collection force-feedback workers. On exit it
 shuts down the hand and disconnects Piper; it does not retract/home the arm.
 
-Piper firmware/interface/channel/installation/payload and OAK image size, flip,
-brightness, and anti-banding defaults come from
+Piper firmware/interface/channel/installation/payload and OAK image size, FPS,
+flip, manual exposure/ISO, and white-balance defaults come from
 `data_collection/collection/config.py`. Override them through `--help` options
 when collection used different settings. The hand API uses the YAML baudrate,
 calibration, gains, and limits. It verifies the connected motor models.

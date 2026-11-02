@@ -24,6 +24,10 @@ from inference import protocol
 from data_collection.collection import config as defaults
 
 MOTOR_IDS = tuple(defaults.TRIMORPH_MOTOR_IDS)
+# TriMi on the bench rig; the collection defaults are placeholders for the glove.
+DEFAULT_HAND_API_REPO = CONTROL_ROOT.parent / "trimorph-hand-api"
+DEFAULT_HAND_CONFIG = CONTROL_ROOT / "config" / "xl330_test_config.yaml"
+DEFAULT_HAND_PORT = "/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO9P0-if00-port0"
 
 
 def vector(value, size, name):
@@ -133,10 +137,12 @@ class OakCamera:
         require_depthai_device(dai)
         self.pipeline = dai.Pipeline()
         try:
-            cam = self.pipeline.create(dai.node.Camera).build()
-            apply_camera_control(dai, cam, brightness=args.cam_brightness,
-                                 anti_banding_hz=args.cam_anti_banding)
-            output = cam.requestOutput((args.cam_width, args.cam_height), dai.ImgFrame.Type.NV12)
+            cam = self.pipeline.create(dai.node.Camera).build(sensorFps=args.cam_fps)
+            # Same locked exposure/white balance as collection, so images match training.
+            apply_camera_control(cam, exposure_us=args.cam_exposure_us, iso=args.cam_iso,
+                                 white_balance_k=args.cam_white_balance_k)
+            output = cam.requestOutput((args.cam_width, args.cam_height), dai.ImgFrame.Type.NV12,
+                                       fps=args.cam_fps)
             self.queue = output.createOutputQueue()
             self.pipeline.start()
             # Match collection warmup, bounded by the configured timeout.
@@ -236,9 +242,9 @@ def parse_args(argv=None):
     p.add_argument("--timeout", type=float, default=30.0, help="TCP timeout in seconds")
     p.add_argument("--jpeg-quality", type=int, default=85)
     p.add_argument("--fake", action="store_true", help="Synthetic observations; no hardware imports/connections")
-    p.add_argument("--hand-api-repo", type=Path, default=CONTROL_ROOT.parent / "trimorph_hand_api")
-    p.add_argument("--hand-config", type=Path, default=CONTROL_ROOT / defaults.DEFAULT_HAND_CONFIG)
-    p.add_argument("--hand-port", default=defaults.DEFAULT_HAND_PORT)
+    p.add_argument("--hand-api-repo", type=Path, default=DEFAULT_HAND_API_REPO)
+    p.add_argument("--hand-config", type=Path, default=DEFAULT_HAND_CONFIG)
+    p.add_argument("--hand-port", default=DEFAULT_HAND_PORT)
     p.add_argument("--hand-velocity", type=float, default=defaults.FOLLOWER_PROFILE_VELOCITY_RAD_S)
     p.add_argument("--hand-acceleration", type=float, default=defaults.FOLLOWER_PROFILE_ACCELERATION_RAD_S2)
     for name, default in (
@@ -252,9 +258,10 @@ def parse_args(argv=None):
     p.add_argument("--cam-height", type=int, default=defaults.TASK_CAMERA_HEIGHT)
     p.add_argument("--cam-flip", default=defaults.TASK_CAMERA_FLIP,
                    choices=["none", "horizontal", "vertical", "both", "180"])
-    p.add_argument("--cam-brightness", type=int, default=defaults.TASK_CAMERA_BRIGHTNESS)
-    p.add_argument("--cam-anti-banding", default=defaults.TASK_CAMERA_ANTI_BANDING_HZ,
-                   choices=["off", "50", "60", "auto"])
+    p.add_argument("--cam-fps", type=int, default=defaults.TASK_CAMERA_FPS)
+    p.add_argument("--cam-exposure-us", type=int, default=defaults.TASK_CAMERA_EXPOSURE_US)
+    p.add_argument("--cam-iso", type=int, default=defaults.TASK_CAMERA_ISO)
+    p.add_argument("--cam-white-balance-k", type=int, default=defaults.TASK_CAMERA_WHITE_BALANCE_K)
     p.add_argument("--camera-timeout", type=float, default=5.0)
     args = p.parse_args(argv)
     for name in ("hz", "timeout", "camera_timeout", "hand_velocity", "hand_acceleration"):
@@ -262,6 +269,10 @@ def parse_args(argv=None):
             p.error(f"--{name.replace('_', '-')} must be finite and positive")
     if args.max_cycles < 0 or not 1 <= args.jpeg_quality <= 100 or not 1 <= args.piper_speed <= 100:
         p.error("Require max-cycles >= 0, jpeg-quality 1..100, piper-speed 1..100")
+    if args.cam_fps <= 0 or not 0 < args.cam_exposure_us <= 1_000_000 / args.cam_fps:
+        p.error("Require cam-fps > 0 and cam-exposure-us within one frame")
+    if not 100 <= args.cam_iso <= 1600 or not 1000 <= args.cam_white_balance_k <= 12000:
+        p.error("Require cam-iso 100..1600 and cam-white-balance-k 1000..12000")
     return args
 
 
