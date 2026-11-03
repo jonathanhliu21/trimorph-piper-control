@@ -163,6 +163,9 @@ class HandOnlyCollectionConfig(HandRuntimeConfig):
     # Live 3D Quest/Vicon view with signal status; the calibration maps both to Piper axes.
     show_tracking_monitor: bool = False
     monitor_calibration: Path | None = None
+    mocap_ik_calibration: Path | None = None
+    mocap_ik_topic: str = '/vicon/Yori/Yori'
+    mocap_ik_seed_deg: tuple[float, ...] = (0., 45., -45., 0., 30., 0.)
     quest_host: str = DEFAULT_QUEST_HOST
     quest_port: int = DEFAULT_QUEST_PORT
     quest_jump_threshold: float = DEFAULT_QUEST_JUMP_THRESHOLD

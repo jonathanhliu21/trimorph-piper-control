@@ -169,6 +169,13 @@ def parse_args() -> argparse.Namespace:
             "Quest / Vicon motion to Piper axes (default: each tracker's own axes)"
         ),
     )
+    parser.add_argument('--mocap-ik-calibration', type=Path,
+                        help='Open a live Piper IK warning window using this Vicon-reference calibration; requires mocap')
+    parser.add_argument('--mocap-ik-topic', default='/vicon/Yori/Yori',
+                        help='Marker plate topic to check for IK (default: /vicon/Yori/Yori)')
+    parser.add_argument('--mocap-ik-seed-deg', type=float, nargs=6,
+                        default=(0., 45., -45., 0., 30., 0.),
+                        help='Initial offline IK branch seed in degrees; no arm connection')
     parser.add_argument(
         "--quest-jump-threshold", type=float, default=DEFAULT_QUEST_JUMP_THRESHOLD,
         help="Warn when consecutive Quest packets move farther than this distance in native position units (default: 0.05).",
@@ -323,6 +330,13 @@ def parse_args() -> argparse.Namespace:
         args.use_mocap = recording
     if args.mocap_topics and not args.use_mocap:
         parser.error("--mocap-topic requires mocap (remove --no-mocap)")
+    if args.mocap_ik_calibration is not None:
+        if not args.use_mocap:
+            parser.error('--mocap-ik-calibration requires mocap (remove --no-mocap)')
+        if args.mocap_topics and args.mocap_ik_topic not in args.mocap_topics:
+            parser.error('--mocap-ik-topic must be included in the selected --mocap-topic values')
+        if not all(math.isfinite(value) for value in args.mocap_ik_seed_deg):
+            parser.error('--mocap-ik-seed-deg requires six finite values')
     if args.show_tracking_monitor is None:
         args.show_tracking_monitor = args.use_quest or args.use_mocap
     elif args.show_tracking_monitor and not (args.use_quest or args.use_mocap):
@@ -666,6 +680,8 @@ def move_piper_to_start(config: HandOnlyCollectionConfig) -> tuple[float, ...]:
 
 
 def run_hand_only(config: HandOnlyCollectionConfig) -> int:
+    if config.mocap_ik_calibration is not None and not config.use_mocap:
+        raise ValueError('Mocap IK monitoring requires mocap')
     shared = SharedState()
     recorder = RecordingManager()
     errors: queue.Queue[WorkerError] = queue.Queue()
@@ -720,8 +736,14 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
     if isinstance(threads, threading.Thread) or hasattr(threads, "join"):
         threads = [threads]
     reason = "duration_complete"
-    monitor = None
+    monitor = ik_monitor = None
     try:
+        if config.mocap_ik_calibration is not None:
+            from data_collection.collection.mocap_ik_monitor import MocapIKMonitor
+
+            ik_monitor = MocapIKMonitor(shared, config.mocap_ik_calibration,
+                                        topic=config.mocap_ik_topic, seed_deg=config.mocap_ik_seed_deg,
+                                        recorder=recorder)
         if config.show_tracking_monitor:
             from data_collection.collection.tracking_monitor import (
                 TrackingMonitor,
@@ -740,6 +762,7 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
             for tick in (
                 pedal_controller.poll if pedal_controller is not None else None,
                 monitor.update if monitor is not None else None,
+                ik_monitor.update if ik_monitor is not None else None,
             )
             if tick is not None
         ]
@@ -763,9 +786,9 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
                 show_camera=config.add_camera,
                 camera_window_name=config.task_view_window_name,
                 on_tick=on_tick if ticks else None,
-                poll_windows=monitor is not None,
+                poll_windows=monitor is not None or ik_monitor is not None,
             )
-        elif config.add_camera or monitor is not None:
+        elif config.add_camera or monitor is not None or ik_monitor is not None:
             reason = run_camera_view(
                 shared,
                 duration_s=duration_s,
@@ -797,6 +820,8 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
             pedal.stop()
         if monitor is not None:
             monitor.close()
+        if ik_monitor is not None:
+            ik_monitor.close()
         for thread in threads:
             thread.join(timeout=3.0)
         if config.mode == DATA_COLLECTION_MODE:
@@ -857,6 +882,10 @@ def main() -> int:
         use_quest=args.use_quest,
         use_mocap=args.use_mocap,
         mocap_topics=tuple(args.mocap_topics),
+        mocap_ik_calibration=(args.mocap_ik_calibration.expanduser()
+                              if args.mocap_ik_calibration is not None else None),
+        mocap_ik_topic=args.mocap_ik_topic,
+        mocap_ik_seed_deg=tuple(args.mocap_ik_seed_deg),
         show_tracking_monitor=args.show_tracking_monitor,
         monitor_calibration=(
             args.monitor_calibration.expanduser()

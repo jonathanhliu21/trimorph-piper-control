@@ -66,6 +66,33 @@ Piper base axes. Drag to rotate, right-drag or scroll to zoom, double-click to
 re-center; `q`/Escape stops collection as in the camera view. Disable it with
 `--no-monitor`. The window only displays; it does not change what is recorded.
 
+For a live IK warning window, add these options to your collection command:
+
+```bash
+--use-mocap \
+--mocap-ik-calibration output/quest_calibration/20261101_183239_quest_calib/calibration_quest_vicon_ref/quest_calibration.json \
+--mocap-ik-topic /vicon/Yori/Yori
+```
+
+`trimorph_mocap_ik` maps the selected marker plate to the absolute Piper flange
+pose using the same Vicon world and plate-to-flange transforms as postprocessing.
+Use the same marker plate and mounting geometry as the calibration. The window
+is enabled by `--mocap-ik-calibration`, requires mocap, and works with
+`--no-monitor`. Without that option there is no IK window or IK worker.
+
+A background worker checks the latest pose at up to 5 Hz, using local bounded
+IK, the SDK joint limits with replay's 3-degree margin, 10-degree wrist margin,
+and Jacobian singularity check. Green means that local solution passed; red
+shows the failure reason and estimated joints when available. Missing/lost
+tracking and stale IK results display an unavailable status instead of green.
+The first IK seed defaults to `0 45 -45 0 30 0` degrees; override it with
+`--mocap-ik-seed-deg J1 J2 J3 J4 J5 J6`. Later checks use the last valid solution.
+
+The monitor never connects to or commands Piper, and raw recording is unchanged.
+It checks poses on one local branch; it does not certify trajectory continuity,
+joint speeds, obstacles, live controller limits, or training-distribution membership.
+Raw live poses can warn on jitter that postprocessing later smooths.
+
 `collection/config.py` defines shared hardware and retargeting settings in
 `HandRuntimeConfig` and collection-specific options in
 `HandOnlyCollectionConfig`. Replay tuning lives in `collection/replay_config.py`.
@@ -264,3 +291,221 @@ offset is estimated. An enabled recording with no samples still writes a CSV
 header. With `--no-mocap` (or `--retarget-only`), no ROS imports, discovery, initialization, or
 subscriptions occur. Replay requires `--mocap-output` with `--use-mocap`;
 `--mocap-topic` and `--mocap-output` require mocap to be enabled.
+
+## Replay action NumPy files with offline joint planning
+
+`replay_actions.py` loads `absolute_action_t/NNNNNN.npy` as XYZ in meters and
+rotation vectors in radians. For dataset files it discovers
+`processed_encoder_t/NNNNNN.npy` (13 calibrated hand motors, IDs 0..12) and
+`syncs/NNNNNN.npz`. It aligns hand samples using their original timestamps,
+trims arm samples outside shared coverage, and requires `pose_frame=piper_base`.
+It applies no follower scaling or thumb retargeting.
+
+By default it only plans and writes a joint/hand `.npz` and a JSON summary.
+For `.npy` input and `--relative` planning, it reads the current Piper joints,
+status, and controller limits without enabling actuators or sending motion
+targets. It does not connect to the hand. No `--execute` is needed to read the
+starting configuration:
+
+```bash
+python data_collection/replay_actions.py \
+  data_trimorph_pingpong_pick_place_mocap/absolute_action_t/000000.npy \
+  --relative --playback-speed 0.05
+```
+
+For completely disconnected planning, supply six `--start-joints-deg` values.
+They must describe the intended starting configuration. For example, with a
+shell array `START_JOINTS_DEG` containing those six angles:
+
+```bash
+python data_collection/replay_actions.py \
+  data_trimorph_pingpong_pick_place_mocap/absolute_action_t/000005.npy \
+  --start-joints-deg "${START_JOINTS_DEG[@]}" \
+  --output /tmp/episode_000005_plan.npz
+```
+
+Planning uses the installed SDK's Piper kinematics and conservative joint-limit
+presets. When reading the Piper, the script intersects these with queried
+controller limits. `--joint-limits-json limits.json` accepts six
+`[lower_deg, upper_deg]` pairs. With explicit starting angles and no hardware
+connection, bounds remain unverified presets/user values.
+
+To approach the first absolute arm target automatically, add `--preposition`:
+
+```bash
+.venv/bin/python data_collection/replay_actions.py \
+  data_trimorph_pick_place_calib/absolute_action_t/000000.npy \
+  --arm-only --preposition --execute
+```
+
+The planner prepends a joint-space approach at at most 5 degrees/second and
+checks its joint limits, wrist margin, Jacobian, steps, and speeds before
+enabling the arm. The recorded absolute trajectory follows the approach.
+Omit `--execute` to plan without moving. An invalid starting configuration or
+an approach crossing a singularity is still refused. Planning does not check
+obstacles along the approach. For combined replay, the hand stays at its first
+target during the approach.
+
+Use `--max-joint-speed-deg-s 60` to raise the arm's planned joint-speed limit
+from the default 15 degrees/second, for example with `--playback-speed 0.5`.
+This limit is recorded in the plan and JSON report; the 2-degree step limit
+and the approach's 5-degree/second speed remain in effect. `--piper-speed`
+separately controls the controller's speed percentage.
+`Limits` in `replay_actions.py` defines the checks: 3 degree joint margins,
+10 degree wrist-singularity margin, a weighted geometric Jacobian singular-value
+threshold, 2 degree joint steps, 15 degrees/second joint speed, 15 cm Cartesian
+position jumps, 10 degree rotation jumps, 0.1 rad hand jumps, and 0.5 rad/second
+hand speed. Source jumps are checked before resampling. IK must fit within
+0.5 mm and 0.2 degrees. Joint segments are sampled for limit/singularity checks.
+
+Hardware replay requires **`--execute`**:
+
+```bash
+python data_collection/replay_actions.py \
+  data_trimorph_pingpong_pick_place_mocap/absolute_action_t/000005.npy \
+  --execute --playback-speed 0.2 --piper-speed 10
+```
+
+This command controls the real hand and arm. It queries controller joint limits,
+intersects them with the planning bounds, reads the current joints as its IK
+seed, and plans before enabling actuators. It refuses automatic prepositioning:
+the arm must be within 2 degrees per joint of the first solved pose, and the
+hand within 0.1 rad per motor of its first target. Hand targets outside YAML
+limits are rejected, not clipped. There is no automatic home, installation, or
+payload change; those controller settings must already suit the mounted rig.
+
+Use `--arm-only` or `--hand-only` to isolate execution for debugging. Both flags
+are mutually exclusive; omitting both keeps synchronized hand + Piper replay.
+
+```bash
+# Real Piper only: no hand file/config loading or hand connection.
+python data_collection/replay_actions.py \
+  data_trimorph_pingpong_pick_place_mocap/absolute_action_t/000000.npy \
+  --arm-only --relative --playback-speed 0.05 --execute
+
+# Real hand only: no Piper connection, IK, or arm commands.
+python data_collection/replay_actions.py \
+  data_trimorph_pingpong_pick_place_mocap/absolute_action_t/000000.npy \
+  --hand-only --playback-speed 0.05 --execute
+```
+
+Remove `--execute` for planning. Arm-only planning reads current Piper feedback
+by default; hand-only planning accesses no hardware. Hand-only dataset replay
+uses `processed_encoder_t` and its own encoder timestamps, so it does not need
+an arm action file, pose metadata, or a valid arm trajectory. You can also pass
+a standalone `[T,13]` hand `.npy` with `--hand-only --hz RATE`.
+`--relative` and `--check-start` are arm options and cannot be combined with
+`--hand-only`. Hand-only keeps absolute calibrated motor targets and all hand
+range, jump, speed, and initial-position checks. Arm-only bypasses hand checks
+but retains all arm checks. Single-device plan exports omit the other device's
+targets and cannot accidentally be loaded as combined plans. Supply the same
+device-selection flag when replaying such a saved plan.
+
+To diagnose startup rejection without enabling actuators or replaying, use:
+
+```bash
+python data_collection/replay_actions.py \
+  data_trimorph_pingpong_pick_place_mocap/absolute_action_t/000000.npy \
+  --check-start
+```
+
+This only reads Piper joint/status feedback and queries controller limits. It
+prints each measured joint angle, the planning preset (or JSON) bounds, the
+controller bounds, and their intersection after the configured margin. It
+does not connect to the hand, run IK, or send motion/enable/configuration
+commands. Rejection messages identify each offending joint and allowed range.
+
+For repeated runs, `--skip-validation` skips the expensive preflight Jacobian
+singularity scans. It prints a warning and records
+`preflight_jacobian_checked=false` in the saved plan/report; the minimum
+Jacobian value is marked unmeasured. IK is still required for Cartesian `.npy`
+input. Joint bounds, wrist margins, jump/speed checks, hand limits, startup
+alignment, fresh CAN feedback, and runtime guards remain active. This flag has
+no effect on hand-only validation. It does not bypass stale-feedback errors.
+
+For temporary diagnostics, `--skip-feedback-freshness` separately disables the
+joint/status timestamp-age rejection at startup and during playback. It warns
+that cached feedback may be stale and records
+`feedback_freshness_checked=false` in the plan/report. Missing feedback,
+nonfinite timestamps, invalid joint values, controller faults, and other motion
+checks still abort. Without this flag the 250 ms freshness check remains active.
+
+Add `--debug-feedback` to log joint/status cache snapshots at startup, before and
+after planning, before enabling, and on failure. Logs include signed feedback
+age in milliseconds, SDK update rate, joint angles, controller status, elapsed
+time, and wall-clock drift relative to the monotonic clock. Failure logs identify
+the stage and whether enable was attempted. The failure snapshot is taken after
+the failed check (and after the stop attempt if enabled), so its feedback may
+already be fresh; the exception records the rejected sample. Missing, stale,
+future, and nonfinite timestamps are distinguished even without the debug flag.
+Diagnostics do not retry failures or relax the 250 ms freshness check.
+For faster repeated arm runs, use an already generated joint plan to avoid IK:
+
+```bash
+python data_collection/replay_actions.py /tmp/trimorph-action-plan.npz \
+  --arm-only --skip-validation --execute
+```
+
+This preserves the saved joint targets and timing and commands the real Piper
+after startup checks. It does not move the arm automatically to the saved start.
+
+Playback uses smooth joint `move_j`, avoiding firmware Cartesian IK branch
+selection. Default timing is 30 Hz at 0.2 times recorded speed. Each command
+checks fresh arm feedback, controller faults, joint margins, singularity, and
+distance to the next joint target. Excessive scheduling delays abort instead of
+sending a catch-up burst. Execution errors or Ctrl-C request the controller's
+electronic emergency stop. Completion leaves the last arm target and hand
+torque active; closing the connection does not disable hand torque.
+
+Standalone `[T,19]` policy chunks are also supported with `--hz 15 --pose-frame
+piper_base`; a standalone `[T,6]` file additionally needs `--hand-actions` with
+the same row count or an explicit `--sync`. No camera or predictor is needed.
+
+Saved joint-plan `.npz` files can be passed directly to the same script:
+
+```bash
+# Offline revalidation: preserves the saved absolute joint targets and timing.
+python data_collection/replay_actions.py /tmp/episode_000005_plan.npz
+
+# Controls hardware, after rechecking the plan against current feedback/limits.
+python data_collection/replay_actions.py /tmp/episode_000005_plan.npz --execute
+```
+
+These files contain `joints` (radians, `[T,6]`), `hand` (`[T,13]`), and `times`
+(seconds). Absolute joint playback is the default: no new IK solutions are
+substituted. Offline revalidation uses the first stored joint vector as its
+seed unless `--start-joints-deg` is supplied. Execution always verifies the
+measured arm is already at the first target. All limits and singularity checks
+are repeated; the saved safety report is not trusted as authorization to move.
+Saved plan timing is preserved by default, avoiding a second 0.2 speed factor;
+`--playback-speed` can explicitly slow a saved plan further.
+
+Dataset `syncs/*.npz` are **not** joint plans: their `start_pose` is an absolute
+EEF XYZ/rotation-vector pose, not J1..J6. The mocap demonstrations contain no
+measured Piper joint trajectory, so their original IK branch cannot be recovered
+uniquely. Generate a joint plan from `.npy` poses first, using a measured or
+explicit seed.
+
+`--relative` reanchors arm motion at the current measured starting configuration
+by default, including planning without `--execute`. Supplying
+`--start-joints-deg` instead keeps planning fully disconnected:
+
+```bash
+python data_collection/replay_actions.py \
+  data_trimorph_pingpong_pick_place_mocap/absolute_action_t/000005.npy \
+  --relative --start-joints-deg "${START_JOINTS_DEG[@]}"
+```
+
+For `.npy` Cartesian trajectories, position deltas and spatial rotation deltas
+from the first sample are applied to the starting flange pose, matching
+`replay_episode.py`'s relative convention. A relative-frame dataset is accepted
+only with `--relative`. For joint-plan `.npz` input, joint deltas from the first
+sample are applied to the starting joints. These are distinct relative spaces;
+the latter need not produce the original Cartesian path. Hand targets remain
+absolute calibrated motor positions in both modes. Reanchored paths undergo all
+checks again. The existing `.npy` behavior was absolute; it is still the default.
+
+These are numerical checks, not a safety certification. The script does not
+model the table, mounted hand geometry, self-collision, or the controller's full
+joint interpolation dynamics. A rejected file must be investigated before
+hardware replay; successful planning does not establish collision clearance.

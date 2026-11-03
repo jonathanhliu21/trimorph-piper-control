@@ -63,8 +63,13 @@ The hand defaults are the bench TriMi: `../trimorph-hand-api`,
 adapter is shared with the glove, so confirm TriMi is on it, or pass
 `--hand-api-repo`, `--hand-config`, and `--hand-port`.
 
-This enables and commands the actual hand and arm. There is no automatic home
-motion: start from the intended task pose. Hand setup follows the repository's
+This enables and commands the actual hand and arm. Before the first observation
+the arm ramps in joint space (10 deg/s, after an Enter prompt) to the demo start
+`DEMO_START_JOINTS_DEG` in `scripts/piper_api/go_to_joints.py`. Use
+`--start-joints-deg J1..J6` for another start, `--start-speed-deg-s` to change
+the speed (max 30), or `--no-start-move` to start wherever the arm is. `--show`
+opens a live wrist-camera window (flipped like the policy input); it freezes
+while waiting for the predictor, and q/Esc stops the executor. Hand setup follows the repository's
 replay path: mode 3 position control, hold measured position before enabling
 torque, configured velocity/acceleration profiles, then nonblocking position
 writes. It does not start the collection force-feedback workers. On exit it
@@ -95,6 +100,13 @@ calibration, gains, and limits. It verifies the connected motor models.
   A 30 FPS dataset with stride 2 uses 15 Hz, not the raw hand measurement rate.
 
 ## Timing and limitations
+
+Before playback, the executor checks the entire action chunk for Euclidean XYZ
+jumps greater than `MAX_EEF_JUMP_M = 0.15` meters, defined in
+`inference/executor/executor.py`. It checks the observation-to-first-action jump
+and every consecutive action pair. Any violation prints a warning and stops
+the executor without applying any hand or arm actions from that chunk. This
+check does not enforce workspace, table clearance, joint limits, or rotation limits.
 
 This port retains synchronous request/reply execution. It captures an
 observation, waits for the predictor, and then executes the returned chunk.
