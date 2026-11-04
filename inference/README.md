@@ -64,12 +64,66 @@ adapter is shared with the glove, so confirm TriMi is on it, or pass
 `--hand-api-repo`, `--hand-config`, and `--hand-port`.
 
 This enables and commands the actual hand and arm. Before the first observation
-the arm ramps in joint space (10 deg/s, after an Enter prompt) to the demo start
-`DEMO_START_JOINTS_DEG` in `scripts/piper_api/go_to_joints.py`. Use
-`--start-joints-deg J1..J6` for another start, `--start-speed-deg-s` to change
-the speed (max 30), or `--no-start-move` to start wherever the arm is. `--show`
+the arm ramps in joint space (10 deg/s, after an Enter prompt) to a named start
+from `PIPER_START_JOINTS_DEG` in `data_collection/collection/config.py`:
+`--start-home home_4c` by default (logged start #1, a tested offset of `home_4b`),
+`home_4d` (tested start #6), `home_4b` (median start of episodes 95-220 of
+`data_trimorph_hand_mocap_quest_4`), `home_4a` (its episodes 0-94),
+`home_cube1` (median start of `data_trimorph_hand_mocap_quest_5`), or `quest_0`.
+Every start reached (startup and pedal resets) is appended to
+`output/executor_starts.jsonl` with an id, the commanded and measured joints, and
+the measured flange pose; `--start-id N` repeats start N exactly (joints and hand
+start). `--start-jitter-mm` / `--start-jitter-deg` (default 0) add a random flange
+offset around the chosen start, solved by IK with replay's joint checks and logged
+like any other start.
+Use `--start-joints-deg J1..J6` for another start, `--start-speed-deg-s` to change
+the speed (max 30), or `--no-start-move` to start wherever the arm and hand are.
+After the arm, the hand moves (at the configured hand profile velocity) to the
+same start's median demo hand pose, `HAND_START_POSITIONS_RAD`; a hand that is not
+within 0.05 rad after 5 s only prints a warning. `--no-hand-start` moves only the arm. `--show`
 opens a live wrist-camera window (flipped like the policy input); it freezes
-while waiting for the predictor, and q/Esc stops the executor. Hand setup follows the repository's
+while waiting for the predictor, and q/Esc stops the executor.
+The arm is driven in joint space by default (`--arm-control joint`,
+`inference/executor/joint_control.py`): each policy pose is solved by local IK
+from the previous joint target and sent with `move_j`. The IK is exact except
+near the singularity (Jacobian smallest singular value below
+`--ik-damping-sigma`, default 0.03; 0.087 at `home_cube1`), where it accepts a
+few mm of pose error instead of large J2/J3 jumps; each step is scaled down to
+the joint speed caps (`--max-joint-speed-deg-s`, default 45 45 90 60 45 60), and
+joints stay 3 deg inside the SDK limits with |J5| >= 10 deg. `--arm-control
+pose` restores the firmware Cartesian `move_p`, which oscillated in J2/J3 near
+the edge of reach. Joint targets are not sent as one jump per action: each is
+reached over the action period by evenly spaced, linearly interpolated `move_j`
+commands at about `--command-hz` (default 60: 4 per action at `--hz 15`), which
+removes the per-action stop-and-go of a 15 Hz stream at the cost of about half
+an action period (~33 ms) of extra lag. `--command-hz 15` sends one per action.
+The predictor starts every chunk exactly at the arm pose in the observation
+state (checked on run `20261104_113450`: chunk start moves 1.00x with the
+observed pose). With the measured pose, the arm's tracking lag or swing at
+observation time is therefore copied into each chunk. By default
+(`--state-anchor command`) the observation carries the last commanded pose
+instead (in joint mode, FK of the joint target sent), so each chunk continues
+the commanded path; if the arm is more than `--anchor-max-mm` (50) or
+`--anchor-max-deg` (20) away from it, the measured pose is sent and a warning
+printed. `--state-anchor measured` restores the previous behavior. The hand
+state is always measured.
+Each run is logged to `output/executor_runs/<timestamp>/` (`--log-root`, or
+`--no-log`): `piper.csv` polls the Piper at 200 Hz (joints, motor velocity and
+current, firmware flange pose, `motion_status`), `commands.csv` has every arm
+target sent (raw policy and EMA-filtered, XYZ + Euler), `chunks.npz` the raw
+predictor chunks with the observed state, and `events.csv` the observe/chunk
+timing. Everything is held in memory and written when the executor exits,
+then `plot_run.py` saves `joints.png` and `eef.png` (position, velocity, and
+acceleration of each joint and flange axis, measured vs commanded, with
+predictor waits shaded) and `spectrum.png` into the same folder, and prints
+per-band velocity RMS: measured well above commanded means the arm adds the
+shake; equal means it is in the commands. Replot or zoom with
+`python inference/executor/plot_run.py RUN_DIR --start 10 --end 16`.
+`--traj-view [DATASET]` opens a 3D window with every demonstrated flange
+trajectory of `DATASET` (default `data_trimorph_hand_mocap_quest_4`), the live
+EEF pose and trail, the chunk being executed, and the distance to the nearest
+demo point; `python inference/executor/trajectory_view.py DATASET` shows the
+trajectories alone. Hand setup follows the repository's
 replay path: mode 3 position control, hold measured position before enabling
 torque, configured velocity/acceleration profiles, then nonblocking position
 writes. It does not start the collection force-feedback workers. On exit it

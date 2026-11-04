@@ -31,9 +31,14 @@ python3 data_collection/replay_episode.py 9 --dataset-root data_trimorph_quest -
   --sync $D/syncs/000056.npz --hand-actions $D/processed_encoder_t/000056.npy \
   --arm-only --preposition --playback-speed 0.5 --execute
 
+python inference/executor/executor.py --predictor 192.168.20.39 --max-cycles 1
 
-  ython inference/executor/executor.py --predictor 192.168.20.39 --max-cycles 1
-python inference/executor/executor.py --predictor 192.168.20.39 --max-cycles 20 --show
+
+python inference/executor/executor.py --predictor 192.168.20.39 --max-cycles 20 --show --start-home home_cube1
+
+
+python inference/executor/executor.py --predictor 192.168.20.39 --show --start-home home_cube1 --state-anchor measured
+
 
 
 cd ~/Jonathan/trimorph-piper-control
