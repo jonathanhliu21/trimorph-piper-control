@@ -15,6 +15,7 @@ from scipy.spatial.transform import Rotation
 
 from data_collection.postprocess_dataset import vicon_flange_poses, vicon_to_piper
 from data_collection.replay_actions import Limits, check_joints, piper_model
+from .config import DEFAULT_EXECUTOR_START, PIPER_START_JOINTS_DEG
 from .tracking_monitor import SIGNAL_TIMEOUT_S, stream_status
 from .utils import import_cv2
 
@@ -30,6 +31,9 @@ WIDTH, TEXT_HEIGHT, SCORE_HEIGHT, PLOT_ROWS, PLOT_COLS, PLOT_HEIGHT = 920, 330, 
 PLOTS_TOP = TEXT_HEIGHT + SCORE_HEIGHT
 GREEN, RED, AMBER, LIMIT = (60, 170, 60), (40, 40, 210), (0, 150, 200), (200, 200, 200)
 PLOT_FILL, RED_FILL, RED_LINE = (40, 40, 40), (30, 30, 110), (90, 90, 255)
+# Executor start pose (PIPER_START_JOINTS_DEG): reference line, tolerance band, and banner.
+START_BLUE, START_BAND = (235, 140, 30), (75, 50, 25)
+DEFAULT_START_TOLERANCE_DEG = 5.
 
 
 @dataclass(frozen=True)
@@ -109,8 +113,11 @@ class MocapIKMonitor:
     """OpenCV on the main thread; bounded IK on a separate latest-only worker."""
 
     def __init__(self, shared, calibration_path: Path, *, topic='/vicon/Yori/Yori',
-                 seed_deg=(0., 45., -45., 0., 30., 0.), recorder=None, cv2=None):
+                 seed_deg=(0., 45., -45., 0., 30., 0.), recorder=None, cv2=None,
+                 start_name=DEFAULT_EXECUTOR_START, start_tolerance_deg=DEFAULT_START_TOLERANCE_DEG):
         self.checker = MocapIKChecker(json.loads(Path(calibration_path).read_text()), seed_deg)
+        self.start_name, self.start_tolerance_deg = start_name, float(start_tolerance_deg)
+        self.start_deg = np.asarray(PIPER_START_JOINTS_DEG[start_name], float)
         self.shared, self.topic, self.recorder = shared, topic, recorder
         self.cv2 = cv2 or import_cv2()
         self.window_name = 'trimorph_mocap_ik'
@@ -148,6 +155,15 @@ class MocapIKMonitor:
         with self._lock:
             self._result = result
             self._history.append((result.sample_ns, joints, out, unreachable))
+
+    def start_offsets(self, joints_deg):
+        """Per-joint IK minus start joints (deg), and whether each is within the start tolerance."""
+        offsets = np.asarray(joints_deg, float) - self.start_deg
+        return offsets, np.abs(offsets) <= self.start_tolerance_deg
+
+    def at_start(self, result):
+        return (result is not None and result.ok and result.joints_deg is not None
+                and bool(self.start_offsets(result.joints_deg)[1].all()))
 
     def episode_verdict(self, start_ns, stop_ns):
         """In range when every IK result between start and stop had all joints in range.
@@ -200,6 +216,9 @@ class MocapIKMonitor:
             return 'CHECKING IK', 'Waiting for the first IK solution', None
         if (now_ns - result.sample_ns) / 1e9 > SIGNAL_TIMEOUT_S:
             return 'IK RESULT STALE', 'Waiting for IK on a recent pose', None
+        if self.at_start(result):
+            return (f'AT START {self.start_name} (every joint within {self.start_tolerance_deg:g} deg)',
+                    result.detail, result)
         return ('IK OK (local branch)' if result.ok else 'IK WARNING'), result.detail, result
 
     def plot_span(self, now_ns):
@@ -216,17 +235,21 @@ class MocapIKMonitor:
         now_ns = time.monotonic_ns() if now_ns is None else now_ns
         title, detail, result = self.status(now_ns)
         t0, t1, span_text = self.plot_span(now_ns)
-        color = GREEN if result is not None and result.ok else RED if result is not None else AMBER
+        color = (START_BLUE if self.at_start(result) else GREEN if result is not None and result.ok
+                 else RED if result is not None else AMBER)
         image = np.full((PLOTS_TOP + PLOT_ROWS * PLOT_HEIGHT, WIDTH, 3), 28, dtype=np.uint8)
         cv2.rectangle(image, (0, 0), (WIDTH, 62), color, -1)
         lines = [title, self.topic, *textwrap.wrap(detail, width=95, max_lines=2, placeholder=' ...')]
         if result is not None and result.joints_deg is not None:
-            lines += ['IK joints (deg):', '  '.join(
-                f'J{i+1}: {value:.1f}' for i, value in enumerate(result.joints_deg))]
+            offsets, _ = self.start_offsets(result.joints_deg)
+            lines += ['IK joints (deg):  ' + '  '.join(
+                f'J{i+1}: {value:.1f}' for i, value in enumerate(result.joints_deg)),
+                f'minus {self.start_name}:  ' + '  '.join(f'J{i+1}: {value:+.1f}' for i, value in enumerate(offsets))]
         lines += ['Absolute calibrated flange pose; SDK joint limits, 3 deg margin, |J5| >= 10 deg.',
                   'Pose check only: no path, collision, controller-limit or training-distribution check.',
                   'Local IK failure does not prove all joint branches are infeasible.',
-                  f'Plots ({span_text}): dotted = limits incl. margin; red = out of range.']
+                  f'Plots ({span_text}): dotted = limits incl. margin; red = out of range; '
+                  f'blue = {self.start_name} +/- {self.start_tolerance_deg:g} deg.']
         for i, line in enumerate(lines):
             cv2.putText(image, line, (14, 38 + i * 28), cv2.FONT_HERSHEY_SIMPLEX,
                         .52, (255, 255, 255), 1, cv2.LINE_AA)
@@ -280,13 +303,17 @@ class MocapIKMonitor:
         if j == 4:
             limits += [-self.checker.limits.wrist_margin_deg, self.checker.limits.wrist_margin_deg]
         finite = values[np.isfinite(values)]
-        low, high = min(*limits, *finite), max(*limits, *finite)
+        start, tolerance = self.start_deg[j], self.start_tolerance_deg
+        low, high = min(*limits, *finite, start - tolerance), max(*limits, *finite, start + tolerance)
         low, high = low - .08 * (high - low), high + .08 * (high - low)
         top, plot_h = y0 + 22, h - 26  # Leave room for the joint label.
 
         def to_y(value):
             return np.round(top + (high - value) / (high - low) * plot_h).astype(np.int32)
 
+        cv2.rectangle(image, (x0, int(to_y(start + tolerance))), (x0 + w, int(to_y(start - tolerance))),
+                      START_BAND, -1)
+        cv2.line(image, (x0, int(to_y(start))), (x0 + w, int(to_y(start))), START_BLUE, 2, cv2.LINE_AA)
         for limit in limits:
             y = int(to_y(limit))
             for x in range(x0, x0 + w, 10):
@@ -303,11 +330,16 @@ class MocapIKMonitor:
                                   False, segment_color, 2, cv2.LINE_AA)
         if len(last):  # Mark the newest solution, which may have no neighbour to draw a line to.
             i = last[-1]
+            near = abs(values[i] - start) <= tolerance
             cv2.circle(image, tuple(int(v) for v in points[i]),
-                       4, RED_LINE if out[i] else GREEN, -1, cv2.LINE_AA)
+                       5, RED_LINE if out[i] else START_BLUE if near else GREEN, -1, cv2.LINE_AA)
         label = f'J{j+1}' + (f'  {finite[-1]:.1f} deg' if len(finite) else '')
         cv2.putText(image, label, (x0 + 6, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX,
                     .5, (255, 255, 255), 1, cv2.LINE_AA)
+        target = f'{self.start_name} {start:.1f}'
+        (target_w, _), _ = cv2.getTextSize(target, cv2.FONT_HERSHEY_SIMPLEX, .5, 1)
+        cv2.putText(image, target, (x0 + w - target_w - 6, y0 + 16), cv2.FONT_HERSHEY_SIMPLEX,
+                    .5, START_BLUE, 1, cv2.LINE_AA)
 
     def update(self):
         now_ns = time.monotonic_ns()

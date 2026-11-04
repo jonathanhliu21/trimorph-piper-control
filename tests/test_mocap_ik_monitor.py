@@ -12,7 +12,9 @@ from scipy.spatial.transform import Rotation
 
 from data_collection.collect_hand_only import main, parse_args
 from data_collection.collection.mocap_ik_monitor import (
-    PLOT_COLS, PLOT_FILL, PLOT_HEIGHT, PLOTS_TOP, RED_FILL, WIDTH, IKResult, MocapIKChecker, MocapIKMonitor)
+    GREEN, PLOT_COLS, PLOT_FILL, PLOT_HEIGHT, PLOTS_TOP, RED_FILL, START_BLUE, WIDTH, IKResult, MocapIKChecker,
+    MocapIKMonitor)
+from data_collection.collection.config import PIPER_START_JOINTS_DEG
 from data_collection.collection.shared_state import SharedState, TrackerSample
 
 
@@ -78,6 +80,8 @@ class MocapIKTests(unittest.TestCase):
         monitor._lock, monitor._history, monitor._result = threading.Lock(), deque(), None
         monitor._episode, monitor._stopped, monitor.last_episode = None, [], None
         monitor.episodes_in_range = monitor.episodes_scored = 0
+        monitor.start_name, monitor.start_tolerance_deg = 'home_4c', 5.
+        monitor.start_deg = np.asarray(PIPER_START_JOINTS_DEG['home_4c'], float)
         return monitor
 
     @staticmethod
@@ -158,6 +162,27 @@ class MocapIKTests(unittest.TestCase):
         self.assertIn('Wrist singularity', result.detail)
         self.assertEqual(self.checker().check(self.sample(lost=True)).detail, 'OBJECT LOST')
 
+    def test_blue_only_when_every_joint_is_near_the_start(self):
+        monitor = self.monitor()
+        s = 1_000_000_000
+        start = np.asarray(PIPER_START_JOINTS_DEG['home_4c'])
+        monitor.shared.set_tracker_pose(monitor.topic, 10 * s, (.1, .2, .3), (0, 0, 0, 1))
+        near = tuple(start + [4.9, -4.9, 2, 0, -1, 3])
+        monitor._record(IKResult(10 * s, True, 'OK', near))
+        self.assertTrue(monitor.status(10 * s)[0].startswith('AT START home_4c'))
+        image = monitor.render(10 * s)
+        self.assertEqual(tuple(image[5, 5]), START_BLUE)
+        one_off = tuple(start + [0, 0, 0, 0, 0, 5.5])
+        monitor._record(IKResult(10 * s, True, 'OK', one_off))
+        self.assertEqual(monitor.status(10 * s)[0], 'IK OK (local branch)')
+        self.assertEqual(tuple(monitor.render(10 * s)[5, 5]), GREEN)
+        # A failed check is never blue, even at the start joints.
+        monitor._record(IKResult(10 * s, False, 'Near-singular Jacobian', tuple(start)))
+        self.assertEqual(monitor.status(10 * s)[0], 'IK WARNING')
+        offsets, near_mask = monitor.start_offsets(near)
+        np.testing.assert_allclose(offsets, [4.9, -4.9, 2, 0, -1, 3], atol=1e-9)
+        self.assertTrue(near_mask.all())
+
     def test_calibration_without_vicon_reference_is_rejected(self):
         with self.assertRaisesRegex(ValueError, 'vicon_reference'):
             MocapIKChecker({}, [0] * 6)
@@ -194,6 +219,13 @@ class MocapIKTests(unittest.TestCase):
         self.assertEqual(str(config.mocap_ik_calibration), 'cal.json')
         self.assertEqual(config.mocap_ik_topic, '/vicon/Yori/Yori')
         self.assertTrue(config.use_mocap)
+        self.assertEqual((config.mocap_ik_start, config.mocap_ik_start_tolerance_deg), ('home_4c', 5.))
+        with patch('sys.argv', ['collect', '--use-mocap', '--no-monitor', '--mocap-ik-calibration', 'cal.json',
+                               '--mocap-ik-start', 'home_4d', '--mocap-ik-start-tolerance-deg', '3']), \
+                patch('data_collection.collect_hand_only.run_hand_only', return_value=0) as run:
+            main()
+        config = run.call_args.args[0]
+        self.assertEqual((config.mocap_ik_start, config.mocap_ik_start_tolerance_deg), ('home_4d', 3.))
 
 
 if __name__ == '__main__':

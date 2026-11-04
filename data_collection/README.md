@@ -88,6 +88,13 @@ tracking and stale IK results display an unavailable status instead of green.
 The first IK seed defaults to `0 45 -45 0 30 0` degrees; override it with
 `--mocap-ik-seed-deg J1 J2 J3 J4 J5 J6`. Later checks use the last valid solution.
 
+Each joint plot also marks the executor start pose (`--mocap-ik-start`, default
+`home_4c` from `PIPER_START_JOINTS_DEG` in `collection/config.py`) as a blue line
+with its value in the top-right corner, and the text lists the IK joints minus
+that start. The banner turns blue (`AT START home_4c`) when the IK check passes
+and every joint is within `--mocap-ik-start-tolerance-deg` (default 5) of the
+start, so demonstrations can begin at the pose the policy starts from.
+
 The monitor never connects to or commands Piper, and raw recording is unchanged.
 It checks poses on one local branch; it does not certify trajectory continuity,
 joint speeds, obstacles, live controller limits, or training-distribution membership.

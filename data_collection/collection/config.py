@@ -49,6 +49,34 @@ DEFAULT_PIPER_CHANNEL = "can0"
 DEFAULT_PIPER_FIRMWARE = "v183"
 DEFAULT_PIPER_INSTALLATION_POS = "right"
 DEFAULT_PIPER_PAYLOAD = "half"
+# Named Piper start configurations (J1..J6 degrees), each the IK solution of a
+# dataset's median start flange pose. quest_0: data_trimorph_hand_mocap_quest_0,
+# flange about (144, -202, 270) mm. data_trimorph_hand_mocap_quest_4 starts form
+# two groups: home_4a, mostly episodes 0-94, flange (230, -170, 349) mm; home_4b,
+# episodes 95-220, flange (434, -224, 221) mm. home_4c and home_4d are executor
+# starts #1 and #6 of 2026-11-03 (random offsets around home_4b) that worked for
+# the policy: flange (418, -232, 198) mm, Euler xyz (165, 33, 97) deg, and
+# (453, -229, 203) mm, (157, 27, 88) deg. home_cube1: data_trimorph_hand_mocap_quest_5
+# (Vicon poses, one start group), median flange (370, -198, 245) mm, mean Euler xyz
+# (-175, 53, 103) deg; starts spread ~30 mm / ~10 deg around it.
+PIPER_START_JOINTS_DEG = {
+    "quest_0": (-59.0, 73.0, -49.0, 20.0, 39.0, 19.0),
+    "home_4a": (-34.6, 78.6, -72.0, -7.4, 52.9, 57.4),
+    "home_4b": (-24.0, 124.9, -106.4, -24.7, 47.8, 72.2),
+    "home_4c": (-25.59, 123.74, -98.71, -27.68, 41.75, 69.21),
+    "home_4d": (-24.49, 129.76, -111.17, -18.44, 45.25, 71.11),
+    "home_cube1": (-19.14, 111.94, -85.65, -58.96, 57.24, 89.30),
+}
+# Median first processed_encoder_t row (motors 0..12, leader radians) of the same episodes.
+HAND_START_POSITIONS_RAD = {
+    "quest_0": (0.005, -0.027, 0.663, 0.263, 0.013, -1.217, -0.117, 0.016, -0.225, 0.109, 0.018, 0.013, 0.235),
+    "home_4a": (0.009, -0.004, 0.658, 0.368, 0.012, -0.420, 0.103, 0.018, -0.067, 0.025, 0.022, 0.004, 0.094),
+    "home_4b": (-0.004, -0.005, 0.628, 0.374, 0.012, -0.292, 0.050, 0.018, -0.017, -0.037, 0.021, -0.028, 0.030),
+    "home_cube1": (-0.019, -0.005, 0.730, 0.238, 0.013, -0.213, 0.077, 0.018, -0.159, 0.025, 0.018, -0.070, 0.100),
+}
+# home_4c and home_4d were tested with the home_4b hand start.
+HAND_START_POSITIONS_RAD["home_4c"] = HAND_START_POSITIONS_RAD["home_4d"] = HAND_START_POSITIONS_RAD["home_4b"]
+DEFAULT_EXECUTOR_START = "home_4c"
 DEFAULT_TEACHER_MODE_POLL_HZ = 20.0
 DEFAULT_HOLD_DELETE_S = 2.0
 DEFAULT_READY_SECONDS = 0.2
@@ -166,6 +194,8 @@ class HandOnlyCollectionConfig(HandRuntimeConfig):
     mocap_ik_calibration: Path | None = None
     mocap_ik_topic: str = '/vicon/Yori/Yori'
     mocap_ik_seed_deg: tuple[float, ...] = (0., 45., -45., 0., 30., 0.)
+    mocap_ik_start: str = DEFAULT_EXECUTOR_START
+    mocap_ik_start_tolerance_deg: float = 5.
     quest_host: str = DEFAULT_QUEST_HOST
     quest_port: int = DEFAULT_QUEST_PORT
     quest_jump_threshold: float = DEFAULT_QUEST_JUMP_THRESHOLD

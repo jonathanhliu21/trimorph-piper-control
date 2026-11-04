@@ -29,6 +29,8 @@ from data_collection.collection.config import (
     DEFAULT_HAND_CONFIG,
     DEFAULT_HAND_PORT,
     DEFAULT_QUEST_JUMP_THRESHOLD,
+    DEFAULT_EXECUTOR_START,
+    PIPER_START_JOINTS_DEG,
     DATA_COLLECTION_MODE,
     RETARGET_ONLY_MODE,
     DEFAULT_THUMB_MODEL,
@@ -176,6 +178,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--mocap-ik-seed-deg', type=float, nargs=6,
                         default=(0., 45., -45., 0., 30., 0.),
                         help='Initial offline IK branch seed in degrees; no arm connection')
+    parser.add_argument('--mocap-ik-start', choices=sorted(PIPER_START_JOINTS_DEG), default=DEFAULT_EXECUTOR_START,
+                        help='Executor start pose marked on each IK joint plot; the window turns blue '
+                             'when every joint is within --mocap-ik-start-tolerance-deg (default: %(default)s)')
+    parser.add_argument('--mocap-ik-start-tolerance-deg', type=float, default=5.,
+                        help='Per-joint tolerance for the start marker (default: %(default)s)')
     parser.add_argument(
         "--quest-jump-threshold", type=float, default=DEFAULT_QUEST_JUMP_THRESHOLD,
         help="Warn when consecutive Quest packets move farther than this distance in native position units (default: 0.05).",
@@ -337,6 +344,8 @@ def parse_args() -> argparse.Namespace:
             parser.error('--mocap-ik-topic must be included in the selected --mocap-topic values')
         if not all(math.isfinite(value) for value in args.mocap_ik_seed_deg):
             parser.error('--mocap-ik-seed-deg requires six finite values')
+        if not math.isfinite(args.mocap_ik_start_tolerance_deg) or args.mocap_ik_start_tolerance_deg <= 0:
+            parser.error('--mocap-ik-start-tolerance-deg must be finite and positive')
     if args.show_tracking_monitor is None:
         args.show_tracking_monitor = args.use_quest or args.use_mocap
     elif args.show_tracking_monitor and not (args.use_quest or args.use_mocap):
@@ -743,7 +752,8 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
 
             ik_monitor = MocapIKMonitor(shared, config.mocap_ik_calibration,
                                         topic=config.mocap_ik_topic, seed_deg=config.mocap_ik_seed_deg,
-                                        recorder=recorder)
+                                        recorder=recorder, start_name=config.mocap_ik_start,
+                                        start_tolerance_deg=config.mocap_ik_start_tolerance_deg)
         if config.show_tracking_monitor:
             from data_collection.collection.tracking_monitor import (
                 TrackingMonitor,
@@ -886,6 +896,8 @@ def main() -> int:
                               if args.mocap_ik_calibration is not None else None),
         mocap_ik_topic=args.mocap_ik_topic,
         mocap_ik_seed_deg=tuple(args.mocap_ik_seed_deg),
+        mocap_ik_start=args.mocap_ik_start,
+        mocap_ik_start_tolerance_deg=args.mocap_ik_start_tolerance_deg,
         show_tracking_monitor=args.show_tracking_monitor,
         monitor_calibration=(
             args.monitor_calibration.expanduser()

@@ -2,7 +2,8 @@
 """Move Piper in joint space to a configuration for an in-person check, then hold or return.
 
 The default target is the median start of data_trimorph_hand_mocap_quest_0 (flange about
-(144, -202, 270) mm in the Piper base). Kinematics-only checked: watch for the mount and desk.
+(144, -202, 270) mm in the Piper base); --home picks another named start from
+PIPER_START_JOINTS_DEG in collection/config.py. Kinematics-only checked: watch for the mount and desk.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from data_collection.collection.config import (  # noqa: E402
     DEFAULT_PIPER_INSTALLATION_POS,
     DEFAULT_PIPER_INTERFACE,
     DEFAULT_PIPER_PAYLOAD,
+    PIPER_START_JOINTS_DEG,
 )
 from scripts.piper_api.piper_api import PiperAPI  # noqa: E402
 from scripts.piper_api.replay_trajectory import read_joint_angles  # noqa: E402
@@ -34,13 +36,16 @@ from scripts.teleop.quest_teleop import (  # noqa: E402
     home_warnings,
 )
 
-DEMO_START_JOINTS_DEG = (-59.0, 73.0, -49.0, 20.0, 39.0, 19.0)
+DEMO_START_JOINTS_DEG = PIPER_START_JOINTS_DEG["quest_0"]
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--joints-deg", type=float, nargs=6, metavar="DEG", default=DEMO_START_JOINTS_DEG,
+    target = parser.add_mutually_exclusive_group()
+    target.add_argument("--joints-deg", type=float, nargs=6, metavar="DEG", default=DEMO_START_JOINTS_DEG,
                         help="Target J1..J6 in degrees (default: %(default)s)")
+    target.add_argument("--home", choices=sorted(PIPER_START_JOINTS_DEG),
+                        help="Named start from PIPER_START_JOINTS_DEG instead of --joints-deg")
     parser.add_argument("--speed-deg-s", type=float, default=10.0,
                         help="Speed of the fastest-moving joint (default: %(default)s)")
     parser.add_argument("--rate-hz", type=float, default=50.0)
@@ -53,6 +58,8 @@ def parse_args(argv=None):
                         default=DEFAULT_PIPER_INSTALLATION_POS)
     parser.add_argument("--payload", choices=("unchanged", "empty", "half", "full"), default=DEFAULT_PIPER_PAYLOAD)
     args = parser.parse_args(argv)
+    if args.home:
+        args.joints_deg = PIPER_START_JOINTS_DEG[args.home]
     if not all(math.isfinite(value) for value in args.joints_deg):
         parser.error("--joints-deg requires six finite values")
     for joint, (angle, (low, high)) in enumerate(zip(args.joints_deg, CONTROLLER_LIMITS_DEG), start=1):
