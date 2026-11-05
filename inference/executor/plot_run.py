@@ -8,9 +8,14 @@ resampled on a uniform 200 Hz grid with Savitzky-Golay derivatives; the flange
 is FK of those joints. Commanded: the EMA-filtered targets in commands.csv (one
 per action, e.g. 15 Hz), drawn as held steps; joint targets are IK of each
 target seeded at the measured joints. Gray spans: waiting for the predictor
-(observe -> chunk received); dotted lines: chunk starts; red lines: pedal resets.
+(observe -> chunk received; with --rtc the arm keeps moving during them);
+dotted lines: chunk starts; red lines: pedal resets.
 
-Saves joints.png, eef.png, and spectrum.png in the run folder and prints, per
+Saves joints.png, eef.png, eef_position_error.png, and spectrum.png in the run folder.
+The error plot compares measured flange XYZ with each requested target at its
+arrival time (one action period later for interpolated joint commands), showing
+signed measured-minus-commanded axes and the Euclidean position error in mm.
+Measured positions are FK of joint feedback, as in eef.png. Prints, per
 joint and flange axis, the velocity RMS in frequency bands for measured vs
 commanded motion: measured >> commanded means the arm adds the shake; equal
 means it is in the commands (policy or chunk boundaries).
@@ -251,6 +256,40 @@ def main(argv=None):
         fig.tight_layout()
         fig.savefig(args.run / f"{kind}.png", dpi=110)
         print(f"Saved {args.run / f'{kind}.png'}")
+
+    # Sample tracking error at target arrival, matching the timing in eef.png.
+    # Keep samples within feedback coverage and exclude moves across pedal resets.
+    arrival = t_cmd + shift
+    error = np.full((len(t_cmd), 3), np.nan)
+    for a, b in segments:
+        valid = ((t_cmd >= a) & (arrival <= b)
+                 & (arrival >= grid[0]) & (arrival <= grid[-1]))
+        measured_xyz = np.column_stack([
+            np.interp(arrival[valid], grid, eef[:, j]) for j in range(3)
+        ])
+        error[valid] = measured_xyz - eef_cmd[valid, :3]
+    distance = np.linalg.norm(error, axis=1)
+    fig, axes = plt.subplots(4, 1, figsize=(12, 9), sharex=True)
+    for j, ax in enumerate(axes[:3]):
+        decorate(ax)
+        ax.plot(arrival - t0, error[:, j], lw=.9)
+        ax.axhline(0, color="0.4", lw=.6)
+        ax.set_ylabel(f"{'XYZ'[j]} error (mm)")
+    decorate(axes[3])
+    axes[3].plot(arrival - t0, distance, color="tab:purple", lw=.9)
+    axes[3].set_ylabel("3D error (mm)")
+    axes[3].set_xlabel("s from first observation")
+    finite = distance[np.isfinite(distance)]
+    if len(finite):
+        axes[3].set_title(f"Mean {finite.mean():.2f} mm; RMS {np.sqrt(np.mean(finite ** 2)):.2f} mm; "
+                          f"95th percentile {np.percentile(finite, 95):.2f} mm; max {finite.max():.2f} mm",
+                          fontsize=10)
+    fig.suptitle(f"{args.run.name}: EEF position error (measured FK minus requested target)\n"
+                 f"Sampled {'one action period after issue' if interpolated else 'at command issue'}; "
+                 "gray = waiting for predictor, red = pedal reset")
+    fig.tight_layout()
+    fig.savefig(args.run / "eef_position_error.png", dpi=110)
+    print(f"Saved {args.run / 'eef_position_error.png'}")
 
     # Spectrum: measured velocity vs the commanded path interpolated linearly (its intended motion).
     cmd_fs = 1 / np.median(np.diff(t_cmd))

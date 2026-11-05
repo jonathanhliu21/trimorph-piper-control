@@ -58,7 +58,9 @@ DEFAULT_PIPER_PAYLOAD = "half"
 # the policy: flange (418, -232, 198) mm, Euler xyz (165, 33, 97) deg, and
 # (453, -229, 203) mm, (157, 27, 88) deg. home_cube1: data_trimorph_hand_mocap_quest_5
 # (Vicon poses, one start group), median flange (370, -198, 245) mm, mean Euler xyz
-# (-175, 53, 103) deg; starts spread ~30 mm / ~10 deg around it.
+# (-175, 53, 103) deg; starts spread ~30 mm / ~10 deg around it. home_unscrew1:
+# data_trimorph_unscrew_cap_0 (Vicon poses, one start group), median flange
+# (229, -249, 130) mm, mean Euler xyz (163, -1, 84) deg; starts spread ~20 mm / ~6 deg.
 PIPER_START_JOINTS_DEG = {
     "quest_0": (-59.0, 73.0, -49.0, 20.0, 39.0, 19.0),
     "home_4a": (-34.6, 78.6, -72.0, -7.4, 52.9, 57.4),
@@ -66,6 +68,11 @@ PIPER_START_JOINTS_DEG = {
     "home_4c": (-25.59, 123.74, -98.71, -27.68, 41.75, 69.21),
     "home_4d": (-24.49, 129.76, -111.17, -18.44, 45.25, 71.11),
     "home_cube1": (-19.14, 111.94, -85.65, -58.96, 57.24, 89.30),
+    # Previous home_unscrew1:
+    # "home_unscrew1": (-50.73, 108.65, -58.83, 22.08, 36.01, 28.63),
+    # Updated measured start: flange XYZ m (0.227855, -0.244662, 0.176002),
+    # RPY rad (2.742192, 0.222076, 1.525819); joint radians converted to degrees.
+    "home_unscrew1": (-49.281017, 99.637991, -56.605022, 17.635011, 28.350983, 26.896988),
 }
 # Median first processed_encoder_t row (motors 0..12, leader radians) of the same episodes.
 HAND_START_POSITIONS_RAD = {
@@ -73,6 +80,7 @@ HAND_START_POSITIONS_RAD = {
     "home_4a": (0.009, -0.004, 0.658, 0.368, 0.012, -0.420, 0.103, 0.018, -0.067, 0.025, 0.022, 0.004, 0.094),
     "home_4b": (-0.004, -0.005, 0.628, 0.374, 0.012, -0.292, 0.050, 0.018, -0.017, -0.037, 0.021, -0.028, 0.030),
     "home_cube1": (-0.019, -0.005, 0.730, 0.238, 0.013, -0.213, 0.077, 0.018, -0.159, 0.025, 0.018, -0.070, 0.100),
+    "home_unscrew1": (-0.029, -0.137, 0.889, 0.406, 0.015, -1.039, 0.039, 0.013, -0.473, 0.007, -0.152, -0.400, 0.410),
 }
 # home_4c and home_4d were tested with the home_4b hand start.
 HAND_START_POSITIONS_RAD["home_4c"] = HAND_START_POSITIONS_RAD["home_4d"] = HAND_START_POSITIONS_RAD["home_4b"]

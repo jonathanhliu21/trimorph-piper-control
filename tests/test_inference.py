@@ -18,7 +18,7 @@ from data_collection.collection import config
 from inference import protocol
 from inference.executor.executor import (
     FakeCamera, FakeRobot, MAX_EEF_JUMP_M, OakCamera, RobotIO, jitter_start_joints,
-    parse_args, pose_to_piper, pose_to_policy, run,
+    parse_args, pose_to_piper, pose_to_policy, run, run_rtc,
 )
 
 
@@ -519,9 +519,116 @@ class InferenceTests(unittest.TestCase):
 
     def test_cli_rejects_invalid_timing(self):
         for option, value in (('--hz', '0'), ('--timeout', 'nan'), ('--max-cycles', '-1'),
-                              ('--start-speed-deg-s', '45')):
+                              ('--start-speed-deg-s', '45'), ('--rtc-horizon', '0'),
+                              ('--rtc-max-guidance', 'nan')):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_args(['--predictor', 'localhost', option, value])
+
+    def test_rtc_request_round_trip_carries_previous_chunk(self):
+        client, server = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(server.close)
+        image, state = np.zeros((240, 320, 3), dtype=np.uint8), np.arange(19, dtype=np.float32)
+        prev = np.arange(5 * 19, dtype=np.float32).reshape(5, 19) / 100
+        protocol.send_obs(client, 3, image, state, t_capture=1.0,
+                          rtc={'prev_chunk': prev, 'delay': 2, 'max_guidance': 20.0})
+        protocol.send_obs(client, 4, image, state, t_capture=2.0,
+                          rtc={'prev_chunk': np.zeros((0, 19)), 'delay': 0, 'max_guidance': 20.0})
+        protocol.send_obs(client, 5, image, state, t_capture=3.0)
+        seq, _, received, header = protocol.recv_obs(server)
+        self.assertEqual((seq, header['rtc']['delay'], header['rtc']['max_guidance']), (3, 2, 20.0))
+        np.testing.assert_array_equal(header['rtc']['prev_chunk'], prev)
+        np.testing.assert_array_equal(received, state)
+        self.assertEqual(protocol.recv_obs(server)[3]['rtc']['prev_chunk'].shape, (0, 19))
+        self.assertNotIn('rtc', protocol.recv_obs(server)[3])
+        with self.assertRaises(ValueError):
+            protocol.send_obs(client, 6, image, state, t_capture=4.0,
+                              rtc={'prev_chunk': np.full((2, 19), np.nan), 'delay': 1, 'max_guidance': 20.0})
+
+    def test_rtc_anchor_is_the_raw_action_unless_arm_is_far_from_it(self):
+        robot = RobotIO.__new__(RobotIO)
+        robot.hand, robot.piper = Mock(), Mock()
+        robot.hand.read_pos.return_value = np.zeros(13)
+        robot.state_anchor, robot.anchor_max_mm, robot.anchor_max_deg = 'command', 50.0, 20.0
+        robot.commanded_pose = np.array([.4, -.2, .2, 3.0, .5, 1.5])
+        action = robot.commanded_pose + [.006, 0, 0, 0, 0, .02]  # the EMA-filtered command lags it
+        robot.piper.get_eef_pose.return_value = (robot.commanded_pose + [.01, 0, 0, 0, 0, 0]).tolist()
+        np.testing.assert_allclose(robot.read_state(action)[:6], pose_to_policy(action), atol=1e-6)
+        self.assertTrue(robot.state_note.startswith('action'))
+        robot.piper.get_eef_pose.return_value = (action + [.08, 0, 0, 0, 0, 0]).tolist()
+        with contextlib.redirect_stdout(io.StringIO()):
+            robot.read_state(action)
+        self.assertIn('FALLBACK', robot.state_note)
+
+    @staticmethod
+    def rtc_chunk(c, length):
+        # x = chunk number / 100 + index / 1000, so executed actions show their chunk and index.
+        chunk = np.zeros((length, 19), dtype=np.float32)
+        chunk[:, 0] = c / 100 + np.arange(length) / 1000
+        return chunk
+
+    def run_rtc_with(self, chunks, ready, horizon, max_cycles=2, pedal=None, robot=None):
+        robot = robot or FakeRobot()
+        robot.apply_action = Mock(wraps=robot.apply_action)
+        args = SimpleNamespace(hz=10, max_cycles=max_cycles, jpeg_quality=85, rtc_horizon=horizon,
+                               rtc_max_guidance=20.0)
+        replies = [(seq, chunk, {'infer_ms': 1.0}) for seq, chunk in enumerate(chunks)]
+        output = io.StringIO()
+        with patch('inference.executor.executor.protocol.send_obs') as send_obs, \
+             patch('inference.executor.executor.protocol.recv_action', side_effect=replies) as recv_action, \
+             patch('inference.executor.executor.reply_ready', side_effect=ready), \
+             patch('inference.executor.executor.time.sleep'), \
+             patch('inference.executor.executor.ARM_ACTION_EMA_ALPHA', 1.0), \
+             contextlib.redirect_stdout(output):
+            run_rtc(args, robot, FakeCamera(), Mock(), pedal)
+        executed = [round(float(call.args[0][0]) * 1000) for call in robot.apply_action.call_args_list]
+        return executed, send_obs, recv_action, output.getvalue()
+
+    def test_rtc_executes_while_predicting_and_takes_over_after_the_delay(self):
+        chunks = [self.rtc_chunk(c, 6) for c in range(2)]
+        executed, send_obs, _, output = self.run_rtc_with(chunks, [False, False, True], horizon=2)
+        # Chunk 0 from index 1; request after its action 2; old actions 3 and 4 run while the
+        # predictor works; chunk 1 takes over at index m + 1 = 3, continuing old step 2 + 3.
+        self.assertEqual(executed, [1, 2, 3, 4, 13, 14, 15])
+        first, second = (call.kwargs['rtc'] for call in send_obs.call_args_list)
+        self.assertEqual((first['prev_chunk'].shape, first['delay']), ((0, 19), 0))
+        np.testing.assert_array_equal(second['prev_chunk'], chunks[0][2:])
+        self.assertEqual(second['delay'], 1)  # ceil(first round trip / 100 ms)
+        state = send_obs.call_args_list[1].args[3]
+        np.testing.assert_allclose(state[:6], chunks[0][2, :6], atol=1e-7)  # anchored on the raw action
+        self.assertIn('rtc delay=2 (expected 1)', output)
+
+    def test_rtc_replans_from_the_arm_when_it_is_far_from_the_plan(self):
+        robot = FakeRobot()
+        robot.read_state = Mock(return_value=np.zeros(19, dtype=np.float32))  # measured fallback
+        chunks = [self.rtc_chunk(c, 6) for c in range(2)]
+        _, send_obs, _, _ = self.run_rtc_with(chunks, [True], horizon=2, robot=robot)
+        self.assertEqual(send_obs.call_args_list[1].kwargs['rtc']['prev_chunk'].shape, (0, 19))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(['--predictor', 'localhost', '--rtc', '--state-anchor', 'measured'])
+
+    def test_rtc_holds_the_last_target_when_the_old_chunk_runs_out(self):
+        chunks = [self.rtc_chunk(c, 4) for c in range(2)]
+        executed, _, _, output = self.run_rtc_with(chunks, [False] * 5 + [True], horizon=1)
+        # Request after action 1; actions 2, 3 run; three ticks hold; chunk 1 continues at 2 + 1.
+        self.assertEqual(executed, [1, 2, 3, 13])
+        self.assertIn('starved=3', output)
+
+    def test_rtc_pedal_drops_pending_reply_returns_to_start_and_restarts(self):
+        pedal = Mock()
+        # Polls: setup drain, tick 1, tick 2 (press), drain after return, wait (press = resume).
+        presses = iter([[], [], [1], [], [1]])
+        pedal.poll.side_effect = lambda: next(presses, [])
+        robot = FakeRobot()
+        robot.return_to_start = Mock()
+        chunks = [self.rtc_chunk(c, 4) for c in range(3)]
+        executed, send_obs, recv_action, output = self.run_rtc_with(
+            chunks, [], horizon=1, max_cycles=3, pedal=pedal, robot=robot)
+        robot.return_to_start.assert_called_once()
+        self.assertEqual(recv_action.call_count, 3)  # chunk 1 is received and discarded
+        self.assertEqual(executed, [1, 21, 22, 23])
+        self.assertEqual(send_obs.call_args_list[2].kwargs['rtc']['prev_chunk'].shape, (0, 19))
+        self.assertIn('resuming the policy', output)
 
 
 if __name__ == '__main__':

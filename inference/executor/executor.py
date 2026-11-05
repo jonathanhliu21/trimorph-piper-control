@@ -1,8 +1,11 @@
 """Execute 19D policy chunks on Trimorph + Piper, using collection coordinates.
 
-The request/reply loop is synchronous: prediction latency remains a pause
-between chunks. Timings explicitly expose that cost; this is not an async
-controller. Before the first observation the arm ramps in joint space to the
+By default the request/reply loop is synchronous: prediction latency remains a
+pause between chunks, and the timings expose that cost. --rtc runs real-time
+chunking instead (run_rtc, inference/predictor/rtc.py): the next chunk is
+requested while the current one executes and is guided to continue it, so the
+arm does not stop between chunks. Before the first observation the arm ramps
+in joint space to the
 named start --start-home (default home_4c, from collection config.py) or
 --start-joints-deg or a logged --start-id, optionally offset by a random flange
 pose change (--start-jitter-mm / --start-jitter-deg, off by default), then the
@@ -16,11 +19,14 @@ No leader-to-follower retargeting is used.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import csv
 from datetime import datetime
 import json
 from dataclasses import replace
+import math
 from pathlib import Path
+import select
 import signal
 import socket
 import sys
@@ -42,10 +48,13 @@ MOTOR_IDS = tuple(defaults.TRIMORPH_MOTOR_IDS)
 MAX_EEF_JUMP_M = 0.15
 # Independent per-action EMA for the arm pose and hand motor positions.
 # filtered = alpha * target + (1 - alpha) * previous; 1.0 disables smoothing.
-ARM_ACTION_EMA_ALPHA = 0.40 # action[:6]: XYZ + rotation vector
+ARM_ACTION_EMA_ALPHA = 1.0 # action[:6]: XYZ + rotation vector
 HAND_ACTION_EMA_ALPHA = 1.0  # action[6:]: 13 hand motor positions
 # Multiply hand targets before EMA; arm targets always retain scale 1.0.
-HAND_ACTION_SCALE = 1.0
+HAND_ACTION_SCALE = 1.03
+# --rtc: the expected inference delay is the most actions executed while waiting
+# for any of this many recent replies (the paper's conservative max).
+RTC_DELAY_HISTORY = 10
 # TriMi on the bench rig; the collection defaults are placeholders for the glove.
 DEFAULT_HAND_API_REPO = CONTROL_ROOT.parent / "trimorph-hand-api"
 DEFAULT_HAND_CONFIG = CONTROL_ROOT / "config" / "xl330_test_config.yaml"
@@ -305,33 +314,36 @@ class RobotIO:
         """Measured flange pose (XYZ m + Euler xyz rad), or None if feedback is missing."""
         return self.piper.get_eef_pose()
 
-    def read_state(self):
+    def read_state(self, anchor=None):
         """Observation state: arm pose (see anchored_pose) + measured hand positions."""
         pose = self.piper.get_eef_pose()
         if pose is None:
             raise RuntimeError("Piper EEF feedback unavailable")
         hand = vector(self.hand.read_pos(), 13, "hand state")
-        return np.concatenate((pose_to_policy(self.anchored_pose(pose)), hand)).astype(np.float32)
+        return np.concatenate((pose_to_policy(self.anchored_pose(pose, anchor)), hand)).astype(np.float32)
 
-    def anchored_pose(self, measured):
+    def anchored_pose(self, measured, anchor=None):
         """The pose the predictor anchors the next chunk to.
 
         The predictor starts each chunk exactly at the observed arm pose, so with
         the measured pose the arm's tracking lag or swing at observation time is
         copied into every chunk. --state-anchor command uses the last commanded
-        pose instead (in joint mode, FK of the joint target sent), unless the arm
-        is more than --anchor-max-mm / --anchor-max-deg away from it.
+        pose instead (in joint mode, FK of the joint target sent), or `anchor`
+        when given (--rtc: the raw policy action just commanded, so the new chunk
+        continues the old one in its own frame), unless the arm is more than
+        --anchor-max-mm / --anchor-max-deg away from it.
         """
         measured = vector(measured, 6, "measured pose")
-        if self.state_anchor != "command" or self.commanded_pose is None:
+        commanded = self.commanded_pose if anchor is None else vector(anchor, 6, "anchor pose")
+        if self.state_anchor != "command" or commanded is None:
             self.state_note = "measured"
             return measured
-        commanded = self.commanded_pose
         off_mm = float(np.linalg.norm(measured[:3] - commanded[:3]) * 1000)
         off_deg = float(np.degrees((Rotation.from_euler("xyz", measured[3:])
                                     * Rotation.from_euler("xyz", commanded[3:]).inv()).magnitude()))
         if off_mm <= self.anchor_max_mm and off_deg <= self.anchor_max_deg:
-            self.state_note = f"command; measured off {off_mm:.1f} mm {off_deg:.1f} deg"
+            source = "command" if anchor is None else "action"
+            self.state_note = f"{source}; measured off {off_mm:.1f} mm {off_deg:.1f} deg"
             return commanded
         self.state_note = f"measured; FALLBACK, off {off_mm:.1f} mm {off_deg:.1f} deg"
         print(f"WARNING: arm is {off_mm:.0f} mm / {off_deg:.0f} deg from its commanded pose; "
@@ -587,8 +599,11 @@ class FakeRobot:
     def __init__(self):
         self.state = np.zeros(19, dtype=np.float32)
 
-    def read_state(self):
-        return self.state.copy()
+    def read_state(self, anchor=None):
+        state = self.state.copy()
+        if anchor is not None:
+            state[:6] = pose_to_policy(anchor)
+        return state
 
     def apply_action(self, action):
         self.state = vector(action, 19, "fake action").astype(np.float32)
@@ -638,14 +653,85 @@ def pause_at_start(args, robot, camera, pedal, view=None):
     print("Pedal: resuming the policy.", flush=True)
 
 
-def run(args, robot, camera, sock, pedal=None, view=None, log=None):
+def ema_alphas():
+    """Per-coordinate EMA weights for the policy actions: arm pose, then hand motors."""
     for name, alpha in (
         ("ARM_ACTION_EMA_ALPHA", ARM_ACTION_EMA_ALPHA),
         ("HAND_ACTION_EMA_ALPHA", HAND_ACTION_EMA_ALPHA),
     ):
         if not np.isfinite(alpha) or not 0 < alpha <= 1:
             raise ValueError(f"{name} must be finite and in (0, 1]")
-    action_alpha = np.r_[np.full(6, ARM_ACTION_EMA_ALPHA), np.full(13, HAND_ACTION_EMA_ALPHA)]
+    return np.r_[np.full(6, ARM_ACTION_EMA_ALPHA), np.full(13, HAND_ACTION_EMA_ALPHA)]
+
+
+def filter_action(action, filtered, alpha):
+    """(hand-scaled action, its EMA with the previous filtered action)."""
+    action = np.array(action, dtype=np.float64, copy=True)
+    action[6:] *= HAND_ACTION_SCALE
+    return action, alpha * action + (1 - alpha) * filtered
+
+
+def capture(robot, camera, seq, log=None, anchor=None):
+    """Wrist image and observation state for request `seq`: (image, capture time, state, observe ms)."""
+    if log is not None:
+        log.event(seq, "observe")
+    start = time.perf_counter()
+    image = camera.read()
+    capture_time = time.time()
+    state = vector(robot.read_state() if anchor is None else robot.read_state(anchor), 19, "robot state")
+    if log is not None:
+        log.event(seq, "state", getattr(robot, "state_note", "measured"))
+    return image, capture_time, state, (time.perf_counter() - start) * 1000
+
+
+def receive_chunk(sock, seq, state, log=None):
+    """The reply to request `seq` as (chunk, header); None, after a warning, if the chunk jumps."""
+    reply = protocol.recv_action(sock)
+    if reply is None:
+        raise ConnectionError("Predictor disconnected")
+    reply_seq, chunk, header = reply
+    if reply_seq != seq:
+        raise ValueError(f"Expected reply sequence {seq}, got {reply_seq}")
+    chunk = np.asarray(chunk)
+    if chunk.ndim != 2 or chunk.shape[1] != 19 or not len(chunk) or not np.isfinite(chunk).all():
+        raise ValueError("Predictor action chunk must be finite, nonempty [T,19]")
+    if log is not None:
+        log.chunk(seq, state, chunk)
+        log.event(seq, "chunk_received", f"infer_ms={header.get('infer_ms', 0):.1f} len={len(chunk)}")
+    positions = np.vstack((state[:3], chunk[:, :3]))
+    jumps = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+    violations = np.flatnonzero(jumps > MAX_EEF_JUMP_M)
+    if len(violations):
+        index = int(violations[0])
+        source = "observation" if index == 0 else f"action {index - 1}"
+        print(
+            f"WARNING: refusing entire chunk cycle={seq}: EEF jump from {source} "
+            f"to action {index} is {jumps[index] * 100:.2f} cm "
+            f"> {MAX_EEF_JUMP_M * 100:g} cm. No actions from this chunk executed; "
+            "executor stopping.",
+            flush=True,
+        )
+        return None
+    return chunk, header
+
+
+def finish_action(robot, dt, first_sent):
+    """The remaining interpolated joint targets toward the action whose first one went out at first_sent."""
+    substeps = getattr(robot, "substeps", 1)
+    for step in range(2, substeps + 1):
+        remaining = first_sent + (step - 1) / substeps * dt - time.perf_counter()
+        if remaining > 0:
+            time.sleep(remaining)
+        robot.send_substep(step / substeps)
+
+
+def reply_ready(sock):
+    """Whether the predictor's reply has started to arrive; never blocks."""
+    return bool(select.select([sock], [], [], 0)[0])
+
+
+def run(args, robot, camera, sock, pedal=None, view=None, log=None):
+    action_alpha = ema_alphas()
     dt = 1.0 / args.hz
     seq = 0
     filtered_action = None
@@ -657,44 +743,14 @@ def run(args, robot, camera, sock, pedal=None, view=None, log=None):
                 log.event(seq, "pedal_reset")
             pause_at_start(args, robot, camera, pedal, view)
             filtered_action = None
-        if log is not None:
-            log.event(seq, "observe")
-        cycle_start = time.perf_counter()
-        image = camera.read()
-        capture_time = time.time()
-        state = vector(robot.read_state(), 19, "robot state")
-        if log is not None:
-            log.event(seq, "state", getattr(robot, "state_note", "measured"))
-        observe_ms = (time.perf_counter() - cycle_start) * 1000
+        image, capture_time, state, observe_ms = capture(robot, camera, seq, log)
         send_start = time.perf_counter()
         protocol.send_obs(sock, seq, image, state, t_capture=capture_time,
                           jpeg_quality=args.jpeg_quality)
-        reply = protocol.recv_action(sock)
+        reply = receive_chunk(sock, seq, state, log)
         if reply is None:
-            raise ConnectionError("Predictor disconnected")
-        reply_seq, chunk, header = reply
-        if reply_seq != seq:
-            raise ValueError(f"Expected reply sequence {seq}, got {reply_seq}")
-        chunk = np.asarray(chunk)
-        if chunk.ndim != 2 or chunk.shape[1] != 19 or not len(chunk) or not np.isfinite(chunk).all():
-            raise ValueError("Predictor action chunk must be finite, nonempty [T,19]")
-        if log is not None:
-            log.chunk(seq, state, chunk)
-            log.event(seq, "chunk_received", f"infer_ms={header.get('infer_ms', 0):.1f} len={len(chunk)}")
-        positions = np.vstack((state[:3], chunk[:, :3]))
-        jumps = np.linalg.norm(np.diff(positions, axis=0), axis=1)
-        violations = np.flatnonzero(jumps > MAX_EEF_JUMP_M)
-        if len(violations):
-            index = int(violations[0])
-            source = "observation" if index == 0 else f"action {index - 1}"
-            print(
-                f"WARNING: refusing entire chunk cycle={seq}: EEF jump from {source} "
-                f"to action {index} is {jumps[index] * 100:.2f} cm "
-                f"> {MAX_EEF_JUMP_M * 100:g} cm. No actions from this chunk executed; "
-                "executor stopping.",
-                flush=True,
-            )
             return
+        chunk, header = reply
         rtt_ms = (time.perf_counter() - send_start) * 1000
         if view is not None:
             view.set_chunk(chunk[:, :3])
@@ -707,22 +763,13 @@ def run(args, robot, camera, sock, pedal=None, view=None, log=None):
             if pedal_pressed(pedal):
                 interrupted = True
                 break
-            action = np.array(action, dtype=np.float64, copy=True)
-            action[6:] *= HAND_ACTION_SCALE
-            filtered_action = (
-                action_alpha * action + (1 - action_alpha) * filtered_action
-            )
+            action, filtered_action = filter_action(action, filtered_action, action_alpha)
             info = robot.apply_action(filtered_action)
             first_sent = time.perf_counter()  # after IK: later substeps keep even spacing from here
             if log is not None:
                 log.command(seq, index, action, filtered_action, info)
             refresh_views(robot, camera, view)
-            substeps = getattr(robot, "substeps", 1)
-            for step in range(2, substeps + 1):  # interpolated joint targets between actions
-                remaining = first_sent + (step - 1) / substeps * dt - time.perf_counter()
-                if remaining > 0:
-                    time.sleep(remaining)
-                robot.send_substep(step / substeps)
+            finish_action(robot, dt, first_sent)
             remaining = execute_start + (index + 1) * dt - time.perf_counter()
             if remaining > 0:
                 time.sleep(remaining)
@@ -740,6 +787,141 @@ def run(args, robot, camera, sock, pedal=None, view=None, log=None):
                 log.event(seq, "pedal_reset")
             pause_at_start(args, robot, camera, pedal, view)
             filtered_action = None
+
+
+def check_rtc_chunk(args, chunk, length=None):
+    if len(chunk) < args.rtc_horizon + 2:
+        raise ValueError(f"--rtc-horizon {args.rtc_horizon} needs chunks of at least {args.rtc_horizon + 2} "
+                         f"actions; the predictor sent {len(chunk)}")
+    if length is not None and len(chunk) != length:
+        raise ValueError(f"RTC chunk length changed from {length} to {len(chunk)}")
+
+
+def run_rtc(args, robot, camera, sock, pedal=None, view=None, log=None):
+    """Real-time chunking: the arm does not wait for the predictor (inference/predictor/rtc.py).
+
+    Chunk index 0 is the observation (the policy's actions are relative to the
+    observed state), so every chunk is executed from index 1, one action per
+    tick at --hz. Once --rtc-horizon of its actions have run (counting those run
+    from the previous chunk while this one was predicted), the next request goes
+    out right after action k0 is commanded: the observed arm pose is that raw
+    action (anchored_pose), and the request carries chunk[k0:] and the expected
+    delay d, the most actions run while waiting for any of the last
+    RTC_DELAY_HISTORY replies. If the arm is too far from that action, the
+    measured pose goes out with no chunk: the policy replans from the arm
+    instead of continuing the plan. The arm keeps executing the old chunk; the new
+    one, whose index i continues old step k0 + i, takes over at the first tick
+    after its reply arrives: at index m + 1 after m more old actions. If the old
+    chunk runs out first, the arm holds its last target. Only the first chunk
+    after the start or a pedal reset is waited for, with the arm at rest.
+    """
+    action_alpha = ema_alphas()
+    dt = 1.0 / args.hz
+    seq = 0
+    if pedal is not None:
+        pedal.poll()  # Ignore presses made during setup and the start move.
+    while not args.max_cycles or seq < args.max_cycles:
+        image, capture_time, state, observe_ms = capture(robot, camera, seq, log)
+        send_start = time.perf_counter()
+        protocol.send_obs(sock, seq, image, state, t_capture=capture_time, jpeg_quality=args.jpeg_quality,
+                          rtc={"prev_chunk": np.zeros((0, 19)), "delay": 0, "max_guidance": args.rtc_max_guidance})
+        reply = receive_chunk(sock, seq, state, log)
+        if reply is None:
+            return
+        chunk, header = reply
+        rtt = time.perf_counter() - send_start
+        check_rtc_chunk(args, chunk)
+        print(f"cycle={seq} rtc first chunk={len(chunk)} hz={args.hz:g} observe={observe_ms:.1f}ms "
+              f"infer={header.get('infer_ms', 0):.1f}ms rtt={rtt * 1000:.1f}ms", flush=True)
+        delays = deque([math.ceil(rtt / dt)], maxlen=RTC_DELAY_HISTORY)
+        chunk_seq, index, seq = seq, 1, seq + 1
+        filtered_action = state.copy()
+        pending = None
+        overruns = starved = 0
+        interrupted = False
+        if view is not None:
+            view.set_chunk(chunk[:, :3])
+        next_tick = time.perf_counter()
+        while True:
+            if pedal_pressed(pedal):
+                interrupted = True
+                break
+            if pending is not None and reply_ready(sock):
+                m, k0 = pending["executed"], pending["k0"]
+                if log is not None:
+                    log.event(chunk_seq, "chunk_done", f"overruns={overruns} starved={starved}")
+                reply = receive_chunk(sock, pending["seq"], pending["state"], log)
+                if reply is None:
+                    return
+                new, header = reply
+                check_rtc_chunk(args, new, len(chunk))
+                delays.append(m)
+                # The last old action run is chunk[k0 + m]; new[m + 1] follows it.
+                step_mm = np.linalg.norm(new[m + 1, :3] - chunk[k0 + m, :3]) * 1000
+                old_step_mm = (np.linalg.norm(chunk[k0 + m + 1, :3] - chunk[k0 + m, :3]) * 1000
+                               if k0 + m + 1 < len(chunk) else float("nan"))
+                ran = np.arange(1, m + 1)  # new steps whose old counterparts ran during inference
+                ran_mm = np.linalg.norm(new[ran, :3] - chunk[k0 + ran, :3], axis=1).max() * 1000 if m else 0.0
+                print(f"cycle={pending['seq']} rtc delay={m} (expected {pending['delay']}) "
+                      f"infer={header.get('infer_ms', 0):.1f}ms "
+                      f"wait={(time.perf_counter() - pending['sent']) * 1000:.0f}ms "
+                      f"takeover step={step_mm:.1f}mm (old plan {old_step_mm:.1f}mm) "
+                      f"off executed={ran_mm:.1f}mm overruns={overruns} starved={starved}", flush=True)
+                if log is not None:
+                    log.event(pending["seq"], "rtc_takeover",
+                              f"delay={m} expected={pending['delay']} step_mm={step_mm:.2f} "
+                              f"old_step_mm={old_step_mm:.2f} off_executed_mm={ran_mm:.2f}")
+                chunk, chunk_seq, index = new, pending["seq"], m + 1
+                pending = None
+                overruns = starved = 0
+                if view is not None:
+                    view.set_chunk(chunk[:, :3])
+            first_sent = None
+            if index < len(chunk):
+                action, filtered_action = filter_action(chunk[index], filtered_action, action_alpha)
+                info = robot.apply_action(filtered_action)
+                first_sent = time.perf_counter()  # after IK: later substeps keep even spacing from here
+                if log is not None:
+                    log.command(chunk_seq, index, action, filtered_action, info)
+                index += 1
+                if pending is not None:
+                    pending["executed"] += 1
+            elif pending is None:
+                break  # --max-cycles reached and its last chunk executed
+            else:
+                starved += 1  # the old chunk ran out first: hold the last target
+            if (pending is None and index - 1 >= args.rtc_horizon
+                    and (not args.max_cycles or seq < args.max_cycles)):
+                k0 = index - 1  # the action just commanded
+                image, capture_time, state, _ = capture(robot, camera, seq, log, anchor=pose_to_piper(chunk[k0, :6]))
+                # Measured fallback (the arm is far from the plan): replan from the arm, do not continue the plan.
+                prev = chunk[k0:] if np.allclose(state[:3], chunk[k0, :3], rtol=0, atol=1e-6) else chunk[:0]
+                delay = max(delays)
+                protocol.send_obs(sock, seq, image, state, t_capture=capture_time, jpeg_quality=args.jpeg_quality,
+                                  rtc={"prev_chunk": prev, "delay": delay, "max_guidance": args.rtc_max_guidance})
+                pending = {"seq": seq, "k0": k0, "state": state, "delay": delay, "executed": 0,
+                           "sent": time.perf_counter()}
+                seq += 1
+            refresh_views(robot, camera, view)
+            if first_sent is not None:
+                finish_action(robot, dt, first_sent)
+            next_tick += dt
+            remaining = next_tick - time.perf_counter()
+            if remaining > 0:
+                time.sleep(remaining)
+            else:
+                overruns += 1
+                next_tick = time.perf_counter()  # late: continue from now instead of rushing to catch up
+        if log is not None:
+            log.event(chunk_seq, "chunk_done",
+                      f"overruns={overruns} starved={starved}{' interrupted' if interrupted else ''}")
+        if not interrupted:
+            return
+        if pending is not None:
+            protocol.recv_action(sock)  # its chunk continues motion the reset abandoned
+        if log is not None:
+            log.event(seq, "pedal_reset")
+        pause_at_start(args, robot, camera, pedal, view)
 
 
 def parse_args(argv=None):
@@ -773,6 +955,15 @@ def parse_args(argv=None):
                    help="With --arm-control joint, send interpolated move_j targets at about this rate "
                         "(rounded to a whole number per action: 4 per action at --hz 15); "
                         "set it to --hz for one jump per action")
+    p.add_argument("--rtc", action="store_true",
+                   help="Real-time chunking: request the next chunk while executing the current one, guided to "
+                        "continue it, so the arm does not wait for the predictor (needs this repo's predictor)")
+    p.add_argument("--rtc-horizon", type=int, default=8,
+                   help="With --rtc, actions executed from each chunk (including those run while it was "
+                        "predicted) before the next request")
+    p.add_argument("--rtc-max-guidance", type=float, default=20.0,
+                   help="With --rtc, clip of the guidance toward the previous chunk (the RTC paper's beta, "
+                        "inference/predictor/rtc.py); 0 disables guidance")
     p.add_argument("--state-anchor", choices=("command", "measured"), default="command",
                    help="Arm pose sent as the observation state, which the predictor anchors each chunk to: "
                         "the last commanded pose (default) or the measured pose (previous behavior)")
@@ -837,6 +1028,10 @@ def parse_args(argv=None):
         p.error("Require --max-joint-speed-deg-s in (0, 180] and --ik-damping-sigma in [0, 0.2]")
     if not args.hz <= args.command_hz <= 200:
         p.error("Require --hz <= --command-hz <= 200")
+    if args.rtc_horizon < 1 or not 0 <= args.rtc_max_guidance <= 1000:
+        p.error("Require --rtc-horizon >= 1 and --rtc-max-guidance in [0, 1000]")
+    if args.rtc and args.state_anchor != "command":
+        p.error("--rtc continues the commanded plan from the action just sent; use --state-anchor command")
     if not args.anchor_max_mm > 0 or not args.anchor_max_deg > 0:
         p.error("Require positive --anchor-max-mm and --anchor-max-deg")
     if args.start_speed_deg_s > 30:
@@ -877,7 +1072,7 @@ def main():
             view.update()
         camera = FakeCamera() if args.fake else OakCamera(args)
         robot = FakeRobot() if args.fake else RobotIO(args)
-        run(args, robot, camera, sock, pedal, view, log)
+        (run_rtc if args.rtc else run)(args, robot, camera, sock, pedal, view, log)
     except KeyboardInterrupt:
         print("Stopped")
     finally:

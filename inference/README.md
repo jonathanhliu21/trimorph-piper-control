@@ -69,7 +69,8 @@ from `PIPER_START_JOINTS_DEG` in `data_collection/collection/config.py`:
 `--start-home home_4c` by default (logged start #1, a tested offset of `home_4b`),
 `home_4d` (tested start #6), `home_4b` (median start of episodes 95-220 of
 `data_trimorph_hand_mocap_quest_4`), `home_4a` (its episodes 0-94),
-`home_cube1` (median start of `data_trimorph_hand_mocap_quest_5`), or `quest_0`.
+`home_cube1` (median start of `data_trimorph_hand_mocap_quest_5`), `home_unscrew1`
+(median start of `data_trimorph_unscrew_cap_0`), or `quest_0`.
 Every start reached (startup and pedal resets) is appended to
 `output/executor_starts.jsonl` with an id, the commanded and measured joints, and
 the measured flange pose; `--start-id N` repeats start N exactly (joints and hand
@@ -115,7 +116,10 @@ predictor chunks with the observed state, and `events.csv` the observe/chunk
 timing. Everything is held in memory and written when the executor exits,
 then `plot_run.py` saves `joints.png` and `eef.png` (position, velocity, and
 acceleration of each joint and flange axis, measured vs commanded, with
-predictor waits shaded) and `spectrum.png` into the same folder, and prints
+predictor waits shaded), `eef_position_error.png` (signed XYZ and total 3D
+position error in mm, measured FK minus requested target, sampled at target
+arrival; one action period after issue for interpolated joint commands), and
+`spectrum.png` into the same folder, and prints
 per-band velocity RMS: measured well above commanded means the arm adds the
 shake; equal means it is in the commands. Replot or zoom with
 `python inference/executor/plot_run.py RUN_DIR --start 10 --end 16`.
@@ -162,10 +166,12 @@ and every consecutive action pair. Any violation prints a warning and stops
 the executor without applying any hand or arm actions from that chunk. This
 check does not enforce workspace, table clearance, joint limits, or rotation limits.
 
-This port retains synchronous request/reply execution. It captures an
+By default the executor uses synchronous request/reply execution. It captures an
 observation, waits for the predictor, and then executes the returned chunk.
-Inference therefore remains a pause between chunks. It does **not** solve that
-pause by speeding up playback or appending stale predictions to a queue.
+Inference therefore remains a pause between chunks, and the first action of
+every chunk is the observed pose itself (the policy's actions are relative to
+it), one more period without motion. It does **not** solve that pause by
+speeding up playback or appending stale predictions to a queue.
 
 Each cycle logs observation time, full predictor `infer` time, request/reply
 `rtt`, execution time, and action deadline overruns. `rtt` includes prediction;
@@ -174,7 +180,46 @@ on top of the scheduled action interval. Predictor timing covers CPU output
 conversion as well as model execution. Socket and camera timeouts bound waits;
 invalid/nonfinite outputs or mismatched sequence numbers abort execution.
 
-Continuous execution requires a separate asynchronous controller with
-observation timestamps, latency compensation, and correct relative-action
-anchoring. No hardware performance or policy success is established by unit
-tests or the synthetic link test.
+### Real-time chunking (`--rtc`)
+
+`--rtc` removes the pause with real-time chunking (Black, Galliker, Levine
+2025, "Real-Time Execution of Action Chunking Flow Policies"). Start the
+predictor from this repository; it answers both kinds of requests:
+
+```bash
+python inference/executor/executor.py --predictor GPU_HOST --rtc
+```
+
+The predictor returns the whole prediction horizon (16 actions), and the executor
+runs each chunk from index 1, one action per period. Once `--rtc-horizon`
+(default 8) of its actions have run, it sends the next observation right after
+commanding action k0, without stopping: the observed arm pose is that raw
+policy action (so the new chunk shares the old one's frame; `--rtc` therefore
+requires `--state-anchor command`), and the request carries the rest of the
+chunk from k0 on plus the expected delay d, the most actions run while waiting
+for any of the last 10 replies. If the arm is beyond `--anchor-max-mm` /
+`--anchor-max-deg` from that action, the measured pose is sent with no chunk,
+so the policy replans from the arm instead of continuing the plan. The arm keeps executing the old chunk. The reply takes over at the
+first period after it arrives, at index m + 1 after m more old actions. If the
+old chunk runs out first, the arm holds its last target ("starved" in the log).
+Only the first chunk after the start or a pedal reset is waited for.
+
+The predictor samples the new chunk with inpainting guidance toward the old
+one (`inference/predictor/rtc.py`): weight 1 on the observation and the d
+actions run before it arrives, exponentially decaying weights over the rest of
+the overlap, 0 after, applied with pseudoinverse guidance (PiGDM) at each of the
+DDIM steps. Each step then also back-propagates through the UNet, so expect a
+longer `infer`. `--rtc-max-guidance` clips the guidance, the paper's beta, and
+`0` disables it (asynchronous execution only). The default is 20. The paper's 5
+was tuned for 5 flow-matching steps; with this 16-step DDIM schedule, a smooth
+Gaussian-process stand-in policy (`tests/test_rtc.py`) shows weaker
+continuations at 5. PiGDM is approximate, so the new chunk follows the old one
+closely but not exactly. Each takeover prints the delay (and the expected one),
+the step from the last old action to the first new one next to the old chunk's
+own step at that point ("old plan"), and how far the new chunk is from the old
+actions run while it was predicted; `events.csv` keeps the same numbers as
+`rtc_takeover`. In run plots the gray spans then mark inference in flight; the
+arm keeps moving during them.
+
+No hardware performance or policy success is established by unit tests or the
+synthetic link test.

@@ -1,11 +1,14 @@
 """Trimorph inference predictor.
 
-Runs on the GPU box. Loads the diffusion policy, then serves a synchronous
-request/reply loop over TCP: receive (image, robot_state) from the executor,
-run inference, send back an absolute action chunk of shape (T, 19).
+Runs on the GPU box. Loads the diffusion policy, then serves a request/reply
+loop over TCP: receive (image, robot_state) from the executor, run inference,
+send back an absolute action chunk of shape (T, 19).
 
 The policy wrapper converts its relative predictions to absolute commands using
 the robot_state we are sent, so the executor can apply the chunk directly.
+Real-time chunking requests (executor --rtc) also carry the rest of the chunk
+being executed; they are answered with the full prediction horizon, guided to
+continue that chunk (rtc.py).
 """
 
 from __future__ import annotations
@@ -69,21 +72,34 @@ def load_policy(args):
     return policy
 
 
-def warmup(policy, n: int) -> None:
+def make_chunker(policy):
+    from rtc import RealTimeChunker
+    from shared.env.midas.se3_utils import absolute_to_relative, relative_to_absolute
+
+    # absolute_to_relative is relative to its first row, so prepend the state.
+    return RealTimeChunker(
+        policy,
+        to_relative=lambda actions, state: absolute_to_relative(np.vstack((state[None], actions)))[1:],
+        to_absolute=relative_to_absolute,
+    )
+
+
+def warmup(policy, chunker, n: int) -> None:
     if n <= 0:
         return
     h, w = int(policy.expected_chw[1]), int(policy.expected_chw[2])
     dummy_img = np.zeros((h, w, 3), dtype=np.uint8)
     dummy_state = np.zeros(policy.action_dim, dtype=np.float32)
-    print(f"Warming up ({n}x)...")
+    print(f"Warming up ({n}x, plain and RTC)...")
     for _ in range(n):
         policy.reset()
         policy.predict(dummy_img, dummy_state)
+        chunker.predict(dummy_img, dummy_state, np.tile(dummy_state, (8, 1)), delay=2, max_guidance=20.0)
     policy.reset()
     print("Warmup done.")
 
 
-def serve_connection(policy, conn: socket.socket, peer) -> None:
+def serve_connection(policy, chunker, conn: socket.socket, peer) -> None:
     protocol.set_low_latency(conn)
     policy.reset()
     print(f"Executor connected: {peer}")
@@ -95,13 +111,17 @@ def serve_connection(policy, conn: socket.socket, peer) -> None:
             if obs is None:
                 print(f"Executor {peer} disconnected.")
                 return
-            seq, image_rgb, state, _ = obs
+            seq, image_rgb, state, header = obs
+            rtc = header.get("rtc")
 
             t0 = time.perf_counter()
-            result = policy.predict(image_rgb, state)
+            if rtc is None:
+                action = policy.predict(image_rgb, state)["action"]
+            else:
+                action = chunker.predict(image_rgb, state, rtc["prev_chunk"], rtc["delay"], rtc["max_guidance"])
             infer_ms = (time.perf_counter() - t0) * 1e3
 
-            protocol.send_action(conn, seq, result["action"], infer_ms=infer_ms)
+            protocol.send_action(conn, seq, action, infer_ms=infer_ms)
 
             count += 1
             lat_sum += infer_ms
@@ -119,7 +139,8 @@ def main():
         sys.exit(1)
 
     policy = load_policy(args)
-    warmup(policy, args.warmup)
+    chunker = make_chunker(policy)
+    warmup(policy, chunker, args.warmup)
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -131,7 +152,7 @@ def main():
         while True:
             conn, peer = server.accept()
             with conn:
-                serve_connection(policy, conn, peer)
+                serve_connection(policy, chunker, conn, peer)
     except KeyboardInterrupt:
         print("\nShutting down.")
     finally:
