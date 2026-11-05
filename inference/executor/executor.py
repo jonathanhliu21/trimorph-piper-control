@@ -1,7 +1,9 @@
 """Execute 19D policy chunks on Trimorph + Piper, using collection coordinates.
 
 By default the request/reply loop is synchronous: prediction latency remains a
-pause between chunks, and the timings expose that cost. --rtc runs real-time
+pause between chunks, and the timings expose that cost. --async-inference
+overlaps prediction with playback and replaces the old tail at an action boundary.
+It is mutually exclusive with --rtc, which runs real-time
 chunking instead (run_rtc, inference/predictor/rtc.py): the next chunk is
 requested while the current one executes and is guided to continue it, so the
 arm does not stop between chunks. Before the first observation the arm ramps
@@ -41,6 +43,7 @@ if str(CONTROL_ROOT) not in sys.path:
     sys.path.insert(0, str(CONTROL_ROOT))
 
 from inference import protocol
+from inference.executor.async_predictor import AsyncPredictor
 from data_collection.collection import config as defaults
 
 MOTOR_IDS = tuple(defaults.TRIMORPH_MOTOR_IDS)
@@ -406,6 +409,7 @@ class OakCamera:
         self.flip_frame = flip_frame
         self.flip = args.cam_flip
         self.timeout = args.camera_timeout
+        self.latest_frame = None
         self.window = "Wrist camera (policy input; q/Esc stops)" if args.show else None
         dai = import_depthai()
         require_depthai_device(dai)
@@ -430,14 +434,30 @@ class OakCamera:
         packet = self.queue.tryGet()
         if packet is None:
             return None
-        # Prefer the newest available image after executing a whole chunk.
+        # Prefer the newest available image.
         for _ in range(100):
             newer = self.queue.tryGet()
             if newer is None:
                 break
             packet = newer
         bgr = packet.getCvFrame()
-        return None if bgr is None else self.flip_frame(self.cv2, bgr, self.flip)
+        if bgr is None:
+            return None
+        bgr = self.flip_frame(self.cv2, bgr, self.flip)
+        self.latest_frame = (bgr, time.time(), time.monotonic())
+        return bgr
+
+    def read_available(self):
+        """Nonblocking async observation, including frames consumed by preview()."""
+        bgr = self.newest_bgr()
+        if bgr is not None and self.window:
+            self.show(bgr)
+        if self.latest_frame is None:
+            return None
+        bgr, capture_time, received_at = self.latest_frame
+        if time.monotonic() - received_at > self.timeout:
+            raise TimeoutError("No OAK camera image within camera timeout")
+        return self.cv2.cvtColor(bgr, self.cv2.COLOR_BGR2RGB), capture_time
 
     def show(self, bgr):
         self.cv2.imshow(self.window, bgr)
@@ -622,6 +642,9 @@ class FakeCamera:
     def read(self):
         return np.zeros((240, 320, 3), dtype=np.uint8)
 
+    def read_available(self):
+        return self.read(), time.time()
+
     def preview(self):
         pass
 
@@ -732,6 +755,8 @@ def reply_ready(sock):
 
 def run(args, robot, camera, sock, pedal=None, view=None, log=None):
     action_alpha = ema_alphas()
+    if getattr(args, "async_inference", False):
+        return run_async(args, robot, camera, sock, action_alpha, pedal, view, log)
     dt = 1.0 / args.hz
     seq = 0
     filtered_action = None
@@ -751,15 +776,16 @@ def run(args, robot, camera, sock, pedal=None, view=None, log=None):
         if reply is None:
             return
         chunk, header = reply
+        execute_steps = planned_action_steps(args, chunk)
         rtt_ms = (time.perf_counter() - send_start) * 1000
         if view is not None:
-            view.set_chunk(chunk[:, :3])
+            view.set_chunk(chunk[:execute_steps, :3])
         execute_start = time.perf_counter()
         overruns = 0
         if filtered_action is None:
             filtered_action = state.copy()
         interrupted = False
-        for index, action in enumerate(chunk):
+        for index, action in enumerate(chunk[:execute_steps]):
             if pedal_pressed(pedal):
                 interrupted = True
                 break
@@ -787,6 +813,200 @@ def run(args, robot, camera, sock, pedal=None, view=None, log=None):
                 log.event(seq, "pedal_reset")
             pause_at_start(args, robot, camera, pedal, view)
             filtered_action = None
+
+
+def validate_chunk(chunk):
+    chunk = np.asarray(chunk)
+    if chunk.ndim != 2 or chunk.shape[1] != 19 or not len(chunk) or not np.isfinite(chunk).all():
+        raise ValueError("Predictor action chunk must be finite, nonempty [T,19]")
+    return chunk
+
+
+def planned_action_steps(args, chunk):
+    """Use a chosen prefix of the returned chunk, or all of it when uncapped."""
+    limit = getattr(args, "execute_steps", 0)
+    return min(limit, len(chunk)) if limit else len(chunk)
+
+
+def check_chunk_jumps(seq, state, chunk, previous=None):
+    positions = np.vstack((state[:3], chunk[:, :3]))
+    jumps = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+    violations = np.flatnonzero(jumps > MAX_EEF_JUMP_M)
+    if len(violations):
+        index = int(violations[0])
+        source = "observation" if index == 0 else f"action {index - 1}"
+        distance = jumps[index]
+    elif previous is not None and np.linalg.norm(chunk[0, :3] - previous[:3]) > MAX_EEF_JUMP_M:
+        index, source = 0, "last commanded action"
+        distance = np.linalg.norm(chunk[0, :3] - previous[:3])
+    else:
+        return True
+    print(f"WARNING: refusing entire chunk cycle={seq}: EEF jump from {source} "
+          f"to action {index} is {distance * 100:.2f} cm > {MAX_EEF_JUMP_M * 100:g} cm. "
+          "No actions from this chunk executed; executor stopping.", flush=True)
+    return False
+
+
+def run_async(args, robot, camera, sock, action_alpha, pedal=None, view=None, log=None):
+    """Overlap one prediction with playback; replace tails at policy action boundaries.
+
+    Hardware reads/writes and GUI operations stay on this thread. JPEG encoding
+    and the request/reply run on the socket worker. Complete an action's joint
+    interpolation before switching chunks, without compressing the action clock.
+    """
+    dt = 1.0 / args.hz
+    lead = args.inference_latency_ms / 1000
+    predictor = AsyncPredictor(sock, args.jpeg_quality)
+    seq = 0  # Number of requests submitted, including replies discarded on reset.
+    chunk = None
+    pending = None
+    discard_pending = False
+    waiting = False
+    filtered_action = None
+    request_at = time.perf_counter()
+    camera_wait_since = request_at
+
+    class PedalReset(Exception):
+        pass
+
+    def event(cycle, name, detail=""):
+        if log is not None:
+            log.event(cycle, name, detail)
+
+    def can_request():
+        return not args.max_cycles or seq < args.max_cycles
+
+    def poll():
+        nonlocal seq, pending, request_at, camera_wait_since
+        if pedal_pressed(pedal):
+            raise PedalReset
+        predictor.check_error()
+        now = time.perf_counter()
+        if predictor.future is None and can_request() and now >= request_at:
+            # No camera wait on the control thread. Preview caches its latest
+            # frame too, so it cannot steal an observation from this request.
+            observation = camera.read_available()
+            if observation is None:
+                if now - camera_wait_since > args.camera_timeout:
+                    raise TimeoutError("No OAK camera image within camera timeout")
+                return
+            image, capture_time = observation
+            event(seq, "observe")
+            state = vector(robot.read_state(), 19, "robot state")
+            event(seq, "state", getattr(robot, "state_note", "measured"))
+            pending = (seq, state, (time.perf_counter() - now) * 1000)
+            predictor.submit(seq, image, state, capture_time)
+            seq += 1
+            request_at = float("inf")
+
+    def wait_until(deadline):
+        while time.perf_counter() < deadline:
+            poll()
+            now = time.perf_counter()
+            wake = min(deadline, now + 0.002)
+            if predictor.future is None and can_request() and request_at > now:
+                wake = min(wake, request_at)
+            if wake > now:
+                time.sleep(wake - now)
+
+    def finish(reason):
+        nonlocal chunk
+        if chunk is None:
+            return
+        dropped = len(chunk) - index
+        print(f"cycle={cycle} chunk={len(chunk)} planned={execute_steps} hz={args.hz:g} observe={observe_ms:.1f}ms "
+              f"infer={header.get('infer_ms', 0):.1f}ms rtt={rtt_ms:.1f}ms "
+              f"execute={(time.perf_counter() - execute_start) * 1000:.1f}ms "
+              f"executed={index} dropped={dropped} overruns={overruns} {reason}", flush=True)
+        event(cycle, "chunk_done",
+              f"planned={execute_steps} executed={index} dropped={dropped} overruns={overruns} {reason}")
+        chunk = None
+
+    if pedal is not None:
+        pedal.poll()
+    try:
+        while True:
+            try:
+                poll()
+                # This is always an action boundary: the previous action and all
+                # of its interpolated commands have finished before taking a reply.
+                if predictor.ready():
+                    reply, new_rtt_ms = predictor.take()
+                    new_cycle, state, new_observe_ms = pending
+                    pending = None
+                    if discard_pending:
+                        event(new_cycle, "chunk_discarded", "pedal reset")
+                        discard_pending = False
+                        request_at = camera_wait_since = time.perf_counter()
+                        continue
+                    new_chunk = validate_chunk(reply[1])
+                    if log is not None:
+                        log.chunk(new_cycle, state, new_chunk)
+                    event(new_cycle, "chunk_received",
+                          f"infer_ms={reply[2].get('infer_ms', 0):.1f} len={len(new_chunk)} rtt_ms={new_rtt_ms:.1f}")
+                    if not check_chunk_jumps(new_cycle, state, new_chunk, filtered_action):
+                        finish("rejected replacement")
+                        return
+                    finish("replaced")
+                    if waiting:
+                        event(new_cycle, "wait_end")
+                        waiting = False
+                    cycle, chunk, index = new_cycle, new_chunk, 0
+                    execute_steps = planned_action_steps(args, chunk)
+                    header, rtt_ms, observe_ms = reply[2], new_rtt_ms, new_observe_ms
+                    execute_start, overruns = time.perf_counter(), 0
+                    if filtered_action is None:
+                        filtered_action = state.copy()
+                    if view is not None:
+                        view.set_chunk(chunk[:execute_steps, :3])
+                    event(cycle, "chunk_start", f"planned={execute_steps} predicted={len(chunk)}")
+
+                if chunk is None:
+                    if predictor.future is None and not can_request():
+                        return
+                    if not waiting:
+                        event(seq, "wait_start")
+                        waiting = True
+                    refresh_views(robot, camera, view)
+                    time.sleep(0.002)
+                    continue
+
+                action, filtered_action = filter_action(chunk[index], filtered_action, action_alpha)
+                info = robot.apply_action(filtered_action)
+                first_sent = time.perf_counter()
+                if log is not None:
+                    log.command(cycle, index, action, filtered_action, info)
+                index += 1
+                # Recompute from actual send time: slow IK/IO shifts the forecast,
+                # and a late reply never causes a burst of catch-up commands.
+                next_action_at = first_sent + dt
+                if predictor.future is None and can_request():
+                    request_at = next_action_at + (execute_steps - index) * dt - lead
+                    camera_wait_since = max(first_sent, request_at)
+                refresh_views(robot, camera, view)
+                substeps = getattr(robot, "substeps", 1)
+                for step in range(2, substeps + 1):
+                    wait_until(first_sent + (step - 1) / substeps * dt)
+                    robot.send_substep(step / substeps)
+                if time.perf_counter() > next_action_at:
+                    overruns += 1
+                wait_until(next_action_at)
+                if index == execute_steps:
+                    finish("complete")
+            except PedalReset:
+                finish("pedal reset")
+                if waiting:
+                    event(seq, "wait_end")
+                    waiting = False
+                event(seq, "pedal_reset")
+                # Keep the sole socket request until its reply is drained, but
+                # never execute a prediction made before returning to the start.
+                discard_pending = predictor.future is not None
+                pause_at_start(args, robot, camera, pedal, view)
+                filtered_action = None
+                request_at = camera_wait_since = time.perf_counter()
+    finally:
+        predictor.close()
 
 
 def check_rtc_chunk(args, chunk, length=None):
@@ -929,6 +1149,14 @@ def parse_args(argv=None):
     p.add_argument("--predictor", required=True, help="GPU predictor hostname/IP")
     p.add_argument("--port", type=int, default=5555)
     p.add_argument("--hz", type=float, default=15.0, help="Match camera sync rate / training stride")
+    p.add_argument("--execute-steps", type=int, default=0,
+                   help="Maximum actions to execute from each returned chunk; 0 uses the whole chunk (default). "
+                        "Async timing uses this count, capped to the returned length")
+    modes = p.add_mutually_exclusive_group()
+    modes.add_argument("--async-inference", action="store_true",
+                   help="Predict during playback and replace remaining actions when the reply is ready")
+    p.add_argument("--inference-latency-ms", type=float, default=70.0,
+                   help="Async request lead time before the estimated chunk end (default: %(default)s ms)")
     p.add_argument("--max-cycles", type=int, default=0)
     p.add_argument("--timeout", type=float, default=30.0, help="TCP timeout in seconds")
     p.add_argument("--jpeg-quality", type=int, default=85)
@@ -955,7 +1183,7 @@ def parse_args(argv=None):
                    help="With --arm-control joint, send interpolated move_j targets at about this rate "
                         "(rounded to a whole number per action: 4 per action at --hz 15); "
                         "set it to --hz for one jump per action")
-    p.add_argument("--rtc", action="store_true",
+    modes.add_argument("--rtc", action="store_true",
                    help="Real-time chunking: request the next chunk while executing the current one, guided to "
                         "continue it, so the arm does not wait for the predictor (needs this repo's predictor)")
     p.add_argument("--rtc-horizon", type=int, default=8,
@@ -1016,6 +1244,12 @@ def parse_args(argv=None):
                         "(default: %(default)s)")
     p.add_argument("--no-log", action="store_true", help="Do not save the run log")
     args = p.parse_args(argv)
+    if args.execute_steps < 0:
+        p.error("--execute-steps must be nonnegative (0 uses the whole chunk)")
+    if not np.isfinite(args.inference_latency_ms) or args.inference_latency_ms < 0:
+        p.error("--inference-latency-ms must be finite and nonnegative")
+    if args.rtc and args.execute_steps:
+        p.error("--execute-steps applies to synchronous/async playback; use --rtc-horizon with --rtc")
     for name in ("hz", "timeout", "camera_timeout", "hand_velocity", "hand_acceleration", "start_speed_deg_s"):
         if not np.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             p.error(f"--{name.replace('_', '-')} must be finite and positive")

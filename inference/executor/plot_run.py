@@ -8,7 +8,8 @@ resampled on a uniform 200 Hz grid with Savitzky-Golay derivatives; the flange
 is FK of those joints. Commanded: the EMA-filtered targets in commands.csv (one
 per action, e.g. 15 Hz), drawn as held steps; joint targets are IK of each
 target seeded at the measured joints. Gray spans: waiting for the predictor
-(observe -> chunk received; with --rtc the arm keeps moving during them);
+(observe -> chunk received; with --rtc the arm keeps moving during them;
+with --async-inference only actual playback gaps are shaded);
 dotted lines: chunk starts; red lines: pedal resets.
 
 Saves joints.png, eef.png, eef_position_error.png, and spectrum.png in the run folder.
@@ -185,10 +186,18 @@ def main(argv=None):
 
     waits, starts, resets = [], [], []
     pending = None
+    async_inference = run_args.get("async_inference", False)
     for t, name in zip(d["ev_t"], d["ev_name"]):
-        if name == "observe":
+        if async_inference and name == "wait_start":
             pending = t
-        elif name == "chunk_received" and pending is not None:
+        elif async_inference and name == "wait_end" and pending is not None:
+            waits.append((pending, t))
+            pending = None
+        elif async_inference and name == "chunk_start":
+            starts.append(t)
+        elif not async_inference and name == "observe":
+            pending = t
+        elif not async_inference and name == "chunk_received" and pending is not None:
             waits.append((pending, t))
             starts.append(t)
             pending = None

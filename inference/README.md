@@ -49,7 +49,8 @@ Fake mode uses synthetic images/state and does not connect to the hand, Piper,
 or camera. The real GPU model still runs. Unit tests need no GPU or devices:
 
 ```bash
-python -m unittest discover -s tests -p 'test_inference.py'
+python -m unittest discover -s tests -p 'test_*inference.py'
+python -m unittest discover -s tests -p 'test_rtc.py'
 ```
 
 ## Execute on Trimorph and Piper
@@ -83,7 +84,7 @@ After the arm, the hand moves (at the configured hand profile velocity) to the
 same start's median demo hand pose, `HAND_START_POSITIONS_RAD`; a hand that is not
 within 0.05 rad after 5 s only prints a warning. `--no-hand-start` moves only the arm. `--show`
 opens a live wrist-camera window (flipped like the policy input); it freezes
-while waiting for the predictor, and q/Esc stops the executor.
+while waiting for the predictor in synchronous mode, and q/Esc stops the executor.
 The arm is driven in joint space by default (`--arm-control joint`,
 `inference/executor/joint_control.py`): each policy pose is solved by local IK
 from the previous joint target and sent with `move_j`. The IK is exact except
@@ -168,17 +169,78 @@ check does not enforce workspace, table clearance, joint limits, or rotation lim
 
 By default the executor uses synchronous request/reply execution. It captures an
 observation, waits for the predictor, and then executes the returned chunk.
-Inference therefore remains a pause between chunks, and the first action of
-every chunk is the observed pose itself (the policy's actions are relative to
-it), one more period without motion. It does **not** solve that pause by
-speeding up playback or appending stale predictions to a queue.
+Inference therefore remains a pause between chunks by default. Enable overlapping
+inference on the executor with:
+
+```bash
+python inference/executor/executor.py --predictor GPU_HOST --hz 15 \
+  --async-inference --inference-latency-ms 70
+```
+
+The predictor command and protocol stay the same. To test the link without
+hardware, add `--fake --max-cycles 20 --no-log` to this command.
+
+Use `--execute-steps K` to execute at most the first K actions of each returned
+chunk, in either synchronous or async mode. The default `0` uses the entire
+returned chunk. If fewer than K actions arrive, use the available count. Raw
+chunks are still logged and validated in full, while the trajectory view shows
+the chosen prefix.
+
+In async mode, the executor forecasts the current chunk's finish from its
+remaining **chosen** actions and `--hz`, and captures the next observation
+`--inference-latency-ms` before that finish (default **70 ms**). JPEG encoding,
+network I/O, and prediction run in the background while playback continues.
+For N chosen actions at frequency f, nominal execution takes `N / f` seconds,
+so the next request starts about `max(0, N / f - latency_seconds)` after playback
+starts. The deadline is recalculated after every action from its actual send
+time and the number of chosen actions remaining. For example, with
+`--hz 15 --execute-steps 8`, an available 8-action prefix takes about 533 ms and
+the next request starts about 463 ms into playback with the 70 ms lead.
+`--command-hz` controls interpolation within each action; it does not multiply
+the number of policy actions or change this duration calculation.
+The estimate should cover the full request/reply latency, including inference;
+increase it if replies routinely arrive late. It is a fixed tunable estimate,
+not an automatically measured delay. A value of 0 requests at the chunk end.
+
+When a reply is ready, it replaces the previous chunk **at the next policy action
+boundary**: the current action's interpolated arm commands finish, then all
+unexecuted old actions are discarded. The first action of the new chunk plays
+next, with EMA history retained. For example, a 10-action chunk at 100 Hz lasts
+100 ms: the next request starts around 30 ms with a 70 ms estimate. If the reply
+arrives at 35 ms, it takes over at 40 ms and drops the six remaining old actions.
+
+There is at most one request in flight. A chunk shorter than the lead time starts
+its next request after issuing its first action. The first chunk requires an
+initial wait; if a later reply is late, the chosen prefix finishes and the robot
+holds its final target until the reply arrives, without playing the excluded
+suffix. Playback never speeds up to catch
+up. Hardware reads, writes, and GUI updates stay on the control thread; async
+camera observations use the newest available frame without blocking for a new
+one. A pedal reset discards the old tail and any in-flight reply, drains that
+reply, and takes a fresh observation after resuming. `--max-cycles` counts
+requests, including any reply discarded on reset.
+
+The predictor still anchors absolute actions to the state captured **at request
+time**. The robot can move during prediction, so the start of a new chunk can
+point back toward that earlier state. This implementation does not extrapolate
+the observation, rebase the returned chunk, or skip its first actions. The
+existing whole-chunk jump check also checks the last commanded action against
+the replacement's first action in async mode.
 
 Each cycle logs observation time, full predictor `infer` time, request/reply
 `rtt`, execution time, and action deadline overruns. `rtt` includes prediction;
 do not add the two values. `observe + rtt` is the approximate inter-chunk overhead
-on top of the scheduled action interval. Predictor timing covers CPU output
+on top of the scheduled action interval in synchronous mode. Predictor timing covers CPU output
 conversion as well as model execution. Socket and camera timeouts bound waits;
 invalid/nonfinite outputs or mismatched sequence numbers abort execution.
+
+Async cycle logs include planned, executed, and dropped action counts. In async
+run plots, gray spans mark actual playback waits rather than inference that
+overlaps motion. Synchronous and RTC logging retain their existing behavior.
+
+The `--async-inference` and `--rtc` flags are mutually exclusive. With neither
+flag, execution remains synchronous. `--execute-steps` applies only to synchronous
+and plain async execution; RTC uses `--rtc-horizon` for replanning timing.
 
 ### Real-time chunking (`--rtc`)
 
