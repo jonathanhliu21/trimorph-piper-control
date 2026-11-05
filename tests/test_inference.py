@@ -376,6 +376,21 @@ class InferenceTests(unittest.TestCase):
         robot.hand.set_positions.assert_not_called()
         robot.piper.move_eef.assert_not_called()
 
+    def test_sync_loop_limits_playback_to_selected_prefix(self):
+        chunk = np.zeros((5, 19))
+        chunk[:, 6] = np.arange(5) / 10
+        robot = FakeRobot()
+        robot.apply_action = Mock(wraps=robot.apply_action)
+        view = Mock()
+        args = SimpleNamespace(hz=1000, max_cycles=1, jpeg_quality=85, execute_steps=2)
+        with patch.object(protocol, 'send_obs'), \
+             patch.object(protocol, 'recv_action', return_value=(0, chunk, {})), \
+             contextlib.redirect_stdout(io.StringIO()):
+            run(args, robot, FakeCamera(), Mock(), view=view)
+        self.assertEqual(robot.apply_action.call_count, 2)
+        self.assertAlmostEqual(robot.state[6], .1)
+        np.testing.assert_array_equal(view.set_chunk.call_args.args[0], chunk[:2, :3])
+
     def test_socket_loop_executes_multiple_chunks(self):
         client, server = socket.socketpair()
         client.settimeout(2)
@@ -406,6 +421,7 @@ class InferenceTests(unittest.TestCase):
             args = SimpleNamespace(hz=1000, max_cycles=2, jpeg_quality=85)
             with patch('inference.executor.executor.ARM_ACTION_EMA_ALPHA', 0.2), \
                  patch('inference.executor.executor.HAND_ACTION_EMA_ALPHA', 0.8), \
+                 patch('inference.executor.executor.HAND_ACTION_SCALE', 1.1), \
                  contextlib.redirect_stdout(io.StringIO()):
                 run(args, robot, FakeCamera(), client)
         finally:

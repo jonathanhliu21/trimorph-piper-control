@@ -1,8 +1,9 @@
 """Wire protocol for the predictor <-> executor link.
 
 Deliberately dependency-free (stdlib ``socket`` + numpy + cv2). The control
-pattern is strictly synchronous request/reply (the executor stalls while the
-predictor runs), so a plain framed TCP socket is all we need -- no ZeroMQ.
+pattern is one outstanding request/reply per connection. The executor can run
+this exchange on a worker while executing the previous chunk; no wire change
+is needed for asynchronous playback.
 
 Frame layout (big-endian):
 
