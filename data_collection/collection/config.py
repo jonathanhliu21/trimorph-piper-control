@@ -70,9 +70,17 @@ PIPER_START_JOINTS_DEG = {
     "home_cube1": (-19.14, 111.94, -85.65, -58.96, 57.24, 89.30),
     # Previous home_unscrew1:
     # "home_unscrew1": (-50.73, 108.65, -58.83, 22.08, 36.01, 28.63),
-    # Updated measured start: flange XYZ m (0.227855, -0.244662, 0.176002),
+    # Previous measured start: flange XYZ m (0.227855, -0.244662, 0.176002),
     # RPY rad (2.742192, 0.222076, 1.525819); joint radians converted to degrees.
-    "home_unscrew1": (-49.281017, 99.637991, -56.605022, 17.635011, 28.350983, 26.896988),
+    # "home_unscrew1": (-49.281017, 99.637991, -56.605022, 17.635011, 28.350983, 26.896988),
+    # Captured from passive can0 joint feedback, 2026-11-05 16:26:01 PST.
+    # J1..J6 degrees; FK flange XYZ m (0.223944, -0.248475, 0.134394),
+    # RPY rad (2.782407, -0.008860, 1.643781).
+    # "home_unscrew1": (-52.634, 107.729, -58.056, 29.162, 37.810, 11.204),
+    # Manually repositioned closer to the cap; supplied J1..J6 radians:
+    # (-0.768416, 1.874920, -1.088108, -0.096604, 0.440364, 0.641827).
+    # Converted to J1..J6 degrees.
+    "home_unscrew1": (-44.026994, 107.425003, -62.343996, -5.535001, 25.230999, 36.773978),
 }
 # Median first processed_encoder_t row (motors 0..12, leader radians) of the same episodes.
 HAND_START_POSITIONS_RAD = {
