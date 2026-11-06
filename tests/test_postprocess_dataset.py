@@ -87,6 +87,30 @@ class PostprocessTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 post.process_episode(config, raw)
 
+    def test_calibration_latency_shifts_replay_and_sync_without_changing_poses(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, raw, *_ = self.fixture(Path(directory))
+            calibration = json.loads(config.calibration_json.read_text())
+            calibration['latency_s'] = -.02
+            config.calibration_json.write_text(json.dumps(calibration))
+            baseline = post.process_episode(config, raw)
+            expected_poses = np.load(baseline['eef']).copy()
+            summary = post.process_episode(replace(config, overwrite_processed_files=True,
+                                                  apply_calibration_latency=True), raw)
+            np.testing.assert_array_equal(np.load(summary['eef']), expected_poses)
+            with np.load(summary['sync']) as sync:
+                np.testing.assert_array_equal(sync['pose_monotonic_ns'],
+                                              [1_020_000_000, 1_040_000_000, 1_060_000_000, 1_080_000_000])
+                np.testing.assert_array_equal(sync['pose_idx'], [0, 0, 1, 2])
+            rows = post.base.read_csv_rows(Path(summary['piper_csv']))
+            self.assertEqual(int(rows[0]['monotonic_ns']), 1_020_000_000)
+            self.assertAlmostEqual(float(rows[0]['elapsed_s']), .02)
+            metadata = json.loads(Path(summary['metadata']).read_text())
+            self.assertEqual(metadata['quest_timestamp_offset_s'], .02)
+            calibration['latency_s'] = float('nan')
+            with self.assertRaisesRegex(ValueError, 'latency_s must be finite'):
+                post.convert_quest(raw, calibration, apply_calibration_latency=True)
+
     def test_camera_copy_trim_and_reference_sync(self):
         with tempfile.TemporaryDirectory() as directory:
             config, raw, *_ = self.fixture(Path(directory), no_camera=False, start_pose=(.4, 0., .3, .2, .1, 0.))

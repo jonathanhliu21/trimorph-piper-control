@@ -828,7 +828,7 @@ def planned_action_steps(args, chunk):
     return min(limit, len(chunk)) if limit else len(chunk)
 
 
-def check_chunk_jumps(seq, state, chunk, previous=None):
+def check_chunk_jumps(seq, state, chunk, previous=None, start_index=0):
     positions = np.vstack((state[:3], chunk[:, :3]))
     jumps = np.linalg.norm(np.diff(positions, axis=0), axis=1)
     violations = np.flatnonzero(jumps > MAX_EEF_JUMP_M)
@@ -836,9 +836,9 @@ def check_chunk_jumps(seq, state, chunk, previous=None):
         index = int(violations[0])
         source = "observation" if index == 0 else f"action {index - 1}"
         distance = jumps[index]
-    elif previous is not None and np.linalg.norm(chunk[0, :3] - previous[:3]) > MAX_EEF_JUMP_M:
-        index, source = 0, "last commanded action"
-        distance = np.linalg.norm(chunk[0, :3] - previous[:3])
+    elif previous is not None and np.linalg.norm(chunk[start_index, :3] - previous[:3]) > MAX_EEF_JUMP_M:
+        index, source = start_index, "last commanded action"
+        distance = np.linalg.norm(chunk[start_index, :3] - previous[:3])
     else:
         return True
     print(f"WARNING: refusing entire chunk cycle={seq}: EEF jump from {source} "
@@ -847,12 +847,30 @@ def check_chunk_jumps(seq, state, chunk, previous=None):
     return False
 
 
+def async_start_index(age_s, dt):
+    """First observation-relative action that has not elapsed at takeover.
+
+    Snap roundoff at exact tick boundaries before ceil, so e.g. 2.0000000000000004
+    periods does not drop an extra action. Do not clamp to the chunk's last row:
+    the caller must discard predictions with no usable future actions.
+    """
+    if not math.isfinite(age_s) or age_s < 0 or not math.isfinite(dt) or dt <= 0:
+        raise ValueError("Async observation age must be finite and >= 0; action period must be finite and > 0")
+    steps = age_s / dt
+    nearest = round(steps)
+    if math.isclose(steps, nearest, rel_tol=0, abs_tol=1e-8):
+        steps = nearest
+    return math.ceil(steps)
+
+
 def run_async(args, robot, camera, sock, action_alpha, pedal=None, view=None, log=None):
     """Overlap one prediction with playback; replace tails at policy action boundaries.
 
     Hardware reads/writes and GUI operations stay on this thread. JPEG encoding
     and the request/reply run on the socket worker. Complete an action's joint
     interpolation before switching chunks, without compressing the action clock.
+    Replacements skip ceil(observation age / dt) actions; the initial prediction
+    after startup/reset has no moving predecessor and keeps index 0.
     """
     dt = 1.0 / args.hz
     lead = args.inference_latency_ms / 1000
@@ -892,9 +910,11 @@ def run_async(args, robot, camera, sock, action_alpha, pedal=None, view=None, lo
                 return
             image, capture_time = observation
             event(seq, "observe")
+            observed_at = time.perf_counter()  # state anchor time; includes state-read/encode/send delays
             state = vector(robot.read_state(), 19, "robot state")
             event(seq, "state", getattr(robot, "state_note", "measured"))
-            pending = (seq, state, (time.perf_counter() - now) * 1000)
+            pending = (seq, state, (time.perf_counter() - now) * 1000,
+                       observed_at, filtered_action is not None)
             predictor.submit(seq, image, state, capture_time)
             seq += 1
             request_at = float("inf")
@@ -913,13 +933,15 @@ def run_async(args, robot, camera, sock, action_alpha, pedal=None, view=None, lo
         nonlocal chunk
         if chunk is None:
             return
-        dropped = len(chunk) - index
+        executed = index - start_index
+        dropped = len(chunk) - executed
         print(f"cycle={cycle} chunk={len(chunk)} planned={execute_steps} hz={args.hz:g} observe={observe_ms:.1f}ms "
               f"infer={header.get('infer_ms', 0):.1f}ms rtt={rtt_ms:.1f}ms "
               f"execute={(time.perf_counter() - execute_start) * 1000:.1f}ms "
-              f"executed={index} dropped={dropped} overruns={overruns} {reason}", flush=True)
+              f"executed={executed} skipped={start_index} dropped={dropped} overruns={overruns} {reason}", flush=True)
         event(cycle, "chunk_done",
-              f"planned={execute_steps} executed={index} dropped={dropped} overruns={overruns} {reason}")
+              f"planned={execute_steps} executed={executed} skipped={start_index} "
+              f"dropped={dropped} overruns={overruns} {reason}")
         chunk = None
 
     if pedal is not None:
@@ -932,7 +954,7 @@ def run_async(args, robot, camera, sock, action_alpha, pedal=None, view=None, lo
                 # of its interpolated commands have finished before taking a reply.
                 if predictor.ready():
                     reply, new_rtt_ms = predictor.take()
-                    new_cycle, state, new_observe_ms = pending
+                    new_cycle, state, new_observe_ms, observed_at, compensate_age = pending
                     pending = None
                     if discard_pending:
                         event(new_cycle, "chunk_discarded", "pedal reset")
@@ -944,22 +966,36 @@ def run_async(args, robot, camera, sock, action_alpha, pedal=None, view=None, lo
                         log.chunk(new_cycle, state, new_chunk)
                     event(new_cycle, "chunk_received",
                           f"infer_ms={reply[2].get('infer_ms', 0):.1f} len={len(new_chunk)} rtt_ms={new_rtt_ms:.1f}")
-                    if not check_chunk_jumps(new_cycle, state, new_chunk, filtered_action):
+                    age = time.perf_counter() - observed_at
+                    new_start = async_start_index(age, dt) if compensate_age else 0
+                    new_end = planned_action_steps(args, new_chunk)
+                    if new_start >= new_end:
+                        detail = (f"stale age_ms={age * 1000:.1f} skipped={new_start} "
+                                  f"planned={new_end} predicted={len(new_chunk)}")
+                        event(new_cycle, "chunk_discarded", detail)
+                        print(f"cycle={new_cycle} discarded {detail}; requesting a fresh observation", flush=True)
+                        # Keep executing the old tail, or hold if exhausted. Never
+                        # clamp to a stale last row or index beyond the prediction.
+                        request_at = camera_wait_since = time.perf_counter()
+                        continue
+                    if not check_chunk_jumps(new_cycle, state, new_chunk, filtered_action, new_start):
                         finish("rejected replacement")
                         return
                     finish("replaced")
                     if waiting:
                         event(new_cycle, "wait_end")
                         waiting = False
-                    cycle, chunk, index = new_cycle, new_chunk, 0
-                    execute_steps = planned_action_steps(args, chunk)
+                    cycle, chunk, index = new_cycle, new_chunk, new_start
+                    start_index = new_start
+                    execute_steps = new_end
                     header, rtt_ms, observe_ms = reply[2], new_rtt_ms, new_observe_ms
                     execute_start, overruns = time.perf_counter(), 0
                     if filtered_action is None:
                         filtered_action = state.copy()
                     if view is not None:
-                        view.set_chunk(chunk[:execute_steps, :3])
-                    event(cycle, "chunk_start", f"planned={execute_steps} predicted={len(chunk)}")
+                        view.set_chunk(chunk[start_index:execute_steps, :3])
+                    event(cycle, "chunk_start",
+                          f"planned={execute_steps} predicted={len(chunk)} skipped={start_index} age_ms={age * 1000:.1f}")
 
                 if chunk is None:
                     if predictor.future is None and not can_request():

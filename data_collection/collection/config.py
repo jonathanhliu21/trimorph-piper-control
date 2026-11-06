@@ -80,7 +80,11 @@ PIPER_START_JOINTS_DEG = {
     # Manually repositioned closer to the cap; supplied J1..J6 radians:
     # (-0.768416, 1.874920, -1.088108, -0.096604, 0.440364, 0.641827).
     # Converted to J1..J6 degrees.
-    "home_unscrew1": (-44.026994, 107.425003, -62.343996, -5.535001, 25.230999, 36.773978),
+    # "home_unscrew1": (-44.026994, 107.425003, -62.343996, -5.535001, 25.230999, 36.773978),
+    # Captured from passive can0 joint feedback, 2026-11-05 20:14:41 PST.
+    # J1..J6 degrees.
+    # (-56.611, 123.110, -91.104, 17.215, 61.315, 31.695)
+    "home_unscrew1": (-52.563, 115.735, -75.717, 10.739, 48.295, 34.348),
 }
 # Median first processed_encoder_t row (motors 0..12, leader radians) of the same episodes.
 HAND_START_POSITIONS_RAD = {

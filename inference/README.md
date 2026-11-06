@@ -184,7 +184,9 @@ Use `--execute-steps K` to execute at most the first K actions of each returned
 chunk, in either synchronous or async mode. The default `0` uses the entire
 returned chunk. If fewer than K actions arrive, use the available count. Raw
 chunks are still logged and validated in full, while the trajectory view shows
-the chosen prefix.
+the actions that will actually execute. In async mode, skipped entries count
+toward this prefix: `--execute-steps 8` with a start index of 2 executes indices
+2 through 7, not eight additional actions.
 
 In async mode, the executor forecasts the current chunk's finish from its
 remaining **chosen** actions and `--hz`, and captures the next observation
@@ -205,9 +207,24 @@ not an automatically measured delay. A value of 0 requests at the chunk end.
 When a reply is ready, it replaces the previous chunk **at the next policy action
 boundary**: the current action's interpolated arm commands finish, then all
 unexecuted old actions are discarded. The first action of the new chunk plays
-next, with EMA history retained. For example, a 10-action chunk at 100 Hz lasts
+next after skipping its elapsed entries, with EMA history retained. The start
+index is `ceil(observation_age_seconds / action_dt)`, where `action_dt = 1 / hz`
+and returned index 0 represents the observation. Age is measured on a monotonic
+clock from the start of the state read to takeover, including state-read,
+encoding, network, inference, and action-boundary waiting time. It does not use
+the fixed `--inference-latency-ms` request lead or the predictor's `infer_ms`.
+For example, a 10-action chunk at 100 Hz lasts
 100 ms: the next request starts around 30 ms with a 70 ms estimate. If the reply
 arrives at 35 ms, it takes over at 40 ms and drops the six remaining old actions.
+The new prediction is then 10 ms old, so playback begins at its index 1.
+The first prediction after startup or a pedal reset keeps index 0 because it
+has no moving predecessor; startup latency does not consume its horizon.
+
+If the start index reaches or exceeds the returned length or selected prefix,
+the entire replacement is discarded as stale and a fresh observation is
+requested. The executor continues the old tail if available, otherwise holds
+the last target. It never clamps to a stale final action. Such discarded
+requests still count toward `--max-cycles`.
 
 There is at most one request in flight. A chunk shorter than the lead time starts
 its next request after issuing its first action. The first chunk requires an
@@ -221,11 +238,11 @@ reply, and takes a fresh observation after resuming. `--max-cycles` counts
 requests, including any reply discarded on reset.
 
 The predictor still anchors absolute actions to the state captured **at request
-time**. The robot can move during prediction, so the start of a new chunk can
-point back toward that earlier state. This implementation does not extrapolate
-the observation, rebase the returned chunk, or skip its first actions. The
-existing whole-chunk jump check also checks the last commanded action against
-the replacement's first action in async mode.
+time**. Skipping aligns the new chunk in time but does not guarantee that
+independent predictions choose the same trajectory. There is no rebasing or
+continuation guidance in plain async mode. The whole-chunk jump check also
+checks the last commanded action against the selected takeover action, rather
+than against the discarded index 0.
 
 Each cycle logs observation time, full predictor `infer` time, request/reply
 `rtt`, execution time, and action deadline overruns. `rtt` includes prediction;
@@ -234,7 +251,11 @@ on top of the scheduled action interval in synchronous mode. Predictor timing co
 conversion as well as model execution. Socket and camera timeouts bound waits;
 invalid/nonfinite outputs or mismatched sequence numbers abort execution.
 
-Async cycle logs include planned, executed, and dropped action counts. In async
+Async cycle logs include planned, executed, skipped, and dropped action counts;
+dropped includes both skipped entries and an unexecuted tail. `chunk_start`
+records observation age and the selected index; `chunk_discarded` records stale
+predictions. Command indices retain their original positions in the raw chunk.
+In async
 run plots, gray spans mark actual playback waits rather than inference that
 overlaps motion. Synchronous and RTC logging retain their existing behavior.
 

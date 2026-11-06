@@ -12,6 +12,8 @@ With --pose-source mocap the calibration's Vicon
 marker plate recorded in mocap.csv (collect_hand_only.py --use-mocap) is
 converted to the flange pose instead, using the calibration's Vicon-to-Piper
 and plate-to-flange transforms. Raw files are preserved.
+Use --apply-calibration-latency to align Quest receipt timestamps to the reference
+clock using the calibration's latency_s before synchronizing with hand and camera.
 """
 from __future__ import annotations
 
@@ -45,6 +47,7 @@ class PostprocessConfig(base.PostprocessConfig):
     mocap_topic: str | None = None
     max_start_rotation_deg: float = 45.0
     mocap_smooth_s: float = 0.02
+    apply_calibration_latency: bool = False
 
 
 def processed_episode_dir(episode_dir: Path) -> Path:
@@ -73,7 +76,8 @@ def controller_rotation(calibration):
     return None if matrix is None else Rotation.from_matrix(matrix)
 
 
-def convert_quest(episode, calibration, start_pose=None, absolute=False, max_start_offset_mm=150.0):
+def convert_quest(episode, calibration, start_pose=None, absolute=False, max_start_offset_mm=150.0,
+                  apply_calibration_latency=False):
     # With C, --absolute maps orientation without a start pose: Rp = B Rq C.
     quest_only = absolute and controller_rotation(calibration) is not None
     if (absolute or tracked_point_offset(calibration) is not None) and start_pose is None and not quest_only:
@@ -87,6 +91,12 @@ def convert_quest(episode, calibration, start_pose=None, absolute=False, max_sta
     base.require_monotonic_ns("Quest", stamps, path)
     if np.any(np.diff(stamps) <= 0):
         raise ValueError(f"Quest timestamps must be strictly increasing in {path}")
+    if apply_calibration_latency:
+        latency = float(calibration["latency_s"])
+        if not np.isfinite(latency):
+            raise ValueError("Calibration latency_s must be finite")
+        # Fit convention: Quest at t + latency_s matches reference at t.
+        stamps = stamps - round(latency * 1e9)
     poses = np.array([[float(row[key]) for key in ("px", "py", "pz", "qx", "qy", "qz", "qw")]
                       for row in rows])
     if not np.isfinite(poses).all():
@@ -358,7 +368,8 @@ def process_episode(config, episode):
         else:
             validate_calibration(calibration)
             converted, eef, eef_ns, start_offset = convert_quest(
-                episode, calibration, start_pose, config.absolute, config.max_start_offset_mm)
+                episode, calibration, start_pose, config.absolute, config.max_start_offset_mm,
+                config.apply_calibration_latency)
         pose_frame = "piper_base" if start_pose is not None or self_anchored else "relative_to_episode_start"
     else:
         eef, eef_ns = base.load_piper(episode)
@@ -401,6 +412,8 @@ def process_episode(config, episode):
         first_pose_offset_from_start_m=start_offset.tolist() if start_offset is not None else None,
         calibration_json=str(config.calibration_json.resolve()) if config.calibration_json else None,
         calibration_sha256=hashlib.sha256(config.calibration_json.read_bytes()).hexdigest() if config.calibration_json else None,
+        quest_timestamp_offset_s=(-float(calibration["latency_s"])
+                                  if from_quest and config.apply_calibration_latency else 0.0),
         quest_start_position=([float(quest_first[key]) for key in ("px", "py", "pz")]
                               if quest_first is not None else None),
         quest_start_quaternion=([float(quest_first[key]) for key in ("qx", "qy", "qz", "qw")]
@@ -438,6 +451,8 @@ def main():
     parser.add_argument("--calibration-json", "--calibration", type=Path,
                         help="Quest-to-Piper calibration JSON; omit to process recorded raw Piper poses")
     parser.add_argument("--no-camera", action="store_true", help="Skip all camera reads, copies, and validation")
+    parser.add_argument("--apply-calibration-latency", action="store_true",
+                        help="Shift Quest timestamps by -latency_s from the calibration before syncing")
     parser.add_argument("--piper-start-pose", nargs=6, type=float, metavar=("X", "Y", "Z", "ROLL", "PITCH", "YAW"),
                         help="Absolute Piper starting pose (radians); otherwise Quest output is relative")
     parser.add_argument("--absolute", action="store_true",
@@ -469,6 +484,8 @@ def main():
         parser.error("--absolute and --pose-source mocap require --calibration-json")
     if args.mocap_topic is not None and args.pose_source != "mocap":
         parser.error("--mocap-topic requires --pose-source mocap")
+    if args.apply_calibration_latency and (args.calibration_json is None or args.pose_source != "quest"):
+        parser.error("--apply-calibration-latency requires --calibration-json and --pose-source quest")
     if not np.isfinite(args.max_start_offset_mm) or args.max_start_offset_mm <= 0:
         parser.error("--max-start-offset-mm must be finite and positive")
     if not np.isfinite(args.mocap_smooth_s) or args.mocap_smooth_s < 0:
@@ -480,7 +497,7 @@ def main():
                                args.trim_camera_frames, args.calibration_json.expanduser() if args.calibration_json else None,
                                args.no_camera, tuple(args.piper_start_pose) if args.piper_start_pose is not None else None,
                                args.absolute, args.max_start_offset_mm, args.pose_source, args.mocap_topic,
-                               args.max_start_rotation_deg, args.mocap_smooth_s)
+                               args.max_start_rotation_deg, args.mocap_smooth_s, args.apply_calibration_latency)
     base.validate_config(config)
     episodes = base.discover_raw_episodes(config)
     if args.episode is not None:
