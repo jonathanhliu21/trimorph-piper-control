@@ -67,7 +67,10 @@ PIPER_START_JOINTS_DEG = {
     "home_4b": (-24.0, 124.9, -106.4, -24.7, 47.8, 72.2),
     "home_4c": (-25.59, 123.74, -98.71, -27.68, 41.75, 69.21),
     "home_4d": (-24.49, 129.76, -111.17, -18.44, 45.25, 71.11),
-    "home_cube1": (-19.14, 111.94, -85.65, -58.96, 57.24, 89.30),
+    # "home_cube1": (-19.14, 111.94, -85.65, -58.96, 57.24, 89.30),
+    # Captured from passive can0 joint feedback, 2026-11-06 17:06:24 PST.
+    # J1..J6 degrees (CAN millidegrees divided by 1000).
+    "home_cube1": (-26.452, 116.559, -78.024, -45.641, 50.068, 76.868),
     # Previous home_unscrew1:
     # "home_unscrew1": (-50.73, 108.65, -58.83, 22.08, 36.01, 28.63),
     # Previous measured start: flange XYZ m (0.227855, -0.244662, 0.176002),

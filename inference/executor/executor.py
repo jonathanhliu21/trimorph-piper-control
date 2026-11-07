@@ -51,8 +51,8 @@ MOTOR_IDS = tuple(defaults.TRIMORPH_MOTOR_IDS)
 MAX_EEF_JUMP_M = 0.15
 # Independent per-action EMA for the arm pose and hand motor positions.
 # filtered = alpha * target + (1 - alpha) * previous; 1.0 disables smoothing.
-ARM_ACTION_EMA_ALPHA = 1.0 # action[:6]: XYZ + rotation vector
-HAND_ACTION_EMA_ALPHA = 1.0  # action[6:]: 13 hand motor positions
+ARM_ACTION_EMA_ALPHA = 0.4 # action[:6]: XYZ + rotation vector
+HAND_ACTION_EMA_ALPHA = 0.7  # action[6:]: 13 hand motor positions
 # Multiply hand targets before EMA; arm targets always retain scale 1.0.
 HAND_ACTION_SCALE = 1.03
 # --rtc: the expected inference delay is the most actions executed while waiting
