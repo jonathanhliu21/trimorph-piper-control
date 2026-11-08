@@ -112,6 +112,33 @@ class QuestWorkerTests(unittest.TestCase):
         self.assertTrue(init_done.is_set())
         self.assertEqual(calls, 2)
 
+    def test_indefinite_startup_accepts_late_packet_or_clean_shutdown(self):
+        for receive_packet in (True, False):
+            with self.subTest(receive_packet=receive_packet):
+                shared = SharedState()
+                ready = threading.Event()
+                sock = MagicMock()
+                calls = 0
+
+                def receive(_size):
+                    nonlocal calls
+                    calls += 1
+                    if calls < 40:  # More than five seconds of 0.2s polls.
+                        raise socket.timeout
+                    shared.shutdown.set()
+                    if receive_packet:
+                        return json.dumps(VALID_PACKET).encode(), ("127.0.0.1", 1)
+                    raise socket.timeout
+
+                sock.recvfrom.side_effect = receive
+                with patch("data_collection.collection.quest_worker.socket.socket") as factory:
+                    factory.return_value.__enter__.return_value = sock
+                    run_quest_worker(self.make_config(timeout_s=None), shared,
+                                     SimpleNamespace(current=lambda: None), init_done=ready)
+                self.assertEqual(calls, 40)
+                self.assertEqual(ready.is_set(), receive_packet)
+                sock.settimeout.assert_called_with(.2)
+
     def test_jump_warnings_include_idle_packets_and_preserve_recorded_positions(self):
         shutdown = threading.Event()
         config = self.make_config()

@@ -5,8 +5,8 @@ from unittest.mock import patch
 import numpy as np
 
 from scripts.quest.visualize_quest_accuracy import (
-    AccuracyView, PoseHistory, fit_alignment, frozen_status, parse_args,
-    signal_status, synchronized_position,
+    AccuracyView, PoseHistory, fit_alignment, fit_offset_alignment, frozen_status, parse_args,
+    signal_status, synchronized_position, synchronization_issue,
 )
 from data_collection.collection.shared_state import TrackerSample
 
@@ -16,6 +16,154 @@ def sample(t, p, lost=False):
 
 
 class AccuracyTests(unittest.TestCase):
+    def offset_data(self, count=180, seed=12):
+        from scipy.spatial.transform import Rotation
+        rng = np.random.default_rng(seed)
+        rotations = Rotation.from_rotvec(rng.normal(size=(count, 3)) * .6).as_matrix()
+        mocap = rng.normal(size=(count, 3)) * .15 + [.4, .2, .8]
+        matrix = Rotation.from_euler('xyz', [.2, -.4, .7]).as_matrix() @ np.diag([1., 1., -1.])
+        offset = np.array([.3, -.2, .5])
+        body_offset = np.array([.08, -.04, .12])
+        quest = (mocap + rotations @ body_offset - offset) @ matrix
+        return quest, mocap, rotations, matrix, offset, body_offset
+
+    def test_joint_fit_recovers_body_offset_and_predicts_unseen_rotations(self):
+        q, m, r, expected_a, expected_t, expected_d = self.offset_data()
+        matrix, offset, body_offset, rms = fit_offset_alignment(q, m, r)
+        np.testing.assert_allclose(matrix, expected_a, atol=1e-7)
+        np.testing.assert_allclose(offset, expected_t, atol=1e-7)
+        np.testing.assert_allclose(body_offset, expected_d, atol=1e-7)
+        self.assertLess(rms, 1e-7)
+        q2, m2, r2, *_ = self.offset_data(seed=77)
+        np.testing.assert_allclose(q2 @ matrix.T + offset, m2 + r2 @ body_offset, atol=1e-7)
+        # Also recover a transform without a handedness change.
+        q[:, 0] *= -1
+        matrix, offset, body_offset, rms = fit_offset_alignment(q, m, r)
+        self.assertGreater(np.linalg.det(matrix), 0)
+        np.testing.assert_allclose(body_offset, expected_d, atol=1e-7)
+        self.assertLess(rms, 1e-7)
+
+    def test_joint_fit_rejects_fixed_orientation_and_single_axis_rotation(self):
+        from scipy.spatial.transform import Rotation
+        q, m, r, *_ = self.offset_data()
+        for rotations in (np.tile(np.eye(3), (len(q), 1, 1)),
+                          Rotation.from_euler('z', np.linspace(-1, 1, len(q))[:, None]).as_matrix()):
+            with self.assertRaisesRegex(ValueError, 'TWO axes'):
+                fit_offset_alignment(q, m, rotations)
+
+    def test_joint_fit_tolerates_position_noise_and_isolated_outliers(self):
+        q, m, r, matrix, offset, expected = self.offset_data()
+        rng = np.random.default_rng(8)
+        q += rng.normal(scale=.0003, size=q.shape)
+        q[:4] += .04
+        _, _, body_offset, _ = fit_offset_alignment(q, m, r)
+        np.testing.assert_allclose(body_offset, expected, atol=.002)
+
+    def test_pose_interpolates_rotation_before_applying_body_offset(self):
+        from scipy.spatial.transform import Rotation
+        a = sample(1, [0, 0, 0])
+        b = TrackerSample(1_020_000_000, (0., 0., 0.),
+                          tuple(Rotation.from_euler('z', 90, degrees=True).as_quat()), False, 2)
+        p = synchronized_position([a, b], 1_010_000_000, .1, [1., 0., 0.])
+        np.testing.assert_allclose(p, [2 ** -.5, 2 ** -.5, 0.], atol=1e-12)
+
+    def test_calibration_uses_new_offset_for_subsequent_measurements(self):
+        from scipy.spatial.transform import Rotation
+        view, shared = self.make_view()
+        self.assertEqual(view.args.calibration_seconds, 20.)
+        view.calibrate(1_000_000_000)
+        q, m, r, _, _, expected = self.offset_data()
+        for i in range(len(q)):
+            stamp = 1_010_000_000 + i * 20_000_000
+            shared.set_tracker_pose('quest', stamp, q[i], [0, 0, 0, 1])
+            shared.set_tracker_pose('/body', stamp, m[i], Rotation.from_matrix(r[i]).as_quat())
+        view.ingest(shared.snapshot(), 21_000_000_000)
+        np.testing.assert_allclose(view.body_offset, expected, atol=1e-7)
+        self.assertIsNone(view.calibration_failure)
+        stamp = 21_010_000_000
+        shared.set_tracker_pose('quest', stamp, q[0], [0, 0, 0, 1])
+        shared.set_tracker_pose('/body', stamp, m[0], Rotation.from_matrix(r[0]).as_quat())
+        view.ingest(shared.snapshot(), stamp)
+        self.assertLess(view.last_error, 1e-7)
+        # R clears the display but preserves the fitted physical offset.
+        view.reset_history()
+        np.testing.assert_allclose(view.body_offset, expected, atol=1e-7)
+
+    def test_manual_body_offset_remains_supported(self):
+        from scipy.spatial.transform import Rotation
+        view, shared = self.make_view()
+        q, m, r, matrix, offset, expected = self.offset_data()
+        view.args.mocap_offset = expected.copy()
+        view.calibrate(1_000_000_000)
+        for i in range(len(q)):
+            stamp = 1_010_000_000 + i * 20_000_000
+            shared.set_tracker_pose('quest', stamp, q[i], [0, 0, 0, 1])
+            shared.set_tracker_pose('/body', stamp, m[i], Rotation.from_matrix(r[i]).as_quat())
+        view.ingest(shared.snapshot(), 21_000_000_000)
+        self.assertIsNone(view.calibration_failure)
+        np.testing.assert_allclose(view.matrix, matrix, atol=1e-7)
+        np.testing.assert_allclose(view.offset, offset, atol=1e-7)
+        np.testing.assert_allclose(view.body_offset, expected, atol=1e-7)
+
+    def test_display_origin_stays_fixed_when_history_rolls_over(self):
+        from collections import deque
+        view, shared = self.make_view()
+        view.trail = deque(maxlen=2)
+        view.matrix, view.offset = np.eye(3), np.zeros(3)
+        for i in range(4):
+            for name in ('quest', '/body'):
+                shared.set_tracker_pose(name, 1_000_000_000 + i * 10_000_000,
+                                        [i * .01, 0, 0], [0, 0, 0, 1])
+        view.render(1_030_000_000)
+        self.assertEqual(len(view.trail), 2)
+        np.testing.assert_allclose(view.trail[0][2], [.02, 0, 0])
+        np.testing.assert_allclose(view.display_origin, [0, 0, 0])
+        view.reset_history()
+        self.assertIsNone(view.display_origin)
+
+    def make_view(self):
+        import cv2
+        shared = PoseHistory()
+        with patch.object(cv2, 'namedWindow'), patch.object(cv2, 'setMouseCallback'):
+            view = AccuracyView(shared, parse_args(['--mocap-topic', '/body']))
+        return view, shared
+
+    def test_healthy_streams_still_require_calibration(self):
+        view, shared = self.make_view()
+        for name in ('quest', '/body'):
+            shared.set_tracker_pose(name, 2_000_000_000, [1, 1, 1], [0, 0, 0, 1])
+        view.render(2_000_000_000)
+        self.assertEqual(view.paired_count, 1)
+        self.assertIn('CALIBRATION REQUIRED', view.unavailable_reason(['OK', 'OK'], True))
+        self.assertIsNone(view.last_error)
+
+    def test_failed_calibration_is_reported_separately_from_sync(self):
+        view, shared = self.make_view()
+        view.calibrate(1_000_000_000)
+        for i in range(30):
+            for name in ('quest', '/body'):
+                shared.set_tracker_pose(name, 1_000_000_000 + i * 10_000_000,
+                                        [1, 1, 1], [0, 0, 0, 1])
+        view.ingest(shared.snapshot(), 21_000_000_000)
+        self.assertIn('THREE', view.calibration_failure)
+        self.assertIn('CALIBRATION FAILED', view.unavailable_reason(['OK', 'OK'], True))
+
+    def test_fresh_but_sparse_mocap_explains_rejected_pairs(self):
+        view, shared = self.make_view()
+        view.matrix, view.offset = np.eye(3), np.zeros(3)
+        shared.set_tracker_pose('/body', 1_000_000_000, [1, 1, 1], [0, 0, 0, 1])
+        shared.set_tracker_pose('/body', 1_200_000_000, [1, 1, 1], [0, 0, 0, 1])
+        shared.set_tracker_pose('quest', 1_100_000_000, [1, 1, 1], [0, 0, 0, 1])
+        view.render(1_200_000_000)
+        self.assertEqual(view.paired_count, 0)
+        self.assertIn('mocap gap 0.200s', view.unavailable_reason(['OK', 'OK'], False))
+        self.assertIn('--max-gap', view.pairing_note)
+        self.assertEqual(synchronization_issue([], 0, .1), 'no mocap poses')
+
+    def test_waits_indefinitely_by_default_with_optional_deadline(self):
+        self.assertIsNone(parse_args(['--mocap-topic', '/body']).startup_timeout_s)
+        self.assertEqual(parse_args(['--mocap-topic', '/body', '--startup-timeout-s', '10']).startup_timeout_s, 10.)
+
     def test_alignment_handles_handedness_without_fitting_scale(self):
         q = np.random.default_rng(0).normal(size=(200, 3)) * .1
         transform = np.array([[0., 0., -1.], [1., 0., 0.], [0., 1., 0.]])

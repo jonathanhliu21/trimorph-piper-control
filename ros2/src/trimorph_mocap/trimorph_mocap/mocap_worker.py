@@ -202,7 +202,7 @@ def startup_timeout_s(subscriber) -> float:
     return subscriber.startup_timeout_s if isinstance(subscriber, MocapRelay) else 10.0
 
 
-def run_mocap_worker(config, shared, recorder, *, init_done) -> None:
+def run_mocap_worker(config, shared, recorder, *, init_done, wait_for_data=False) -> None:
     sample_session = None
     sample_idx = 0
 
@@ -230,7 +230,7 @@ def run_mocap_worker(config, shared, recorder, *, init_done) -> None:
             subscriber.poll()
             if subscriber.ready():
                 init_done.set()
-            elif time.monotonic() >= deadline:
+            elif not wait_for_data and time.monotonic() >= deadline:
                 raise TimeoutError("No matching mocap topics discovered within 10s (or requested topics missing)")
     finally:
         subscriber.close()

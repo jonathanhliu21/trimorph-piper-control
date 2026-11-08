@@ -59,7 +59,7 @@ def run_quest_worker(
     *,
     init_done,
 ) -> None:
-    """Receive raw Quest poses over UDP and record them with host timestamps."""
+    """Receive poses; a None startup timeout waits until data or shutdown."""
 
     # Collection enables this; standalone tools can keep their own jump reporting.
     jump_threshold = getattr(config, "quest_jump_threshold", None)
@@ -69,7 +69,10 @@ def run_quest_worker(
     previous_sample_ns = None
     first_sample_ns = None
     jump_count = 0
-    startup_deadline = time.monotonic() + config.quest_startup_timeout_s
+    startup_deadline = (
+        None if config.quest_startup_timeout_s is None
+        else time.monotonic() + config.quest_startup_timeout_s
+    )
     initialized = False
     sample_idx = 0
     sample_session: EpisodeBuffer | None = None
@@ -82,7 +85,7 @@ def run_quest_worker(
         )
 
         while not shared.shutdown.is_set():
-            if initialized:
+            if initialized or startup_deadline is None:
                 timeout_s = QUEST_SOCKET_POLL_TIMEOUT_S
             else:
                 remaining_s = startup_deadline - time.monotonic()
@@ -150,7 +153,7 @@ def run_quest_worker(
             session.append_quest(row)
             sample_idx += 1
 
-        if not initialized:
+        if not initialized and startup_deadline is not None:
             raise RuntimeError(
                 "Quest worker stopped before receiving a valid UDP packet"
             )

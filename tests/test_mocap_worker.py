@@ -148,6 +148,27 @@ class MocapTests(unittest.TestCase):
                 mocap.run_mocap_worker(NS(mocap_topics=()), SharedState(), NS(), init_done=threading.Event())
             factory.return_value.close.assert_called_once()
 
+    def test_worker_can_wait_indefinitely_and_close_before_data(self):
+        shared = SharedState()
+        ready = threading.Event()
+        with patch.object(mocap, "MocapSubscriber") as factory, patch.object(mocap.time, "monotonic", side_effect=[0., 1000., 2000., 3000.]):
+            subscriber = factory.return_value
+            subscriber.ready.return_value = False
+            calls = 0
+
+            def poll():
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    shared.shutdown.set()
+
+            subscriber.poll.side_effect = poll
+            mocap.run_mocap_worker(NS(mocap_topics=()), shared, NS(),
+                                   init_done=ready, wait_for_data=True)
+            self.assertEqual(calls, 3)
+            self.assertFalse(ready.is_set())
+            subscriber.close.assert_called_once()
+
     def test_replay_filters_interval_and_saves_csv_on_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
             recorder = mocap.ReplayMocapRecorder(Path(tmp) / "nested" / "mocap.csv")
