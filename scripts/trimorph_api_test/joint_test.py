@@ -124,19 +124,19 @@ CLOSE_ANGLES_RAD = (
 # Calibrated joint pose captured from the final printed row of a full-hand
 # ``record`` run. Keys are Dynamixel motor IDs and values are radians.
 GOTO_JOINTS = {
-    0: -0.005,
-    1: 0.042,
-    2: 0.159,
-    3: 0.533,
-    4: -1.432,
-    5: -2.688,
-    6: 0.166,
-    7: -1.440,
-    8: -2.780,
-    9: 0.225,
-    10: -1.378,
-    11: -2.467,
-    12: 0.422,
+    0: -2.799,
+    1: -2.779,
+    2: 1.393,
+    3: -0.430,
+    4: -0.025,
+    5: -0.194,
+    6: -0.034,
+    7: 0.059,
+    8: -0.807,
+    9: 0.052,
+    10: 0.562,
+    11: -1.022,
+    12: 1.949,
 }
 
 MOTOR_LABELS = {

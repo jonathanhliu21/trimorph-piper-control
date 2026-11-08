@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from data_collection.collection.hand_common import (
     XC330_M181_T_MODEL_NUMBER,
+    XC330_M288_T_MODEL_NUMBER,
     XL330_M077_T_MODEL_NUMBER,
     is_compatible_dynamixel_model,
     load_follower_config,
@@ -32,6 +33,13 @@ class _Hand:
 
 
 class VerifyConnectedHandTests(unittest.TestCase):
+    def test_accepts_xc330_m288_on_any_joint(self):
+        for motor_id in _Hand.motor_ids:
+            with self.subTest(motor_id=motor_id):
+                responses = {i: XL330_M077_T_MODEL_NUMBER for i in _Hand.motor_ids}
+                responses[motor_id] = XC330_M288_T_MODEL_NUMBER
+                verify_connected_hand(_Hand(responses), role="test")
+
     def test_accepts_all_expected_motors(self):
         verify_connected_hand(_Hand({motor_id: 1190 for motor_id in range(13)}), role="test")
 

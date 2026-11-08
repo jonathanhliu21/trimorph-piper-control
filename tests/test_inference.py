@@ -93,6 +93,54 @@ class InferenceTests(unittest.TestCase):
         camera.queue.tryGet.side_effect = AssertionError('preview must not consume frames when hidden')
         camera.preview()
 
+    def test_video_records_without_policy_reads_and_releases_on_close(self):
+        camera = OakCamera.__new__(OakCamera)
+        camera.cv2, camera.pipeline, camera.queue = Mock(), Mock(), Mock()
+        camera.flip, camera.window, camera.fps = 'horizontal', None, 30
+        camera.record_thread, camera.record_error = None, None
+        camera.record_stop = threading.Event()
+        camera.delivered_frame = None
+        frame = np.zeros((4, 6, 3), np.uint8)
+        flipped = np.full_like(frame, 7)
+        camera.latest_frame = (frame, 0, 0)
+        camera.flip_frame = Mock(return_value=flipped)
+        packet = Mock()
+        packet.getCvFrame.return_value = frame
+        recorded = threading.Event()
+        writer = camera.cv2.VideoWriter.return_value
+        writer.isOpened.return_value = True
+        writer.write.side_effect = lambda bgr: recorded.set()
+        # First poll drains the old queue before starting recording.
+        packets = iter([None, packet])
+        camera.queue.tryGet.side_effect = lambda: next(packets, None)
+        with tempfile.TemporaryDirectory() as directory:
+            camera.start_recording(Path(directory) / 'wrist.mp4')
+            try:
+                self.assertTrue(recorded.wait(2), 'recording must run without policy reads')
+                self.assertIs(camera.newest_bgr(), flipped)
+                self.assertIsNone(camera.newest_bgr())
+            finally:
+                camera.close()
+        writer.write.assert_called_once_with(flipped)
+        writer.release.assert_called_once()
+        camera.pipeline.stop.assert_called_once()
+        self.assertFalse(camera.record_thread.is_alive())
+
+    def test_video_writer_open_failure_and_fake_validation(self):
+        args = parse_args(['--predictor', 'localhost', '--record-video', '--no-log'])
+        self.assertTrue(args.record_video)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(['--predictor', 'localhost', '--record-video', '--fake'])
+        camera = OakCamera.__new__(OakCamera)
+        camera.cv2, camera.fps = Mock(), 30
+        camera.latest_frame = (np.zeros((4, 6, 3), np.uint8), 0, 0)
+        camera.newest_bgr = Mock()
+        writer = camera.cv2.VideoWriter.return_value
+        writer.isOpened.return_value = False
+        with tempfile.TemporaryDirectory() as directory, self.assertRaisesRegex(RuntimeError, 'video writer'):
+            camera.start_recording(Path(directory) / 'wrist.mp4')
+        writer.release.assert_called_once()
+
     def test_start_move_ramps_to_named_start_before_policy_speed(self):
         for extra, name in (([], config.DEFAULT_EXECUTOR_START), (['--start-home', 'quest_0'], 'quest_0')):
             args = parse_args(['--predictor', 'localhost', '--piper-speed', '40',

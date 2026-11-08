@@ -7,8 +7,9 @@ from typing import Sequence
 
 XL330_M077_T_MODEL_NUMBER = 1190
 XC330_M181_T_MODEL_NUMBER = 1230
+XC330_M288_T_MODEL_NUMBER = 1240
 MIXED_HAND_MODEL_NUMBERS = frozenset(
-    (XL330_M077_T_MODEL_NUMBER, XC330_M181_T_MODEL_NUMBER)
+    (XL330_M077_T_MODEL_NUMBER, XC330_M181_T_MODEL_NUMBER, XC330_M288_T_MODEL_NUMBER)
 )
 
 
@@ -17,8 +18,8 @@ def is_compatible_dynamixel_model(
 ) -> bool:
     """Return whether a responding motor is compatible with the configured model.
 
-    XL330-M077-T and XC330-M181-T motors may be mixed on the same hand. Other
-    models must continue to match the model selected by the YAML configuration.
+    XL330-M077-T, XC330-M181-T, and XC330-M288-T motors may be mixed on any
+    joint. Other models must match the model selected by the YAML configuration.
     """
 
     return model_number == expected_model_number or (

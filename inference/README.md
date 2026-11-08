@@ -85,6 +85,12 @@ same start's median demo hand pose, `HAND_START_POSITIONS_RAD`; a hand that is n
 within 0.05 rad after 5 s only prints a warning. `--no-hand-start` moves only the arm. `--show`
 opens a live wrist-camera window (flipped like the policy input); it freezes
 while waiting for the predictor in synchronous mode, and q/Esc stops the executor.
+Add `--record-video` to save `wrist.mp4` in the run folder under
+`output/executor_runs/` (or `--log-root`). Recording starts after the initial
+robot start move, uses the same flipped view as the policy at `--cam-fps`, and
+continues through inference waits and pedal pauses without needing `--show`.
+The video is finalized on shutdown, including Ctrl-C. It also works with
+`--no-log`, which saves only the video; `--fake` does not support recording.
 The arm is driven in joint space by default (`--arm-control joint`,
 `inference/executor/joint_control.py`): each policy pose is solved by local IK
 from the previous joint target and sent with `move_j`. The IK is exact except

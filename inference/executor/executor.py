@@ -410,6 +410,11 @@ class OakCamera:
         self.flip = args.cam_flip
         self.timeout = args.camera_timeout
         self.latest_frame = None
+        self.fps = args.cam_fps
+        self.record_thread = None
+        self.record_error = None
+        self.record_stop = threading.Event()
+        self.delivered_frame = None
         self.window = "Wrist camera (policy input; q/Esc stops)" if args.show else None
         dai = import_depthai()
         require_depthai_device(dai)
@@ -431,6 +436,13 @@ class OakCamera:
 
     def newest_bgr(self):
         """Newest queued frame, flipped like collection, or None if none is queued."""
+        if getattr(self, "record_thread", None) is not None:
+            self.check_recording()
+            latest = self.latest_frame
+            if latest is None or latest is self.delivered_frame:
+                return None
+            self.delivered_frame = latest
+            return latest[0]
         packet = self.queue.tryGet()
         if packet is None:
             return None
@@ -446,6 +458,44 @@ class OakCamera:
         bgr = self.flip_frame(self.cv2, bgr, self.flip)
         self.latest_frame = (bgr, time.time(), time.monotonic())
         return bgr
+
+    def start_recording(self, path):
+        """Own camera acquisition on a worker so inference waits cannot pause video."""
+        self.newest_bgr()  # Discard frames queued during the robot's start move.
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        height, width = self.latest_frame[0].shape[:2]
+        writer = self.cv2.VideoWriter(str(path), self.cv2.VideoWriter_fourcc(*defaults.VIDEO_CODEC),
+                                      self.fps, (width, height))
+        if not writer.isOpened():
+            writer.release()
+            raise RuntimeError(f"Could not open wrist video writer: {path}")
+
+        def record():
+            try:
+                while not self.record_stop.is_set():
+                    packet = self.queue.tryGet()
+                    if packet is None:
+                        self.record_stop.wait(0.002)
+                        continue
+                    bgr = packet.getCvFrame()
+                    if bgr is None:
+                        continue
+                    bgr = self.flip_frame(self.cv2, bgr, self.flip)
+                    self.latest_frame = (bgr, time.time(), time.monotonic())
+                    writer.write(bgr)
+            except Exception as exc:
+                self.record_error = exc
+            finally:
+                writer.release()
+
+        self.record_thread = threading.Thread(target=record, name="wrist-video", daemon=True)
+        self.record_thread.start()
+        print(f"Recording wrist video to {path}", flush=True)
+
+    def check_recording(self):
+        if getattr(self, "record_error", None) is not None:
+            raise RuntimeError("Wrist video recording failed") from self.record_error
 
     def read_available(self):
         """Nonblocking async observation, including frames consumed by preview()."""
@@ -478,12 +528,18 @@ class OakCamera:
 
     def preview(self):
         """Refresh the window between actions; the policy only sees read() frames."""
+        self.check_recording()
         if self.window:
             bgr = self.newest_bgr()
             if bgr is not None:
                 self.show(bgr)
 
     def close(self):
+        if getattr(self, "record_thread", None) is not None:
+            self.record_stop.set()
+            self.record_thread.join()
+            if self.record_error is not None:
+                print(f"WARNING: wrist video recording failed: {self.record_error!r}", flush=True)
         if self.window:
             self.cv2.destroyAllWindows()
         self.pipeline.stop()
@@ -1275,11 +1331,15 @@ def parse_args(argv=None):
                         f"(default dataset: {DEFAULT_TRAJ_DATASET.name})")
     p.add_argument("--show", action="store_true",
                    help="Show the wrist camera live while executing; q/Esc stops like Ctrl-C")
+    p.add_argument("--record-video", action="store_true",
+                   help="Record the flipped wrist view to wrist.mp4 in the run folder, including inference waits and pedal pauses")
     p.add_argument("--log-root", type=Path, default=DEFAULT_RUN_LOG_ROOT,
                    help="Save each run's Piper feedback (200 Hz), commands, and chunks under here "
                         "(default: %(default)s)")
     p.add_argument("--no-log", action="store_true", help="Do not save the run log")
     args = p.parse_args(argv)
+    if args.record_video and args.fake:
+        p.error("--record-video requires the real wrist camera; remove --fake")
     if args.execute_steps < 0:
         p.error("--execute-steps must be nonnegative (0 uses the whole chunk)")
     if not np.isfinite(args.inference_latency_ms) or args.inference_latency_ms < 0:
@@ -1342,6 +1402,9 @@ def main():
             view.update()
         camera = FakeCamera() if args.fake else OakCamera(args)
         robot = FakeRobot() if args.fake else RobotIO(args)
+        if args.record_video:
+            directory = log.directory if log is not None else RunLog(args.log_root).directory
+            camera.start_recording(directory / "wrist.mp4")
         (run_rtc if args.rtc else run)(args, robot, camera, sock, pedal, view, log)
     except KeyboardInterrupt:
         print("Stopped")
