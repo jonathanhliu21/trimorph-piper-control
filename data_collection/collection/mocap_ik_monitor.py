@@ -45,10 +45,12 @@ class IKResult:
 
 
 class MocapIKChecker:
-    """Bounded local IK seeded by the last valid solution, with replay pose checks."""
+    """Bounded local IK with replay checks; calibration=None takes Piper flange poses."""
 
     def __init__(self, calibration, seed_deg, *, model=None):
-        self.transform = vicon_to_piper(calibration)
+        # None accepts flange poses already expressed in Piper base coordinates.
+        self.transform = ((np.eye(3), np.zeros(3), np.eye(3), np.zeros(3))
+                          if calibration is None else vicon_to_piper(calibration))
         if any(not np.isfinite(value).all() for value in self.transform):
             raise ValueError('Vicon calibration contains nonfinite values')
         self.fk, self.bounds = piper_model() if model is None else model

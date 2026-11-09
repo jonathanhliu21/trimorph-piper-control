@@ -17,6 +17,7 @@ import json
 from pathlib import Path
 import sys
 import time
+import warnings
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,6 +38,20 @@ class Limits:
     min_jacobian_sigma: float = 0.005
     max_hand_step_rad: float = 10000000.0
     max_hand_speed_rad_s: float = 100000.0
+    warn_margins: bool = False
+    warn_motion_limits: bool = False
+
+
+class AdvisoryLimitWarning(UserWarning):
+    """A configured proximity margin was entered, without exceeding physical bounds."""
+
+
+def motion_limit(message, limits, error_type=ValueError):
+    """Make configured motion thresholds advisory for explicitly selected arm-only replay."""
+    if limits.warn_motion_limits:
+        warnings.warn(message, AdvisoryLimitWarning)
+    else:
+        raise error_type(message)
 
 
 def finite_array(value, columns, name):
@@ -196,13 +211,13 @@ def validate_joint_plan(times, joints, hand, seed, bounds, fk, *, relative=False
         i,j = np.argwhere(steps > np.radians(limits.max_joint_step_deg))[0]
         source = 'measured/seed start' if i == 0 else f'saved frame {i-1}'
         before = seed[j] if i == 0 else joints[i-1,j]
-        raise ValueError(f'Saved plan joint jump exceeds limit, including initial target: '
+        motion_limit(f'Saved plan joint jump exceeds limit, including initial target: '
                          f'J{j+1}, {source} -> saved frame {i}, '
                          f'{np.degrees(before):.3f} -> {np.degrees(joints[i,j]):.3f} deg '
-                         f'(jump {np.degrees(steps[i,j]):.3f} deg > {limits.max_joint_step_deg:g} deg)')
+                         f'(jump {np.degrees(steps[i,j]):.3f} deg > {limits.max_joint_step_deg:g} deg)', limits)
     if len(times) > 1:
         if np.any(steps[1:]/np.diff(times)[:,None] > np.radians(limits.max_joint_speed_deg_s)):
-            raise ValueError('Saved plan joint speed exceeds limit')
+            motion_limit('Saved plan joint speed exceeds limit', limits)
         if np.any(np.abs(np.diff(hand, axis=0)) > limits.max_hand_step_rad):
             raise ValueError('Saved plan hand position jump exceeds limit')
         if np.any(np.abs(np.diff(hand, axis=0))/np.diff(times)[:,None] > limits.max_hand_speed_rad_s):
@@ -220,10 +235,10 @@ def validate_joint_plan(times, joints, hand, seed, bounds, fk, *, relative=False
     initial = fk(seed)
     all_poses = np.vstack([np.r_[initial[:3], Rotation.from_euler('xyz', initial[3:]).as_rotvec()], poses])
     if np.any(np.linalg.norm(np.diff(all_poses[:,:3], axis=0), axis=1) > limits.max_position_step_m):
-        raise ValueError('Saved plan Cartesian position jump exceeds limit')
+        motion_limit('Saved plan Cartesian position jump exceeds limit', limits)
     rotations = Rotation.from_rotvec(all_poses[:,3:])
     if np.any(np.degrees((rotations[1:]*rotations[:-1].inv()).magnitude()) > limits.max_rotation_step_deg):
-        raise ValueError('Saved plan Cartesian rotation jump exceeds limit')
+        motion_limit('Saved plan Cartesian rotation jump exceeds limit', limits)
     return dict(times=times, joints=joints, hand=hand.copy(), poses=poses,
                 jacobian_sigma=np.array(sigmas))
 
@@ -258,6 +273,8 @@ def check_joints(q, bounds, fk, limits, *, check_jacobian=True):
     margin = np.radians(limits.joint_margin_deg)
     lower, upper = bounds[:, 0] + margin, bounds[:, 1] - margin
     invalid = np.flatnonzero((q < lower) | (q > upper))
+    if limits.warn_margins and np.any((q < bounds[:, 0]) | (q > bounds[:, 1])):
+        raise ValueError('Physical joint limit violated; advisory mode does not permit out-of-bounds joints')
     if len(invalid):
         detail = '; '.join(
             f'J{j+1}={np.degrees(q[j]):.3f} deg, allowed '
@@ -265,14 +282,23 @@ def check_joints(q, bounds, fk, limits, *, check_jacobian=True):
             f'(bounds [{np.degrees(bounds[j,0]):.3f}, {np.degrees(bounds[j,1]):.3f}], '
             f'margin {limits.joint_margin_deg:g} deg)'
             for j in invalid)
-        raise ValueError(f'Joint limit or configured joint margin violated: {detail}')
+        if limits.warn_margins:
+            warnings.warn('Joint margin entered; physical joint bounds remain enforced', AdvisoryLimitWarning)
+        else:
+            raise ValueError(f'Joint limit or configured joint margin violated: {detail}')
     if abs(q[4]) < np.radians(limits.wrist_margin_deg):
-        raise ValueError('Wrist singularity margin violated: |J5| too small')
+        if limits.warn_margins:
+            warnings.warn('Wrist singularity proximity: |J5| below configured margin', AdvisoryLimitWarning)
+        else:
+            raise ValueError('Wrist singularity margin violated: |J5| too small')
     if not check_jacobian:
         return float('nan')
     sigma = float(np.linalg.svd(jacobian(fk, q), compute_uv=False)[-1])
     if sigma < limits.min_jacobian_sigma:
-        raise ValueError(f'Near-singular Jacobian: minimum singular value {sigma:.6g}')
+        if limits.warn_margins:
+            warnings.warn('Near-singular Jacobian: minimum singular value below configured threshold', AdvisoryLimitWarning)
+        else:
+            raise ValueError(f'Near-singular Jacobian: minimum singular value {sigma:.6g}')
     return sigma
 
 
@@ -297,10 +323,10 @@ def plan_actions(times, poses, hand, seed, bounds, fk, *, rate_hz=30, playback_s
     angles = np.degrees((rotations[1:] * rotations[:-1].inv()).magnitude())
     if np.any(distances > limits.max_position_step_m):
         i = int(np.argmax(distances))
-        raise ValueError(f'Source contains excessive Cartesian position jump at row {i+1}: {distances[i]*100:.2f} cm')
+        motion_limit(f'Source contains excessive Cartesian position jump at row {i+1}: {distances[i]*100:.2f} cm', limits)
     if np.any(angles > limits.max_rotation_step_deg):
         i = int(np.argmax(angles))
-        raise ValueError(f'Source contains excessive Cartesian rotation jump at row {i+1}: {angles[i]:.2f} deg')
+        motion_limit(f'Source contains excessive Cartesian rotation jump at row {i+1}: {angles[i]:.2f} deg', limits)
     hand_steps = np.abs(np.diff(hand, axis=0))
     if np.any(hand_steps > limits.max_hand_step_rad):
         i, motor = np.unravel_index(hand_steps.argmax(), hand_steps.shape)
@@ -322,7 +348,7 @@ def plan_actions(times, poses, hand, seed, bounds, fk, *, rate_hz=30, playback_s
                              'Reduce --playback-speed and recheck; joint/pose checks still apply.')
     target_rotations = rotations if len(times) == 1 else Slerp(times, rotations)(source)
     joints, sigmas = [], []
-    margin = np.radians(limits.joint_margin_deg)
+    margin = 0. if limits.warn_margins else np.radians(limits.joint_margin_deg)
     lower, upper = bounds[:, 0] + margin, bounds[:, 1] - margin
     for i, (position, rotation) in enumerate(zip(xyz, target_rotations)):
         def residual(candidate):
@@ -347,7 +373,7 @@ def plan_actions(times, poses, hand, seed, bounds, fk, *, rate_hz=30, playback_s
         if i:
             allowed = min(allowed, np.radians(limits.max_joint_speed_deg_s) * (wall[i] - wall[i-1]))
         if change > allowed and not (i == 0 and preposition):
-            raise ValueError(f'Frame {i}: joint jump/speed exceeds limit ({np.degrees(change):.3f} deg)')
+            motion_limit('Planned joint jump/speed exceeds configured threshold', limits)
         # Test the commanded joint-space segment, including J5 zero crossings.
         sigma = min(check_joints(q + alpha * (solution.x - q), bounds, fk, limits,
                                 check_jacobian=not skip_validation)
@@ -381,6 +407,31 @@ def prepend_preposition(plan, seed, bounds, fk, limits, *, rate_hz=30, skip_vali
     return {key: np.concatenate((approach[key][:-1],
                                 value + duration if key == 'times' else value))
             for key, value in plan.items()}
+
+
+def read_controller_joint_limits(robot, joint, *, attempts=3):
+    """Retry read-only limit queries and preserve the actual failing SDK values."""
+    detail = 'no response'
+    for attempt in range(1, attempts+1):
+        feedback = robot.get_joint_angle_vel_limits(joint, timeout=1, min_interval=0)
+        if feedback is None:
+            detail = 'no response'
+        else:
+            raw_low = getattr(feedback.msg, 'min_angle_limit', None)
+            raw_high = getattr(feedback.msg, 'max_angle_limit', None)
+            detail = f'min_angle_limit={raw_low!r}, max_angle_limit={raw_high!r} (SDK units: radians)'
+            try:
+                low, high = float(raw_low), float(raw_high)
+                if np.isfinite([low, high]).all() and low < high:
+                    print(f'Controller J{joint} bounds (deg): [{np.degrees(low):.3f}, {np.degrees(high):.3f}]', flush=True)
+                    return low, high
+            except (TypeError, ValueError):
+                pass
+        print(f'WARNING: controller J{joint} limit query {attempt}/{attempts}: {detail}',
+              file=sys.stderr, flush=True)
+    raise RuntimeError(f'Cannot read valid controller bounds for J{joint} after {attempts} queries: {detail}. '
+                       'This is a controller/SDK limit-response problem, not a trajectory limit violation. '
+                       'No actuators were enabled.')
 
 
 def feedback_details(state):
@@ -445,23 +496,31 @@ def wait_for_fresh_feedback(api, *, timeout_s=2., check_freshness=True):
             time.sleep(min(.01, remaining))
 
 
-def play_plan(plan, api, hand, bounds, fk, limits, *, check_freshness=True):
+def play_plan(plan, api, hand, bounds, fk, limits, *, check_freshness=True, observer=None):
     """Runtime feedback gates. Always uses smooth joint commands, never firmware EEF IK."""
     started = time.monotonic()
+    schedule_slip = 0.
     for i, scheduled in enumerate(plan['times']):
-        remaining = started + scheduled - time.monotonic()
+        remaining = started + schedule_slip + scheduled - time.monotonic()
         if remaining > 0:
             time.sleep(remaining)
         elif i and remaining < -.1:
-            raise RuntimeError('Replay deadline missed by >100 ms; refusing catch-up burst')
+            if limits.warn_motion_limits:
+                warnings.warn('Replay deadline missed by >100 ms; shifting schedule to avoid a catch-up burst', AdvisoryLimitWarning)
+                schedule_slip -= remaining
+            else:
+                raise RuntimeError('Replay deadline missed by >100 ms; refusing catch-up burst')
         if api is not None:
             target = plan['joints'][i]
             measured = read_fresh_joints(api,check_freshness=check_freshness)
             check_joints(measured, bounds, fk, limits)
             check_status(api,check_freshness=check_freshness)
             if np.max(np.abs(target - measured)) > np.radians(limits.max_joint_step_deg):
-                raise RuntimeError('Measured joints too far from next target; replay stopped')
+                motion_limit('Measured joints too far from next target', limits, RuntimeError)
             api.move_joint(target.tolist(), mode='smooth')
+            if observer is not None:
+                plan['runtime_delay_s'] = schedule_slip
+                observer(plan, i, time.monotonic() - started, time.monotonic_ns(), measured)
         if hand is not None:
             hand.set_positions(plan['hand'][i], clip=False)
 
@@ -543,6 +602,10 @@ def parse_args(argv=None):
                    help='Default: 0.2 for .npy source; 1 for a saved .npz plan (already timed)')
     p.add_argument('--max-joint-speed-deg-s', type=float, default=Limits().max_joint_speed_deg_s,
                    help='Maximum planned speed per arm joint in degrees/second (default: 15)')
+    p.add_argument('--warn-margins', action='store_true',
+                   help='Treat joint/wrist/Jacobian proximity margins as warnings; physical bounds and runtime faults remain enforced')
+    p.add_argument('--warn-motion-limits', action='store_true',
+                   help='Arm-only: warn for configured motion thresholds and use controller joint bounds; includes --warn-margins')
     mode = p.add_mutually_exclusive_group()
     mode.add_argument('--execute', action='store_true', help='Enable and replay on actual hand and Piper after planning')
     mode.add_argument('--check-start', action='store_true',
@@ -553,6 +616,8 @@ def parse_args(argv=None):
     p.add_argument('--hand-config', type=Path, default=Path(__file__).resolve().parents[1] / 'config/xl330_test_config.yaml')
     p.add_argument('--hand-port', default='/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTBEO9P0-if00-port0')
     args = p.parse_args(argv)
+    if args.warn_motion_limits and not args.arm_only:
+        p.error('--warn-motion-limits requires --arm-only')
     if not np.isfinite(args.max_joint_speed_deg_s) or args.max_joint_speed_deg_s <= 0:
         p.error('--max-joint-speed-deg-s must be finite and positive')
     if not 1 <= args.piper_speed <= 100:
@@ -568,7 +633,7 @@ def parse_args(argv=None):
     return args
 
 
-def main(argv=None):
+def main(argv=None, *, playback_observer=None):
     args = parse_args(argv)
     if args.skip_feedback_freshness and not args.hand_only:
         print('WARNING: joint/status feedback timestamp-age checks are disabled; '
@@ -590,7 +655,9 @@ def main(argv=None):
     if args.joint_limits_json:
         bounds = np.radians(np.asarray(json.loads(args.joint_limits_json.read_text()), dtype=float))
     planning_bounds = bounds.copy()
-    limits = Limits(max_joint_speed_deg_s=args.max_joint_speed_deg_s)
+    limits = Limits(max_joint_speed_deg_s=args.max_joint_speed_deg_s,
+                    warn_margins=args.warn_margins or args.warn_motion_limits,
+                    warn_motion_limits=args.warn_motion_limits)
     read_start = args.execute or args.check_start or (
         args.start_joints_deg is None and (args.relative or args.preposition or not joint_input))
     api = hand = None
@@ -629,24 +696,22 @@ def main(argv=None):
             stage = 'controller limit queries'
             controller_bounds = np.empty((6, 2))
             for j in range(6):
-                feedback = api.robot.get_joint_angle_vel_limits(j+1, timeout=1, min_interval=0)
-                if feedback is None:
-                    raise RuntimeError(f'Cannot verify controller limits for J{j+1}')
-                low, high = float(feedback.msg.min_angle_limit), float(feedback.msg.max_angle_limit)
-                if not np.isfinite([low, high]).all() or low >= high:
-                    raise RuntimeError('Invalid controller joint limits')
+                low, high = read_controller_joint_limits(api.robot, j+1)
                 controller_bounds[j] = [low, high]
-                bounds[j] = [max(bounds[j, 0], low), min(bounds[j, 1], high)]
+                bounds[j] = ([low, high] if args.warn_motion_limits else
+                             [max(bounds[j, 0], low), min(bounds[j, 1], high)])
             stage = 'startup feedback and configuration checks'
             debug_snapshot(stage)
             seed = read_fresh_joints(api,check_freshness=not args.skip_feedback_freshness)
             check_status(api,check_freshness=not args.skip_feedback_freshness)
-            print('Startup joints and limits (degrees; allowed = planning/controller intersection minus margin):')
+            applied_margin = 0. if limits.warn_margins else limits.joint_margin_deg
+            bounds_label = 'controller bounds; software thresholds advisory' if args.warn_motion_limits else 'planning/controller intersection'
+            print(f'Startup joints and limits (degrees; {bounds_label}; applied margin={applied_margin:g} deg):')
             for j in range(6):
                 print(f'  J{j+1}: measured={np.degrees(seed[j]):.3f} '
                       f'planning={np.degrees(planning_bounds[j]).round(3).tolist()} '
                       f'controller={np.degrees(controller_bounds[j]).round(3).tolist()} '
-                      f'allowed={[round(float(np.degrees(bounds[j,0])+limits.joint_margin_deg),3), round(float(np.degrees(bounds[j,1])-limits.joint_margin_deg),3)]}',
+                      f'allowed={[round(float(np.degrees(bounds[j,0])+applied_margin),3), round(float(np.degrees(bounds[j,1])-applied_margin),3)]}',
                       flush=True)
             try:
                 check_joints(seed, bounds, fk, limits)
@@ -714,13 +779,17 @@ def main(argv=None):
             else:
                 print('Offline only: no hardware accessed. Bounds are unverified presets/user values.')
             return 0
+        # Prepare optional displays/loggers before fresh-feedback gates and actuator enable.
+        if playback_observer is not None and hasattr(playback_observer, 'prepare'):
+            playback_observer.prepare(plan, fk)
         # A long solve must never be followed by an unverified initial command.
         stage = 'post-planning feedback and start alignment'
         debug_snapshot(stage)
         measured = wait_for_fresh_feedback(api,check_freshness=not args.skip_feedback_freshness)
         if np.max(np.abs(measured - plan['joints'][0])) > np.radians(limits.max_joint_step_deg):
-            raise RuntimeError('Arm is not at the planned start; replan from its current configuration; '
-                               f'measured_minus_target_deg={np.degrees(measured-plan["joints"][0]).round(3).tolist()}')
+            motion_limit('Arm is not at the planned start; '
+                         f'measured_minus_target_deg={np.degrees(measured-plan["joints"][0]).round(3).tolist()}',
+                         limits, RuntimeError)
         check_status(api,check_freshness=not args.skip_feedback_freshness)
         if not args.arm_only:
             hand = prepare_hand(args,fingers,plan['hand'][0])
@@ -732,7 +801,9 @@ def main(argv=None):
             raise RuntimeError('Piper enable failed')
         stage = 'playback'
         debug_snapshot(stage)
-        play_plan(plan, api, hand, bounds, fk, limits,check_freshness=not args.skip_feedback_freshness)
+        observer_options = {} if playback_observer is None else {'observer': playback_observer}
+        play_plan(plan, api, hand, bounds, fk, limits,check_freshness=not args.skip_feedback_freshness,
+                  **observer_options)
         print('Replay complete; arm remains at its last target.')
         return 0
     except BaseException:

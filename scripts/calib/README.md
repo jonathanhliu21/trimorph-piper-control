@@ -331,3 +331,39 @@ checks it within `--start-tolerance-mm`. The playback rate eases in and out over
 faults as teleop. The origin `c` is only valid while the Quest keeps the
 calibration's tracking session; it drifted about 1 cm over 30 min on 2026-10-31.
 Recordings are saved to `output/quest_replay/<session>/rec_NN/`.
+
+### Live Quest versus Piper accuracy and IK viewer
+
+Rigidly mount the Quest controller on the flange, stream Quest UDP poses, and
+move the arm with its built-in drag-teach mode. The viewer passively reads joint
+feedback and computes flange FK; it sends no motion or enable commands.
+
+```bash
+python scripts/quest/visualize_quest_accuracy_piper.py --quest-port 5005 --channel can0
+# Or load a calibration from the sequence fitter:
+python scripts/quest/visualize_quest_accuracy_piper.py --quest-port 5005 \
+  --calibration output/quest_calibration/<run>/calibration_quest/quest_calibration.json
+```
+
+Without a saved calibration, press **C** and spend 20 seconds translating in
+three directions and independently rotating about at least two axes. The live
+fit uses `rigid+refl+offset` plus the independent orientation mapping from
+`get_coord_transform.py`. Use `--save-calibration output/quest_piper_live.json`
+to save successful fits. Live capture does not estimate latency; use
+`--latency-s` if known. Saved fits use their `latency_s` unless overridden.
+
+Orange and cyan trajectories show the Quest-derived flange and measured Piper
+FK, with local XYZ triads, position/angular errors, RMSE and maximum errors. Red
+connecting segments mark errors above `--position-threshold-mm` (10 mm) or
+`--orientation-threshold-deg` (5 degrees). A background local IK check highlights
+failed solves, joint-margin, wrist and Jacobian issues using the collection
+monitor's checks; firmware kinematic warnings are shown separately. This is not
+a collision check, and failed local IK does not establish global infeasibility.
+
+The first synchronized pose anchors both position and orientation. Press **A**
+to re-anchor, **R** to clear statistics, **C** to refit, and **Q/Esc** to exit.
+Drag rotates and scroll/right-drag zooms. Anchor fitting makes the initial error
+zero; subsequent errors measure relative agreement, including FK/model error,
+mount flex and host-receipt timing effects. Validate on new poses after fitting.
+Both streams must be fresh; interpolation never extrapolates or bridges gaps
+longer than `--max-gap` (50 ms). Stop other Quest receivers on the same UDP port.
