@@ -378,7 +378,7 @@ def parse_args() -> argparse.Namespace:
         dest="playback_speed",
         type=float,
         default=1.0,
-        help="Replay time scale for hand and arm together (0 < speed <= 1): 1 = recorded speed, 0.2 = five times slower.",
+        help="Replay time scale for hand and arm together (speed > 0): 1 = recorded speed, 0.5 = half speed, 2 = double speed.",
     )
     parser.add_argument("--hand-only", action="store_true")
     parser.add_argument("--arm-only", action="store_true")
@@ -847,8 +847,8 @@ def main() -> int:
     for name in ("preposition_speed_percent", "replay_speed_percent"):
         if not 0 <= getattr(args, name) <= 100:
             raise ValueError(f"--{name.replace('_', '-')} must be between 0 and 100")
-    if not math.isfinite(args.playback_speed) or not 0 < args.playback_speed <= 1:
-        raise ValueError("--playback-speed / --replay-speed must be greater than 0 and at most 1")
+    if not math.isfinite(args.playback_speed) or args.playback_speed <= 0:
+        raise ValueError("--playback-speed / --replay-speed must be finite and greater than 0")
     if args.hand_only and args.arm_only:
         raise ValueError("--hand-only and --arm-only are mutually exclusive")
     if args.output_current is not None and args.arm_only:

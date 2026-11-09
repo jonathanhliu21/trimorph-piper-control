@@ -199,9 +199,16 @@ class ReplayEpisodeTests(unittest.TestCase):
     def test_playback_speed_cli_defaults_to_recorded_speed_and_is_validated(self):
         with patch("sys.argv", ["replay_episode.py"]):
             self.assertEqual(parse_args().playback_speed, 1.0)
-        for value in ("0", "-0.5", "1.5", "nan"):
-            with self.subTest(value=value), patch("sys.argv", ["replay_episode.py", "--playback-speed", value]), \
+        for value in ("0", "-0.5", "nan", "inf", "-inf"):
+            with self.subTest(value=value), patch("sys.argv", ["replay_episode.py", f"--playback-speed={value}"]), \
                     self.assertRaisesRegex(ValueError, "--playback-speed"):
+                main()
+
+    def test_replay_speed_above_one_passes_validation(self):
+        for option in ("--replay-speed", "--playback-speed"):
+            with self.subTest(option=option), patch("sys.argv", ["replay_episode.py", option, "2"]), \
+                    patch("data_collection.replay_episode.resolve_episode", side_effect=RuntimeError("validated speed")), \
+                    self.assertRaisesRegex(RuntimeError, "validated speed"):
                 main()
 
     def test_action_scale_is_a_module_constant(self):
