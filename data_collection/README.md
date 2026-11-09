@@ -222,6 +222,16 @@ python3 data_collection/replay_episode.py 0 --dataset-root data_collection_0 \
 
 The replay command moves the hardware. For the original raw Piper CSV behavior, add `--read-piper-raw`; this flag is required with `--joint-level`. Missing processed poses produce an error with no silent fallback to raw data. `--hand-only` does not require processed Piper files. The calibration quality and any Quest tracking discontinuities carry through into the converted data; postprocessing does not filter samples or establish workspace reachability.
 
+Use `--replay-speed 0.5` (alias for `--playback-speed 0.5`) to replay both
+hand and arm at half speed. Speed must be greater than zero and at most 1;
+the default is 1 (recorded speed).
+
+Add `--loop` to replay indefinitely until Ctrl-C, or `--loop 3` for three
+plays total. Omitting `--loop` plays once. Each play repeats prepositioning
+unless `--no-preposition` is set. For repeated replay, current, video, and
+mocap output files receive `_loop_0001`, `_loop_0002`, etc. before their
+extension, preserving each play separately.
+
 ### Optional ROS 2 mocap CSV logging
 
 The repository now includes a [ROS 2 workspace](../ros2/README.md). Build it with

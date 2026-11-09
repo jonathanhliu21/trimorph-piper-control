@@ -2,11 +2,11 @@ import csv
 import io
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from dataclasses import make_dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -40,6 +40,88 @@ from scripts.trimorph_api_test.gen_graphs_from_csvs import _load_telemetry
 
 
 class ReplayEpisodeTests(unittest.TestCase):
+    def test_loop_cli(self):
+        for flags, expected in (([], 1), (["--loop"], None), (["--loop", "3"], 3)):
+            with self.subTest(flags=flags), patch("sys.argv", ["replay_episode.py", *flags]):
+                self.assertEqual(parse_args().loop, expected)
+        for value in ("0", "-1", "1.5", "abc"):
+            with self.subTest(value=value), patch("sys.argv", ["replay_episode.py", "--loop", value]), \
+                    redirect_stdout(io.StringIO()), patch("sys.stderr", new_callable=io.StringIO), \
+                    self.assertRaises(SystemExit):
+                parse_args()
+
+    def test_loop_replays_hand_and_cleans_up_on_interrupt(self):
+        for flags, plays, exit_code in (([], 1, 0), (["--loop", "3"], 3, 0), (["--loop"], 3, 130)):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+                episode = Path(directory) / "raw" / "episode_000000"
+                episode.mkdir(parents=True)
+                (episode / "leader_hand.csv").write_text("elapsed_s,pos_0\n0,0\n0.2,0.5\n")
+                hand = MagicMock()
+                hand.motor_ids = (0,)
+                hand.read_pos.return_value = np.array([0.0])
+                hand.clip_positions.side_effect = lambda target: target
+                hand.read_pos_vel_cur.return_value = (np.zeros(1), np.zeros(1), np.zeros(1))
+                constructor = MagicMock(return_value=hand)
+                stack.enter_context(patch.dict("sys.modules", {"midas_hand_api": SimpleNamespace(MidasHand=constructor)}))
+                stack.enter_context(patch("data_collection.replay_episode.build_replay_hand_config"))
+                stack.enter_context(patch("data_collection.replay_episode.verify_connected_hand"))
+                preposition = stack.enter_context(patch("data_collection.replay_episode.move_to_first_pose"))
+                if exit_code == 130:
+                    preposition.side_effect = [None, None, None, KeyboardInterrupt]
+                videos = [MagicMock() for _ in range(plays)]
+                mocaps = [MagicMock() for _ in range(plays)]
+                video_factory = stack.enter_context(patch("data_collection.replay_episode.ReplayVideoRecorder", side_effect=videos))
+                mocap_factory = stack.enter_context(patch("data_collection.replay_episode.ReplayMocapRecorder", side_effect=mocaps))
+                clock = iter(index * 0.05 for index in range(1000))
+                stack.enter_context(patch("data_collection.replay_episode.time.monotonic", side_effect=lambda: next(clock)))
+                stack.enter_context(patch("data_collection.replay_episode.time.sleep"))
+                output = Path(directory) / "current.csv"
+                stack.enter_context(patch("sys.argv", [
+                    "replay_episode.py", "--dataset-root", directory, "--hand-only",
+                    "--output-current", str(output), "--output-video", str(Path(directory) / "video.mp4"),
+                    "--use-mocap", "--mocap-output", str(Path(directory) / "mocap.csv"), *flags,
+                ]))
+                stack.enter_context(redirect_stdout(io.StringIO()))
+                self.assertEqual(main(), exit_code)
+                self.assertEqual(preposition.call_count, plays + (exit_code == 130))
+                self.assertEqual(video_factory.call_count, plays)
+                self.assertEqual(mocap_factory.call_count, plays)
+                for recorder in videos + mocaps:
+                    recorder.start.assert_called_once()
+                    recorder.stop.assert_called_once()
+                constructor.assert_called_once()
+                hand.shutdown.assert_called_once()
+                paths = sorted(Path(directory).glob("current*.csv"))
+                self.assertEqual(len(paths), plays)
+                if flags:
+                    self.assertEqual(paths[0].name, "current_loop_0001.csv")
+                for path in paths:
+                    with path.open() as stream:
+                        times = [float(row["elapsed_s"]) for row in csv.DictReader(stream)]
+                    self.assertTrue(times)
+                    self.assertTrue(all(b > a for a, b in zip(times, times[1:])))
+
+    def test_loop_restarts_arm_replay_and_prepositions_each_time(self):
+        with ExitStack() as stack:
+            stack.enter_context(patch("sys.argv", ["replay_episode.py", "--arm-only", "--loop", "3"]))
+            stack.enter_context(patch("data_collection.replay_episode.resolve_episode", return_value=Path("episode_000000")))
+            stack.enter_context(patch("data_collection.replay_episode.resolve_piper_source", return_value=(Path("piper.csv"), "piper_base")))
+            stream = (np.array([0.0, 0.2]), np.zeros((2, 6)))
+            stack.enter_context(patch("data_collection.replay_episode.load_piper_stream", return_value=stream))
+            api = MagicMock()
+            constructor = MagicMock(return_value=api)
+            stack.enter_context(patch.dict("sys.modules", {"scripts.piper_api.piper_api": SimpleNamespace(PiperAPI=constructor)}))
+            preposition = stack.enter_context(patch("data_collection.replay_episode.move_to_first_pose"))
+            replay = stack.enter_context(patch("data_collection.replay_episode.replay_piper_commands"))
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            self.assertEqual(main(), 0)
+            self.assertEqual(preposition.call_count, 3)
+            self.assertEqual(replay.call_count, 3)
+            starts = [call.args[4] for call in replay.call_args_list]
+            self.assertTrue(all(b > a for a, b in zip(starts, starts[1:])))
+            constructor.assert_called_once()
+            api.disconnect.assert_called_once()
+
     def test_piper_replay_rate_is_independent_of_hand_rate(self):
         with patch("sys.argv", ["replay_episode.py"]):
             args = parse_args()
