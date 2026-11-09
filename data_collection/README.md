@@ -223,8 +223,8 @@ python3 data_collection/replay_episode.py 0 --dataset-root data_collection_0 \
 The replay command moves the hardware. For the original raw Piper CSV behavior, add `--read-piper-raw`; this flag is required with `--joint-level`. Missing processed poses produce an error with no silent fallback to raw data. `--hand-only` does not require processed Piper files. The calibration quality and any Quest tracking discontinuities carry through into the converted data; postprocessing does not filter samples or establish workspace reachability.
 
 Use `--replay-speed 0.5` (alias for `--playback-speed 0.5`) to replay both
-hand and arm at half speed. Speed must be greater than zero and at most 1;
-the default is 1 (recorded speed).
+hand and arm at half speed, or `--replay-speed 2` for double speed. Speed
+must be finite and greater than zero; the default is 1 (recorded speed).
 
 Add `--loop` to replay indefinitely until Ctrl-C, or `--loop 3` for three
 plays total. Omitting `--loop` plays once. Each play repeats prepositioning
