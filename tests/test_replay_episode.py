@@ -51,8 +51,15 @@ class ReplayEpisodeTests(unittest.TestCase):
                 parse_args()
 
     def test_loop_replays_hand_and_cleans_up_on_interrupt(self):
-        for flags, plays, exit_code in (([], 1, 0), (["--loop", "3"], 3, 0), (["--loop"], 3, 130)):
-            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+        cases = (
+            ([], 1, 0, False),
+            (["--loop", "3"], 3, 0, False),
+            (["--loop"], 3, 130, False),
+            (["--loop"], 3, 130, True),
+            (["--loop", "5"], 3, 130, True),
+        )
+        for flags, plays, exit_code, interrupt_during_replay in cases:
+            with self.subTest(flags=flags, interrupt_during_replay=interrupt_during_replay), tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
                 episode = Path(directory) / "raw" / "episode_000000"
                 episode.mkdir(parents=True)
                 (episode / "leader_hand.csv").write_text("elapsed_s,pos_0\n0,0\n0.2,0.5\n")
@@ -66,8 +73,20 @@ class ReplayEpisodeTests(unittest.TestCase):
                 stack.enter_context(patch("data_collection.replay_episode.build_replay_hand_config"))
                 stack.enter_context(patch("data_collection.replay_episode.verify_connected_hand"))
                 preposition = stack.enter_context(patch("data_collection.replay_episode.move_to_first_pose"))
-                if exit_code == 130:
+                if exit_code == 130 and not interrupt_during_replay:
                     preposition.side_effect = [None, None, None, KeyboardInterrupt]
+                if interrupt_during_replay:
+                    original_sample = ReplayCurrentRecorder.sample
+
+                    def sample_then_interrupt(recorder, *args, **kwargs):
+                        original_sample(recorder, *args, **kwargs)
+                        if preposition.call_count == plays:
+                            raise KeyboardInterrupt
+
+                    stack.enter_context(patch.object(
+                        ReplayCurrentRecorder, "sample", autospec=True,
+                        side_effect=sample_then_interrupt,
+                    ))
                 videos = [MagicMock() for _ in range(plays)]
                 mocaps = [MagicMock() for _ in range(plays)]
                 video_factory = stack.enter_context(patch("data_collection.replay_episode.ReplayVideoRecorder", side_effect=videos))
@@ -83,7 +102,7 @@ class ReplayEpisodeTests(unittest.TestCase):
                 ]))
                 stack.enter_context(redirect_stdout(io.StringIO()))
                 self.assertEqual(main(), exit_code)
-                self.assertEqual(preposition.call_count, plays + (exit_code == 130))
+                self.assertEqual(preposition.call_count, plays + (exit_code == 130 and not interrupt_during_replay))
                 self.assertEqual(video_factory.call_count, plays)
                 self.assertEqual(mocap_factory.call_count, plays)
                 for recorder in videos + mocaps:
@@ -100,6 +119,14 @@ class ReplayEpisodeTests(unittest.TestCase):
                         times = [float(row["elapsed_s"]) for row in csv.DictReader(stream)]
                     self.assertTrue(times)
                     self.assertTrue(all(b > a for a, b in zip(times, times[1:])))
+                    # The graph tool must accept both complete and interrupted CSVs.
+                    _, graph_times, graph_motors = _load_telemetry(path)
+                    np.testing.assert_allclose(graph_times, times)
+                    self.assertEqual(set(graph_motors), {0})
+                    if interrupt_during_replay and path == paths[-1]:
+                        self.assertLess(times[-1], 0.2)
+                    else:
+                        self.assertAlmostEqual(times[-1], 0.2)
 
     def test_loop_restarts_arm_replay_and_prepositions_each_time(self):
         with ExitStack() as stack:
