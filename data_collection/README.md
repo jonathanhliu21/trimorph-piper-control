@@ -124,8 +124,8 @@ Raw live poses can warn on jitter that postprocessing later smooths.
 `HandRuntimeConfig` and collection-specific options in
 `HandOnlyCollectionConfig`. Replay tuning lives in `collection/replay_config.py`.
 Standalone calibration and diagnostics are under `scripts/`. Dataset conversion
-is `data_collection/postprocess_dataset.py`, which extends the Piper-only
-`scripts/dataset/postprocess_dataset.py`; [DATASET_SPEC.md](DATASET_SPEC.md)
+uses the single entry point `data_collection/postprocess_dataset.py` for
+Piper, Quest, and mocap recordings; [DATASET_SPEC.md](DATASET_SPEC.md)
 defines the format the diffusion-policy trainer reads. Run all commands from the
 repository root. See [the project README](../README.md) for the full directory map.
 
@@ -204,6 +204,27 @@ python3 data_collection/postprocess_dataset.py data_collection_0 \
 ```
 
 Omit `--episode` to process every complete episode. `-f` / `--force` overwrites existing processed outputs. Omit `--calibration-json` to postprocess an existing raw Piper recording instead. Raw episode files, including `raw/episode_XXXXXX/piper.csv`, are preserved.
+
+For mocap-only recordings with a direct `--tracker mocap` calibration, use:
+
+```bash
+python3 data_collection/postprocess_dataset.py DATASET \
+  --calibration-json CALIBRATION.json \
+  --pose-source mocap --mocap-topic /vicon/Yori/Yori \
+  --absolute --drop-unsynced-frames
+```
+
+This maps absolute flange poses into Piper base coordinates using the saved
+linear mapping, origin, tracked-point offset, and controller mounting rotation.
+Vicon-reference calibrations remain supported. Zero/invalid poses are removed.
+Mocap timing uses monotonic ROS source timestamps aligned to the host receipt
+clock when available, otherwise receipt timestamps. Frame counters are not used
+to reconstruct time because they can pause while real time advances. Default
+20 ms Gaussian smoothing follows median filtering and does not cross gaps over
+50 ms. `--drop-unsynced-frames` excludes camera/hand/pose pairings exceeding
+`--max-sync-error-s`; video and full-rate arrays retain their original indices.
+Receipt-clock fallback can retain network delivery jitter; this does not
+establish ground-truth capture synchronization.
 
 The output layout follows the Midas/Piper postprocessor:
 

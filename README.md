@@ -45,7 +45,7 @@ cp config/hand.example.yaml config/hand.yaml
 | `scripts/thumb_retargeting/` | Paired thumb calibration and model fitting |
 | `scripts/motion_smoothness/` | Deterministic joint motion tests |
 | `scripts/tracking_error/` | Leader/follower tracking diagnostics |
-| `scripts/dataset/` | Piper-only postprocessing base and dataset validation (`data_collection/postprocess_dataset.py` extends it) |
+| `scripts/dataset/` | Dataset audits and visualizers; unified Piper/Quest/mocap preprocessing lives in `data_collection/postprocess_dataset.py` |
 | `scripts/trimorph_api_test/` | Hand bring-up, contact UI, telemetry, and plotting |
 | `scripts/piper_api/`, `scripts/camera/`, `scripts/quest/` | Arm utilities and standalone sensor checks |
 | `tests/` | Automated tests |

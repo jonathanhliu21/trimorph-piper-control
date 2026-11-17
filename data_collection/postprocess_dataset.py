@@ -21,10 +21,12 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -33,11 +35,23 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.calib.get_coord_transform import tracked_point_offset, transform_chunk
-from scripts.dataset import postprocess_dataset as base
+from data_collection.collection.config import (
+    TRIMORPH_MOTOR_IDS as CANONICAL_TRIMORPH_MOTOR_IDS,
+    RAW_EEF_FIELDS,
+)
+
+MAX_SYNC_ERROR_S = 0.010
+TRIM_CAMERA_FRAMES = 1
 
 
 @dataclass(frozen=True)
-class PostprocessConfig(base.PostprocessConfig):
+class PostprocessConfig:
+    dataset_root: Path
+    raw_dir: Path
+    overwrite_processed_files: bool
+    process_only_raw_statuses: set[str]
+    max_sync_error_s: float
+    trim_camera_frames: int
     calibration_json: Path | None = None
     no_camera: bool = False
     piper_start_pose: tuple[float, ...] | None = None
@@ -48,6 +62,330 @@ class PostprocessConfig(base.PostprocessConfig):
     max_start_rotation_deg: float = 45.0
     mocap_smooth_s: float = 0.02
     apply_calibration_latency: bool = False
+    drop_unsynced_frames: bool = False
+
+
+@dataclass(frozen=True)
+class RawEpisode:
+    name: str
+    index: int
+    path: Path
+    camera_path: Path
+    camera_timestamps_path: Path
+    leader_hand_path: Path
+    piper_path: Path
+    metadata_path: Path
+
+
+@dataclass(frozen=True)
+class ProcessedPaths:
+    video_path: Path
+    hand_path: Path
+    eef_path: Path
+    sync_path: Path
+
+
+def validate_config(config: PostprocessConfig) -> None:
+    if config.max_sync_error_s <= 0:
+        raise ValueError("MAX_SYNC_ERROR_S must be greater than 0")
+    if config.trim_camera_frames < 0:
+        raise ValueError("TRIM_CAMERA_FRAMES must be 0 or greater")
+    if not config.raw_dir.exists():
+        raise FileNotFoundError(f"Raw dataset directory does not exist: {config.raw_dir}")
+
+
+def processed_paths(dataset_root: Path, episode_index: int) -> ProcessedPaths:
+    stem = f"{episode_index:06d}"
+    return ProcessedPaths(
+        video_path=dataset_root / "camera" / "mp4_files" / f"{stem}.mp4",
+        hand_path=dataset_root / "processed_encoder_t" / f"{stem}.npy",
+        eef_path=dataset_root / "absolute_action_t" / f"{stem}.npy",
+        sync_path=dataset_root / "syncs" / f"{stem}.npz",
+    )
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def discover_raw_episodes(config: PostprocessConfig) -> list[RawEpisode]:
+    episodes = []
+    for episode_dir in sorted(config.raw_dir.glob("episode_*")):
+        if not episode_dir.is_dir():
+            continue
+        suffix = episode_dir.name.removeprefix("episode_")
+        if not suffix.isdigit():
+            continue
+        leader_hand_path = episode_dir / "leader_hand.csv"
+        legacy_path = episode_dir / "proprioception.csv"
+        if not leader_hand_path.exists() and legacy_path.exists():
+            leader_hand_path = legacy_path
+        episode = RawEpisode(
+            name=episode_dir.name,
+            index=int(suffix),
+            path=episode_dir,
+            camera_path=episode_dir / "camera.mp4",
+            camera_timestamps_path=episode_dir / "camera_timestamps.csv",
+            leader_hand_path=leader_hand_path,
+            piper_path=episode_dir / "piper.csv",
+            metadata_path=episode_dir / "metadata.json",
+        )
+        episodes.append(episode)
+    return episodes
+
+
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="") as csv_file:
+        return list(csv.DictReader(csv_file))
+
+
+def int_column(rows: list[dict[str, str]], field: str, path: Path) -> np.ndarray:
+    try:
+        return np.asarray([int(row[field]) for row in rows], dtype=np.int64)
+    except KeyError as exc:
+        raise ValueError(f"Missing column {field!r} in {path}") from exc
+
+
+def require_monotonic_ns(name: str, timestamps_ns: np.ndarray, path: Path) -> None:
+    if timestamps_ns.ndim != 1 or timestamps_ns.size == 0:
+        raise ValueError(f"{name} timestamps are empty in {path}")
+    if np.any(np.diff(timestamps_ns) < 0):
+        raise ValueError(f"{name} timestamps are not monotonic in {path}")
+
+
+def load_camera_timestamps(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]:
+    rows = read_csv_rows(episode.camera_timestamps_path)
+    if not rows:
+        raise ValueError(f"No camera timestamps in {episode.camera_timestamps_path}")
+    frame_idx = int_column(rows, "frame_idx", episode.camera_timestamps_path)
+    timestamps_ns = int_column(rows, "monotonic_ns", episode.camera_timestamps_path)
+    require_monotonic_ns("camera", timestamps_ns, episode.camera_timestamps_path)
+    return frame_idx, timestamps_ns
+
+
+def load_leader_hand(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]:
+    rows = read_csv_rows(episode.leader_hand_path)
+    if not rows:
+        raise ValueError(f"No TRIMORPH leader-hand samples in {episode.leader_hand_path}")
+    timestamps_ns = int_column(rows, "monotonic_ns", episode.leader_hand_path)
+    require_monotonic_ns("TRIMORPH leader hand", timestamps_ns, episode.leader_hand_path)
+
+    positions = []
+    for row in rows:
+        positions.append([float(row[f"pos_{motor_id}"]) for motor_id in CANONICAL_TRIMORPH_MOTOR_IDS])
+    hand = np.asarray(positions, dtype=np.float32)
+    if hand.ndim != 2 or hand.shape[1] != 13:
+        raise ValueError(f"TRIMORPH array has invalid shape {hand.shape} for {episode.name}")
+    if not np.isfinite(hand).all():
+        raise ValueError(f"TRIMORPH array contains NaN or Inf for {episode.name}")
+    return hand, timestamps_ns
+
+
+def euler_xyz_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    cr = math.cos(roll)
+    sr = math.sin(roll)
+    cp = math.cos(pitch)
+    sp = math.sin(pitch)
+    cy = math.cos(yaw)
+    sy = math.sin(yaw)
+    return np.asarray(
+        [
+            [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+            [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+            [-sp, cp * sr, cp * cr],
+        ],
+        dtype=np.float64,
+    )
+
+
+def matrix_to_rotvec(rotation: np.ndarray) -> np.ndarray:
+    trace = float(np.trace(rotation))
+    cos_angle = max(-1.0, min(1.0, 0.5 * (trace - 1.0)))
+    angle = math.acos(cos_angle)
+    if angle < 1e-12:
+        return 0.5 * np.asarray(
+            [
+                rotation[2, 1] - rotation[1, 2],
+                rotation[0, 2] - rotation[2, 0],
+                rotation[1, 0] - rotation[0, 1],
+            ],
+            dtype=np.float64,
+        )
+    if math.pi - angle < 1e-6:
+        axis = np.sqrt(
+            np.maximum(
+                0.0,
+                np.asarray(
+                    [
+                        (rotation[0, 0] + 1.0) * 0.5,
+                        (rotation[1, 1] + 1.0) * 0.5,
+                        (rotation[2, 2] + 1.0) * 0.5,
+                    ],
+                    dtype=np.float64,
+                ),
+            )
+        )
+        axis[0] = math.copysign(axis[0], rotation[2, 1] - rotation[1, 2])
+        axis[1] = math.copysign(axis[1], rotation[0, 2] - rotation[2, 0])
+        axis[2] = math.copysign(axis[2], rotation[1, 0] - rotation[0, 1])
+        norm = np.linalg.norm(axis)
+        if norm < 1e-12:
+            axis = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+        else:
+            axis = axis / norm
+        return axis * angle
+    axis = np.asarray(
+        [
+            rotation[2, 1] - rotation[1, 2],
+            rotation[0, 2] - rotation[2, 0],
+            rotation[1, 0] - rotation[0, 1],
+        ],
+        dtype=np.float64,
+    )
+    axis /= 2.0 * math.sin(angle)
+    return axis * angle
+
+
+def euler_xyz_to_rotvec(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    return matrix_to_rotvec(euler_xyz_to_matrix(roll, pitch, yaw))
+
+
+def load_piper(episode: RawEpisode) -> tuple[np.ndarray, np.ndarray]:
+    rows = read_csv_rows(episode.piper_path)
+    if not rows:
+        raise ValueError(f"No Piper samples in {episode.piper_path}")
+    timestamps_ns = int_column(rows, "monotonic_ns", episode.piper_path)
+    require_monotonic_ns("Piper", timestamps_ns, episode.piper_path)
+
+    poses = []
+    for row in rows:
+        x, y, z, roll, pitch, yaw = [float(row[field]) for field in RAW_EEF_FIELDS]
+        rotvec = euler_xyz_to_rotvec(roll, pitch, yaw)
+        poses.append([x, y, z, float(rotvec[0]), float(rotvec[1]), float(rotvec[2])])
+    eef = np.asarray(poses, dtype=np.float32)
+    if eef.ndim != 2 or eef.shape[1] != 6:
+        raise ValueError(f"Piper EEF array has invalid shape {eef.shape} for {episode.name}")
+    if not np.isfinite(eef).all():
+        raise ValueError(f"Piper EEF array contains NaN or Inf for {episode.name}")
+    return eef, timestamps_ns
+
+
+def nearest_indices(source_ns: np.ndarray, query_ns: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    if source_ns.size == 0:
+        raise ValueError("Cannot sync against an empty timestamp array")
+    insertion = np.searchsorted(source_ns, query_ns)
+    left = np.clip(insertion - 1, 0, source_ns.size - 1)
+    right = np.clip(insertion, 0, source_ns.size - 1)
+    left_delta = np.abs(query_ns - source_ns[left])
+    right_delta = np.abs(source_ns[right] - query_ns)
+    use_right = right_delta < left_delta
+    indices = np.where(use_right, right, left).astype(np.int64)
+    deltas_ns = np.abs(source_ns[indices] - query_ns)
+    return indices, deltas_ns
+
+
+def make_sync(
+    config: PostprocessConfig,
+    frame_idx: np.ndarray,
+    camera_ns: np.ndarray,
+    hand_ns: np.ndarray,
+    eef_ns: np.ndarray,
+    episode: RawEpisode,
+) -> dict[str, np.ndarray]:
+    encoder_idx, encoder_delta_ns = nearest_indices(hand_ns, camera_ns)
+    pose_idx, pose_delta_ns = nearest_indices(eef_ns, camera_ns)
+    max_delta_ns = int(round(config.max_sync_error_s * 1_000_000_000))
+    valid = (encoder_delta_ns <= max_delta_ns) & (pose_delta_ns <= max_delta_ns)
+
+    if not np.all(valid):
+        bad = int(np.count_nonzero(~valid))
+        worst_hand_s = float(encoder_delta_ns.max() / 1e9)
+        worst_eef_s = float(pose_delta_ns.max() / 1e9)
+        bad_positions = np.where(~valid)[0].tolist()
+        drop = getattr(config, 'drop_unsynced_frames', False)
+        print(
+            f"Warning: {episode.name} has {bad} camera frames outside MAX_SYNC_ERROR_S="
+            f"{config.max_sync_error_s:.3f}; positions={bad_positions}; "
+            f"worst hand={worst_hand_s:.6f}s, worst eef={worst_eef_s:.6f}s; "
+            + ('dropping unsynchronized frames.' if drop else 'keeping best-effort sync.')
+        )
+        if drop:
+            frame_idx, encoder_idx, pose_idx = frame_idx[valid], encoder_idx[valid], pose_idx[valid]
+
+    if frame_idx.size == 0:
+        raise ValueError(f"No synchronized frames remain for {episode.name}")
+
+    return {
+        "frame_idx": frame_idx.astype(np.int64),
+        "encoder_idx": encoder_idx.astype(np.int64),
+        "pose_idx": pose_idx.astype(np.int64),
+    }
+
+
+def import_cv2():
+    try:
+        import cv2
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Missing OpenCV Python bindings. Install with: python3 -m pip install opencv-python"
+        ) from exc
+    return cv2
+
+
+def validate_processed_dataset(dataset_root: Path) -> None:
+    cv2 = import_cv2()
+    videos = sorted((dataset_root / "camera" / "mp4_files").glob("*.mp4"))
+    hands = sorted((dataset_root / "processed_encoder_t").glob("*.npy"))
+    eefs = sorted((dataset_root / "absolute_action_t").glob("*.npy"))
+    syncs = sorted((dataset_root / "syncs").glob("*.npz"))
+    if not (len(videos) == len(hands) == len(eefs) == len(syncs) > 0):
+        raise ValueError(
+            "Processed folders must contain the same nonzero number of files: "
+            f"videos={len(videos)}, hands={len(hands)}, eefs={len(eefs)}, syncs={len(syncs)}"
+        )
+
+    for video_path, hand_path, eef_path, sync_path in zip(videos, hands, eefs, syncs):
+        if not (
+            video_path.stem == hand_path.stem == eef_path.stem == sync_path.stem
+        ):
+            raise ValueError(
+                "Processed filenames do not align: "
+                f"{video_path.name}, {hand_path.name}, {eef_path.name}, {sync_path.name}"
+            )
+        hand = np.load(hand_path)
+        eef = np.load(eef_path)
+        sync = np.load(sync_path)
+        if hand.ndim != 2 or hand.shape[1] != 13:
+            raise ValueError(f"{hand_path} has invalid shape {hand.shape}")
+        if eef.ndim != 2 or eef.shape[1] != 6:
+            raise ValueError(f"{eef_path} has invalid shape {eef.shape}")
+        if not np.isfinite(hand).all():
+            raise ValueError(f"{hand_path} contains NaN or Inf")
+        if not np.isfinite(eef).all():
+            raise ValueError(f"{eef_path} contains NaN or Inf")
+
+        cap = cv2.VideoCapture(str(video_path))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        if frame_count <= 0:
+            raise ValueError(f"{video_path} has no readable frames")
+
+        for key in ("frame_idx", "encoder_idx", "pose_idx"):
+            if key not in sync:
+                raise ValueError(f"{sync_path} is missing {key!r}")
+        frame_idx = sync["frame_idx"].astype(np.int64)
+        encoder_idx = sync["encoder_idx"].astype(np.int64)
+        pose_idx = sync["pose_idx"].astype(np.int64)
+        if not (frame_idx.ndim == encoder_idx.ndim == pose_idx.ndim == 1):
+            raise ValueError(f"{sync_path} sync arrays must be 1D")
+        if not (len(frame_idx) == len(encoder_idx) == len(pose_idx) > 0):
+            raise ValueError(f"{sync_path} sync arrays must have the same nonzero length")
+        if frame_idx.min() < 0 or frame_idx.max() >= frame_count:
+            raise ValueError(f"{sync_path} has frame_idx out of range")
+        if encoder_idx.min() < 0 or encoder_idx.max() >= len(hand):
+            raise ValueError(f"{sync_path} has encoder_idx out of range")
+        if pose_idx.min() < 0 or pose_idx.max() >= len(eef):
+            raise ValueError(f"{sync_path} has pose_idx out of range")
 
 
 def processed_episode_dir(episode_dir: Path) -> Path:
@@ -84,11 +422,11 @@ def convert_quest(episode, calibration, start_pose=None, absolute=False, max_sta
         raise ValueError("Tracked-point offset calibration and --absolute require --piper-start-pose with the "
                          "actual Piper starting XYZ/roll/pitch/yaw; the correction depends on flange orientation")
     path = episode.path / "quest.csv"
-    rows = base.read_csv_rows(path)
+    rows = read_csv_rows(path)
     if not rows:
         raise ValueError(f"No Quest samples in {path}")
-    stamps = base.int_column(rows, "monotonic_ns", path)
-    base.require_monotonic_ns("Quest", stamps, path)
+    stamps = int_column(rows, "monotonic_ns", path)
+    require_monotonic_ns("Quest", stamps, path)
     if np.any(np.diff(stamps) <= 0):
         raise ValueError(f"Quest timestamps must be strictly increasing in {path}")
     if apply_calibration_latency:
@@ -144,7 +482,7 @@ def replay_rows(episode, rows, stamps, xyz, rotations):
     """Replay CSV rows (XYZ + unwrapped Euler) and the XYZ/rotation-vector action array."""
     # Equivalent continuous Euler representations reduce +/-pi replay discontinuities.
     rpy = np.unwrap(rotations.as_euler("xyz"), axis=0)
-    metadata = base.read_json(episode.metadata_path)
+    metadata = read_json(episode.metadata_path)
     origin = int(metadata["started_monotonic_ns"])
     converted = []
     for i, (raw, stamp, position, angles) in enumerate(zip(rows, stamps, xyz, rpy)):
@@ -152,7 +490,7 @@ def replay_rows(episode, rows, stamps, xyz, rotations):
                    elapsed_s=f"{(int(stamp) - origin) / 1e9:.9f}")
         if "wall_time_s" in raw:
             row["wall_time_s"] = raw["wall_time_s"]
-        row.update({key: float(value) for key, value in zip(base.RAW_EEF_FIELDS, [*position, *angles])})
+        row.update({key: float(value) for key, value in zip(RAW_EEF_FIELDS, [*position, *angles])})
         converted.append(row)
     eef = np.column_stack((xyz, rotations.as_rotvec())).astype(np.float32)
     return converted, eef
@@ -189,6 +527,25 @@ def frame_clock(frames, receipt_ns):
     return (receipt_ns[0] + np.percentile(latency, 5) + predicted).round().astype(np.int64)
 
 
+def mocap_clock(rows, receipt_ns):
+    """Preserve source-clock pauses while removing variable network delivery delay.
+
+    A frame counter can pause while real time advances, so it is not a clock.
+    Align source header times to the host using a low receipt-delay percentile.
+    Legacy streams without usable source timestamps retain their receipt clock.
+    """
+    try:
+        source = np.array([int(row['ros_stamp_sec']) * 1_000_000_000
+                           + int(row['ros_stamp_nanosec']) for row in rows], dtype=np.int64)
+    except (KeyError, TypeError, ValueError):
+        return receipt_ns, 'receipt time'
+    if np.any(source <= 0) or np.any(np.diff(source) <= 0):
+        print('  Warning: unusable mocap source timestamps; preserving receipt time.')
+        return receipt_ns, 'receipt time'
+    offset = int(round(float(np.percentile(receipt_ns - source, 5))))
+    return source + offset, 'ROS source time aligned to host'
+
+
 def smooth_poses(positions, quaternions, sample_s, smooth_s):
     """Remove single-frame spikes (5-sample median) and jitter (Gaussian, sigma smooth_s); 0 = raw.
 
@@ -220,6 +577,23 @@ def vicon_flange_poses(transform, positions, object_rotations):
     return flange_positions, Rotation.from_matrix(r_world @ matrices @ r_body)
 
 
+def calibrated_mocap_poses(calibration, positions, object_rotations):
+    """Absolute flange poses for Vicon-reference or direct mocap calibrations."""
+    if calibration.get('tracker') != 'mocap' or calibration.get('vicon_reference'):
+        return vicon_flange_poses(vicon_to_piper(calibration), positions, object_rotations)
+    from scripts.teleop.quest_replay import calibration_origin
+
+    body = controller_rotation(calibration)
+    if body is None:
+        raise ValueError('Mocap calibration needs orientation.controller_rotation for absolute flange poses')
+    origin, _spread = calibration_origin(calibration)
+    linear = np.asarray(calibration['linear_matrix'], float)
+    world = np.asarray(calibration['orientation']['rotation_matrix'], float)
+    lever = np.asarray(calibration.get('tracked_point_offset', {}).get('vector', (0, 0, 0)), float)
+    rotations = Rotation.from_matrix(world @ object_rotations.as_matrix() @ body.as_matrix())
+    return positions @ linear.T + origin + rotations.apply(lever), rotations
+
+
 def convert_mocap(episode, calibration, start_pose, topic=None, absolute=False, max_start_offset_mm=150.0,
                   max_start_rotation_deg=45.0, smooth_s=0.02):
     """Vicon object poses (mocap.csv) -> Piper flange targets.
@@ -234,7 +608,7 @@ def convert_mocap(episode, calibration, start_pose, topic=None, absolute=False, 
         raise ValueError("Relative mocap conversion requires a Piper start pose (recorded at collection or "
                          "--piper-start-pose); use --absolute to keep the Vicon-observed flange pose instead")
     path = episode.path / "mocap.csv"
-    rows = [row for row in base.read_csv_rows(path) if row.get("message_type") == "vicon_receiver/msg/Position"]
+    rows = [row for row in read_csv_rows(path) if row.get("message_type") == "vicon_receiver/msg/Position"]
     topics = sorted({row["topic"] for row in rows})
     if topic is None:
         if len(topics) != 1:
@@ -254,18 +628,23 @@ def convert_mocap(episode, calibration, start_pose, topic=None, absolute=False, 
     rows, poses, stamps, frames = [row for row, ok in zip(rows, keep) if ok], poses[keep], stamps[keep], frames[keep]
     if len(rows) < 2:
         raise ValueError(f"Fewer than two valid {topic} poses in {path}")
-    if use_frames:
-        stamps = frame_clock(frames, stamps)
-    base.require_monotonic_ns("Mocap", stamps, path)
+    stamps, timing = mocap_clock(rows, stamps)
+    require_monotonic_ns("Mocap", stamps, path)
     if np.any(np.diff(stamps) <= 0):
         raise ValueError(f"Mocap timestamps must be increasing in {path}")
     start = None if start_pose is None else np.asarray(start_pose, dtype=float)
     if start is not None and (start.shape != (6,) or not np.isfinite(start).all()):
         raise ValueError("Piper start pose must be six finite XYZ/roll/pitch/yaw values")
-    positions, quaternions = smooth_poses(poses[:, :3] / 1000.0, poses[:, 3:],  # Vicon millimetres
-                                          float(np.median(np.diff(stamps))) / 1e9, smooth_s)
-    flange_xyz, flange_rotations = vicon_flange_poses(
-        vicon_to_piper(calibration), positions, Rotation.from_quat(quaternions))
+    # Avoid averaging across tracking/delivery gaps. Raw poses remain untouched.
+    positions, quaternions = poses[:, :3].copy() / 1000.0, poses[:, 3:].copy()
+    boundaries = np.r_[0, np.flatnonzero(np.diff(stamps) > 50_000_000) + 1, len(stamps)]
+    for a, b in zip(boundaries[:-1], boundaries[1:]):
+        if b - a < 2:
+            continue
+        positions[a:b], quaternions[a:b] = smooth_poses(
+            positions[a:b], quaternions[a:b], float(np.median(np.diff(stamps[a:b]))) / 1e9, smooth_s)
+    flange_xyz, flange_rotations = calibrated_mocap_poses(
+        calibration, positions, Rotation.from_quat(quaternions))
     start_offset = None
     if absolute:
         xyz, rotations = flange_xyz, flange_rotations
@@ -283,7 +662,7 @@ def convert_mocap(episode, calibration, start_pose, topic=None, absolute=False, 
     steps = 1000 * np.linalg.norm(np.diff(xyz, axis=0), axis=1)
     gaps = np.diff(stamps) / 1e6
     print(f"  {topic}: {len(rows)} valid poses ({np.count_nonzero(~valid)} lost-object samples dropped), "
-          f"timed by {'Vicon frame number' if use_frames else 'receipt time'}; longest gap {gaps.max():.0f} ms, "
+          f"timed by {timing}; longest gap {gaps.max():.0f} ms, "
           f"largest flange step {steps.max():.1f} mm, peak flange speed {np.max(steps / gaps) * 1000:.0f} mm/s")
     converted, eef = replay_rows(episode, rows, stamps, xyz, rotations)
     return converted, eef, stamps, start_offset, topic
@@ -312,7 +691,7 @@ def validate_outputs(out, replay_csv, no_camera):
         raise ValueError(f"Invalid hand array: {out.hand_path}")
     if eef.ndim != 2 or eef.shape[1] != 6 or not np.isfinite(eef).all():
         raise ValueError(f"Invalid XYZ/rotvec array: {out.eef_path}")
-    if len(base.read_csv_rows(replay_csv)) != len(eef):
+    if len(read_csv_rows(replay_csv)) != len(eef):
         raise ValueError("Replay CSV and action array sample counts differ")
     with np.load(out.sync_path, allow_pickle=False) as sync:
         keys = ("encoder_idx", "pose_idx") if no_camera else ("frame_idx", "encoder_idx", "pose_idx")
@@ -323,7 +702,7 @@ def validate_outputs(out, replay_csv, no_camera):
             if sync[key].min() < 0 or sync[key].max() >= length:
                 raise ValueError(f"Sync {key} out of range")
         if not no_camera:
-            cv2 = base.import_cv2()
+            cv2 = import_cv2()
             cap = cv2.VideoCapture(str(out.video_path))
             try:
                 count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -334,11 +713,11 @@ def validate_outputs(out, replay_csv, no_camera):
 
 
 def process_episode(config, episode):
-    metadata = base.read_json(episode.metadata_path)
+    metadata = read_json(episode.metadata_path)
     if config.process_only_raw_statuses and metadata.get("status") not in config.process_only_raw_statuses:
         print(f"Skipping {episode.name}: status={metadata.get('status')!r}")
         return None
-    out = base.processed_paths(config.dataset_root, episode.index)
+    out = processed_paths(config.dataset_root, episode.index)
     processed = processed_episode_dir(episode.path)
     replay_csv = processed / "piper.csv"
     processing_path = processed / "metadata.json"
@@ -349,7 +728,7 @@ def process_episode(config, episode):
         existing = [str(path) for path in outputs if path.exists()]
         if existing:
             raise FileExistsError(f"Outputs already exist; use -f to overwrite: {existing}")
-    hand, hand_ns = base.load_leader_hand(episode)
+    hand, hand_ns = load_leader_hand(episode)
     calibration = None
     start_offset = None
     mocap_topic = None
@@ -357,7 +736,7 @@ def process_episode(config, episode):
     start_pose = config.piper_start_pose or (metadata.get("piper") or {}).get("start_pose")
     self_anchored = False
     if config.calibration_json is not None:
-        calibration = base.read_json(config.calibration_json)
+        calibration = read_json(config.calibration_json)
         # Absolute poses that need no start pose: Vicon, or Quest when the calibration has C.
         self_anchored = config.absolute and (config.pose_source == "mocap"
                                              or controller_rotation(calibration) is not None)
@@ -372,12 +751,12 @@ def process_episode(config, episode):
                 config.apply_calibration_latency)
         pose_frame = "piper_base" if start_pose is not None or self_anchored else "relative_to_episode_start"
     else:
-        eef, eef_ns = base.load_piper(episode)
-        converted = base.read_csv_rows(episode.piper_path)
+        eef, eef_ns = load_piper(episode)
+        converted = read_csv_rows(episode.piper_path)
         pose_frame = "piper_base"
     if config.no_camera:
         # No synthetic camera frames: the hand clock is the synchronization reference.
-        pose_idx, delta = base.nearest_indices(eef_ns, hand_ns)
+        pose_idx, delta = nearest_indices(eef_ns, hand_ns)
         sync = dict(encoder_idx=np.arange(len(hand_ns), dtype=np.int64), pose_idx=pose_idx,
                     monotonic_ns=hand_ns)
         bad = np.count_nonzero(delta > round(config.max_sync_error_s * 1e9))
@@ -385,17 +764,17 @@ def process_episode(config, episode):
             print(f"Warning: {episode.name}: {bad} hand samples exceed sync tolerance; retaining nearest poses.")
         frame_count = 0
     else:
-        frame_idx, camera_ns = base.load_camera_timestamps(episode)
+        frame_idx, camera_ns = load_camera_timestamps(episode)
         trim = config.trim_camera_frames
         if trim and len(frame_idx) > 2 * trim:
             frame_idx, camera_ns = frame_idx[trim:-trim], camera_ns[trim:-trim]
-        sync = base.make_sync(config, frame_idx, camera_ns, hand_ns, eef_ns, episode)
-        frame_count = len(frame_idx)
+        sync = make_sync(config, frame_idx, camera_ns, hand_ns, eef_ns, episode)
+        frame_count = len(sync['frame_idx'])
     sync.update(encoder_monotonic_ns=hand_ns, pose_monotonic_ns=eef_ns,
                 start_pose=episode_start_pose(start_pose, eef, calibration, self_anchored),
                 pose_frame=np.array(pose_frame))
     from_quest = calibration is not None and config.pose_source == "quest"
-    quest_first = base.read_csv_rows(episode.path / "quest.csv")[0] if from_quest else None
+    quest_first = read_csv_rows(episode.path / "quest.csv")[0] if from_quest else None
     processing = dict(
         episode=episode.name, episode_index=episode.index, pose_frame=pose_frame,
         source=("piper.csv" if calibration is None else "quest.csv" if from_quest else "mocap.csv"),
@@ -404,6 +783,10 @@ def process_episode(config, episode):
         action_orientation="rotation vector radians", camera_enabled=not config.no_camera,
         sync_reference="hand" if config.no_camera else "camera",
         max_sync_error_s=config.max_sync_error_s,
+        drop_unsynced_frames=config.drop_unsynced_frames,
+        mocap_timestamp_policy=('source_header_aligned_to_host_else_receipt'
+                                if config.pose_source == 'mocap' and calibration is not None else None),
+        mocap_smooth_s=config.mocap_smooth_s if config.pose_source == 'mocap' else None,
         trim_camera_frames=0 if config.no_camera else config.trim_camera_frames,
         piper_start_pose=list(start_pose) if start_pose is not None else None,
         position_mapping=(("absolute_vicon" if config.pose_source == "mocap" else "absolute_calibration_origin")
@@ -449,7 +832,7 @@ def main():
     parser.add_argument("dataset_root", type=Path, nargs="?", default=Path("data_trimorph"))
     parser.add_argument("--episode", help="Process only this episode index or episode_XXXXXX name")
     parser.add_argument("--calibration-json", "--calibration", type=Path,
-                        help="Quest-to-Piper calibration JSON; omit to process recorded raw Piper poses")
+                        help="Quest/mocap-to-Piper calibration JSON; omit to process recorded raw Piper poses")
     parser.add_argument("--no-camera", action="store_true", help="Skip all camera reads, copies, and validation")
     parser.add_argument("--apply-calibration-latency", action="store_true",
                         help="Shift Quest timestamps by -latency_s from the calibration before syncing")
@@ -469,11 +852,13 @@ def main():
                              "(0 = raw poses, no filtering; default: %(default)s)")
     parser.add_argument("--pose-source", choices=("quest", "mocap"), default="quest",
                         help="Demonstration pose stream: quest.csv, or the calibration's Vicon marker plate in mocap.csv "
-                             "converted to the flange pose (needs a calibration fitted with --reference mocap)")
+                             "converted to the flange pose (direct --tracker mocap or --reference mocap calibration)")
     parser.add_argument("--mocap-topic", help="Vicon pose topic of the tracked hand object, e.g. /vicon/Hand/Hand "
                                               "(required when mocap.csv has several pose topics)")
-    parser.add_argument("--max-sync-error-s", type=float, default=base.MAX_SYNC_ERROR_S)
-    parser.add_argument("--trim-camera-frames", type=int, default=base.TRIM_CAMERA_FRAMES)
+    parser.add_argument("--max-sync-error-s", type=float, default=MAX_SYNC_ERROR_S)
+    parser.add_argument('--drop-unsynced-frames', action='store_true',
+                        help='Exclude camera frames without a hand and pose sample within the sync tolerance')
+    parser.add_argument("--trim-camera-frames", type=int, default=TRIM_CAMERA_FRAMES)
     parser.add_argument("-f", "--force", action="store_true")
     args = parser.parse_args()
     if not np.isfinite(args.max_sync_error_s) or args.max_sync_error_s <= 0:
@@ -497,9 +882,10 @@ def main():
                                args.trim_camera_frames, args.calibration_json.expanduser() if args.calibration_json else None,
                                args.no_camera, tuple(args.piper_start_pose) if args.piper_start_pose is not None else None,
                                args.absolute, args.max_start_offset_mm, args.pose_source, args.mocap_topic,
-                               args.max_start_rotation_deg, args.mocap_smooth_s, args.apply_calibration_latency)
-    base.validate_config(config)
-    episodes = base.discover_raw_episodes(config)
+                               args.max_start_rotation_deg, args.mocap_smooth_s, args.apply_calibration_latency,
+                               args.drop_unsynced_frames)
+    validate_config(config)
+    episodes = discover_raw_episodes(config)
     if args.episode is not None:
         name = f"episode_{int(args.episode):06d}" if args.episode.isdigit() else args.episode
         episodes = [episode for episode in episodes if episode.name == name]
@@ -508,7 +894,7 @@ def main():
         raise ValueError("No matching complete episodes were processed")
     summary_path = root / "processing_summary.json"
     # Preserve summaries for other episodes when processing one episode at a time.
-    previous = base.read_json(summary_path).get("episodes", []) if summary_path.exists() else []
+    previous = read_json(summary_path).get("episodes", []) if summary_path.exists() else []
     merged = {summary["episode"]: summary for summary in previous}
     merged.update({summary["episode"]: summary for summary in summaries})
     summary_path.write_text(json.dumps({"episodes": sorted(merged.values(), key=lambda row: row["index"])}, indent=2) + "\n")

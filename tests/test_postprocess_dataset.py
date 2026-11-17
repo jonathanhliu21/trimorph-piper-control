@@ -45,14 +45,32 @@ class PostprocessTests(unittest.TestCase):
                                                orientation=dict(rotation_matrix=b.tolist()))))
         config = post.PostprocessConfig(root, root / 'raw', False, {'complete'}, .01, 1,
                                         calibration, no_camera, start_pose)
-        raw = post.base.discover_raw_episodes(config)[0]
+        raw = post.discover_raw_episodes(config)[0]
         return config, raw, qxyz, rq, a, b
+
+    def test_unified_cli_processes_raw_piper_without_calibration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, raw, *_ = self.fixture(root)
+            poses = np.array([[.4, -.1, .3, .1, -.2, angle] for angle in [0., .2, 1., 3.14]])
+            stamps = [1_000_000_000 + i * 20_000_000 for i in range(4)]
+            self.write_csv(raw.piper_path, ['monotonic_ns', *post.RAW_EEF_FIELDS],
+                           [dict(monotonic_ns=t, **dict(zip(post.RAW_EEF_FIELDS, p)))
+                            for t, p in zip(stamps, poses)])
+            with patch('sys.argv', ['postprocess_dataset.py', str(root), '--no-camera']):
+                self.assertEqual(post.main(), 0)
+            summary = json.loads((root / 'processing_summary.json').read_text())['episodes'][0]
+            action = np.load(summary['eef'])
+            np.testing.assert_allclose(action[:, :3], poses[:, :3], atol=1e-7)
+            np.testing.assert_allclose(Rotation.from_rotvec(action[:, 3:]).as_matrix(),
+                                       Rotation.from_euler('xyz', poses[:, 3:]).as_matrix(), atol=1e-6)
+            self.assertEqual(json.loads(Path(summary['metadata']).read_text())['source'], 'piper.csv')
 
     def test_quest_no_camera_outputs_and_replay_anchor(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             config, raw, qxyz, rq, a, b = self.fixture(root)
-            with patch.object(post.base, 'import_cv2', side_effect=AssertionError('Camera accessed')):
+            with patch.object(post, 'import_cv2', side_effect=AssertionError('Camera accessed')):
                 summary = post.process_episode(config, raw)
             self.assertEqual(raw.piper_path.read_text(), '')
             self.assertIsNone(summary['video'])
@@ -102,7 +120,7 @@ class PostprocessTests(unittest.TestCase):
                 np.testing.assert_array_equal(sync['pose_monotonic_ns'],
                                               [1_020_000_000, 1_040_000_000, 1_060_000_000, 1_080_000_000])
                 np.testing.assert_array_equal(sync['pose_idx'], [0, 0, 1, 2])
-            rows = post.base.read_csv_rows(Path(summary['piper_csv']))
+            rows = post.read_csv_rows(Path(summary['piper_csv']))
             self.assertEqual(int(rows[0]['monotonic_ns']), 1_020_000_000)
             self.assertAlmostEqual(float(rows[0]['elapsed_s']), .02)
             metadata = json.loads(Path(summary['metadata']).read_text())
@@ -119,7 +137,7 @@ class PostprocessTests(unittest.TestCase):
                            [dict(frame_idx=i, monotonic_ns=1_000_000_000+i*20_000_000) for i in range(4)])
             cv2 = MagicMock()
             cv2.VideoCapture.return_value.get.return_value = 4
-            with patch.object(post.base, 'import_cv2', return_value=cv2):
+            with patch.object(post, 'import_cv2', return_value=cv2):
                 summary = post.process_episode(config, raw)
             self.assertEqual(Path(summary['video']).read_bytes(), b'test video')
             with np.load(summary['sync']) as sync:
@@ -319,6 +337,79 @@ class PostprocessTests(unittest.TestCase):
         self.assertLess(np.ptp(steps), 10_000)  # evenly spaced to within 10 us
         self.assertAlmostEqual(np.median(steps) / 1e6, 3.33, delta=0.2)
         self.assertLessEqual(np.percentile(receipt - clock, 5), 1)  # anchored at the earliest arrivals
+
+    def test_mocap_source_clock_preserves_pauses_and_removes_delivery_bursts(self):
+        source = np.array([10_000_000_000, 10_003_000_000, 10_588_000_000, 10_591_000_000])
+        rows = [dict(ros_stamp_sec=int(t // 1_000_000_000),
+                     ros_stamp_nanosec=int(t % 1_000_000_000)) for t in source]
+        receipt = source + 2_000_000_000 + np.array([0, 20_000_000, 10_000_000, 0])
+        clock, label = post.mocap_clock(rows, receipt)
+        np.testing.assert_array_equal(np.diff(clock), np.diff(source))
+        self.assertEqual(clock[2] - clock[1], 585_000_000)
+        self.assertIn('source', label)
+        fallback, label = post.mocap_clock([{}, {}, {}, {}], receipt)
+        np.testing.assert_array_equal(fallback, receipt)
+        rows[2] = rows[1]  # Invalid source clock must not cause frame-based time compression.
+        fallback, _ = post.mocap_clock(rows, receipt)
+        np.testing.assert_array_equal(fallback, receipt)
+
+    def test_direct_mocap_fit_drops_zeros_and_preserves_absolute_flange_geometry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, raw, *_ = self.fixture(Path(directory))
+            world = Rotation.from_euler('z', 25, degrees=True)
+            body = Rotation.from_euler('x', 15, degrees=True)
+            linear = np.diag([1.1, .9, 1.])
+            origin, lever = np.array([.2, -.1, .05]), np.array([-.05, .01, -.07])
+            cal = dict(tracker='mocap', linear_matrix=linear.tolist(),
+                       recordings=[dict(position_offset=origin.tolist())],
+                       tracked_point_offset=dict(vector=lever.tolist()),
+                       orientation=dict(rotation_matrix=world.as_matrix().tolist(),
+                                        controller_rotation=dict(matrix=body.as_matrix().tolist())))
+            config.calibration_json.write_text(json.dumps(cal))
+            p = np.array([[.5, .1, .8], [.51, .1, .8], [.6, .2, .7], [.61, .2, .7]])
+            rotations = Rotation.from_euler('y', np.array([0, 5, 10, 15])[:, None], degrees=True)
+            stamps = [1_000_000_000, 1_020_000_000, 1_540_000_000, 1_560_000_000]
+            rows = [dict(monotonic_ns=t, frame_number=i, ros_stamp_sec=t // 1_000_000_000,
+                         ros_stamp_nanosec=t % 1_000_000_000, topic='/vicon/Yori/Yori',
+                         message_type='vicon_receiver/msg/Position',
+                         **dict(zip(['x_trans','y_trans','z_trans','x_rot','y_rot','z_rot','w'],
+                                    [*(xyz * 1000), *q])))
+                    for i, (t, xyz, q) in enumerate(zip(stamps, p, rotations.as_quat()))]
+            rows.insert(2, dict(rows[1], monotonic_ns=1_030_000_000, frame_number=1,
+                                x_trans=0, y_trans=0, z_trans=0, x_rot=0, y_rot=0, z_rot=0, w=0))
+            self.write_csv(raw.path / 'mocap.csv', list(rows[0]), rows)
+            config = replace(config, pose_source='mocap', absolute=True, mocap_smooth_s=0)
+            summary = post.process_episode(config, raw)
+            poses = load_piper_stream(Path(summary['piper_csv']))[1]
+            expected_r = world * rotations * body
+            np.testing.assert_allclose(poses[:, :3], p @ linear.T + origin + expected_r.apply(lever), atol=1e-9)
+            np.testing.assert_allclose(Rotation.from_euler('xyz', poses[:, 3:]).as_matrix(),
+                                       expected_r.as_matrix(), atol=1e-9)
+            with np.load(summary['sync']) as sync:
+                np.testing.assert_array_equal(sync['pose_monotonic_ns'], stamps)
+
+            # Strong smoothing must not blend across the half-second pause.
+            kept = [r for r in rows if r['w'] != 0]
+            for i, row in enumerate(kept):
+                row.update(x_trans=500 if i < 2 else 900, y_trans=100, z_trans=800,
+                           x_rot=0, y_rot=0, z_rot=0, w=1)
+            self.write_csv(raw.path / 'mocap.csv', list(rows[0]), rows)
+            summary = post.process_episode(replace(config, mocap_smooth_s=.1,
+                                                    overwrite_processed_files=True), raw)
+            poses = load_piper_stream(Path(summary['piper_csv']))[1]
+            expected_p = np.array([[.5, .1, .8]] * 2 + [[.9, .1, .8]] * 2)
+            np.testing.assert_allclose(poses[:, :3], expected_p @ linear.T + origin
+                                       + (world * body).apply(lever), atol=1e-9)
+
+    def test_strict_sync_excludes_frames_in_pose_gaps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config, raw, *_ = self.fixture(Path(directory))
+            camera = np.array([1_000_000_000, 1_020_000_000, 1_100_000_000, 1_200_000_000])
+            pose = np.array([1_000_000_000, 1_020_000_000, 1_200_000_000])
+            strict = replace(config, drop_unsynced_frames=True)
+            sync = post.make_sync(strict, np.arange(4), camera, camera, pose, raw)
+            np.testing.assert_array_equal(sync['frame_idx'], [0, 1, 3])
+            np.testing.assert_array_equal(sync['pose_idx'], [0, 1, 2])
 
     def test_replay_default_anchors_processed_and_raw_flag_preserves_raw_behavior(self):
         with tempfile.TemporaryDirectory() as directory:

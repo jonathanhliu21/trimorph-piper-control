@@ -21,7 +21,6 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from data_collection import postprocess_dataset as post
-from scripts.dataset import postprocess_dataset as base
 
 
 def stats(values):
@@ -71,10 +70,10 @@ def compare(qt, qxyz, qr, mt, mxyz, mr, shift):
 
 
 def audit_episode(path, calibration):
-    ep = base.RawEpisode(path.name, int(path.name.split("_")[-1]), path,
+    ep = post.RawEpisode(path.name, int(path.name.split("_")[-1]), path,
                          path / "camera.mp4", path / "camera_timestamps.csv",
                          path / "leader_hand.csv", path / "piper.csv", path / "metadata.json")
-    rows = base.read_csv_rows(path / "quest.csv")
+    rows = post.read_csv_rows(path / "quest.csv")
     raw = np.array([[float(row[key]) for key in ("px", "py", "pz", "qx", "qy", "qz", "qw")] for row in rows])
     seq = np.array([int(row["seq"]) for row in rows])
     _, qeef, qns, _ = post.convert_quest(ep, calibration, absolute=True)

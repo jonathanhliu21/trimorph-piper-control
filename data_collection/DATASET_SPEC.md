@@ -30,8 +30,8 @@ and the OAK-1 camera into the next free `data_collection_n` folder
 | Vicon marker plate | defaults, `--mocap-topic /vicon/Yori/Yori`, plus a required start pose (`--piper-start-home`, or `--piper-start-pose` when postprocessing) | `--calibration-json CAL --pose-source mocap --mocap-topic /vicon/Yori/Yori` |
 | Piper drag-teach | `--use-piper` (turns the Quest off) | no calibration |
 
-Convert with `data_collection/postprocess_dataset.py`, which extends the
-Piper-only `scripts/dataset/postprocess_dataset.py`:
+Convert Piper, Quest, or mocap recordings with the single
+`data_collection/postprocess_dataset.py` entry point:
 
 ```bash
 python3 data_collection/postprocess_dataset.py data_collection_0 --calibration-json calibration.json
