@@ -44,6 +44,32 @@ class MocapIKTests(unittest.TestCase):
         np.testing.assert_allclose(q[:3], expected, atol=1e-6)
         self.assertAlmostEqual(q[4], .5, places=6)
 
+    def test_mocap_only_calibration_maps_absolute_position_orientation_and_lever(self):
+        world = Rotation.from_euler('z', 20, degrees=True)
+        body = Rotation.from_euler('x', 10, degrees=True)
+        linear = np.diag([1.1, .9, 1.])
+        origin = np.array([.1, -.1, .05])
+        lever = np.array([.02, 0, 0])
+        cal = dict(tracker='mocap', linear_matrix=linear.tolist(),
+                   recordings=[dict(position_offset=origin.tolist())],
+                   tracked_point_offset=dict(vector=lever.tolist()),
+                   orientation=dict(rotation_matrix=world.as_matrix().tolist(),
+                                    controller_rotation=dict(matrix=body.as_matrix().tolist())))
+        checker = MocapIKChecker(cal, [0, 0, 0, 0, 30, 0],
+                                 model=(lambda q: np.array(q), np.tile([-3., 3.], (6, 1))))
+        sample = self.sample()
+        result = checker.check(sample)
+        self.assertTrue(result.ok, result.detail)
+        q = np.radians(result.joints_deg)
+        expected_rotation = world * Rotation.from_quat(sample.quaternion) * body
+        np.testing.assert_allclose(q[:3], linear @ sample.position + origin + expected_rotation.apply(lever),
+                                   atol=1e-6)
+        np.testing.assert_allclose(Rotation.from_euler('xyz', q[3:]).as_matrix(),
+                                   expected_rotation.as_matrix(), atol=1e-6)
+        del cal['orientation']['controller_rotation']
+        with self.assertRaisesRegex(ValueError, 'absolute flange orientation'):
+            MocapIKChecker(cal, [0, 0, 0, 0, 30, 0])
+
     def test_unreachable_pose_warns_and_keeps_last_valid_seed(self):
         checker = self.checker()
         seed = checker.seed.copy()

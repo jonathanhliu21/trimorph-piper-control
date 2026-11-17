@@ -13,7 +13,7 @@ import numpy as np
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-from data_collection.postprocess_dataset import vicon_flange_poses, vicon_to_piper
+from data_collection.postprocess_dataset import controller_rotation, vicon_flange_poses, vicon_to_piper
 from data_collection.replay_actions import Limits, check_joints, piper_model
 from .config import DEFAULT_EXECUTOR_START, PIPER_START_JOINTS_DEG
 from .tracking_monitor import SIGNAL_TIMEOUT_S, stream_status
@@ -48,9 +48,23 @@ class MocapIKChecker:
     """Bounded local IK with replay checks; calibration=None takes Piper flange poses."""
 
     def __init__(self, calibration, seed_deg, *, model=None):
+        self.mocap_mapping = None
+        if calibration is not None and calibration.get('tracker') == 'mocap' and not calibration.get('vicon_reference'):
+            from scripts.teleop.quest_replay import calibration_origin
+
+            body = controller_rotation(calibration)
+            if body is None:
+                raise ValueError('Mocap IK requires orientation.controller_rotation for absolute flange orientation')
+            origin, _spread = calibration_origin(calibration)
+            self.mocap_mapping = (
+                np.asarray(calibration['linear_matrix'], float), origin,
+                np.asarray(calibration['orientation']['rotation_matrix'], float), body.as_matrix(),
+                np.asarray(calibration.get('tracked_point_offset', {}).get('vector', (0, 0, 0)), float))
+            if any(not np.isfinite(value).all() for value in self.mocap_mapping):
+                raise ValueError('Mocap calibration contains nonfinite values')
         # None accepts flange poses already expressed in Piper base coordinates.
         self.transform = ((np.eye(3), np.zeros(3), np.eye(3), np.zeros(3))
-                          if calibration is None else vicon_to_piper(calibration))
+                          if calibration is None or self.mocap_mapping is not None else vicon_to_piper(calibration))
         if any(not np.isfinite(value).all() for value in self.transform):
             raise ValueError('Vicon calibration contains nonfinite values')
         self.fk, self.bounds = piper_model() if model is None else model
@@ -75,7 +89,13 @@ class MocapIKChecker:
         quaternion = np.asarray(sample.quaternion, float)
         if not np.isfinite(position).all() or not np.isfinite(quaternion).all() or np.linalg.norm(quaternion) < .5:
             return IKResult(sample.monotonic_ns, False, 'Invalid mocap pose')
-        xyz, rotations = vicon_flange_poses(self.transform, position, Rotation.from_quat(quaternion[None, :]))
+        object_rotations = Rotation.from_quat(quaternion[None, :])
+        if self.mocap_mapping is None:
+            xyz, rotations = vicon_flange_poses(self.transform, position, object_rotations)
+        else:
+            linear, origin, world, body, lever = self.mocap_mapping
+            rotations = Rotation.from_matrix(world @ object_rotations.as_matrix() @ body)
+            xyz = position @ linear.T + origin + rotations.apply(lever)
         target, rotation = xyz[0], rotations[0]
 
         def residual(q):

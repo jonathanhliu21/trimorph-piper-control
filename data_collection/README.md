@@ -47,7 +47,7 @@ Omit `--episode-s 30` for the default foot-pedal episode control. The camera, Qu
 
 ### Live tracking monitor
 
-When Quest or mocap is recorded, a `trimorph_tracking` window shows both poses
+When Quest or mocap is recorded, a `trimorph_tracking` window shows enabled poses
 in 3D, with one status box per stream and a REC indicator. A box is green
 (`OK`, with the receive rate) while samples arrive and red otherwise:
 
@@ -60,9 +60,18 @@ in 3D, with one status box per stream and a REC indicator. A box is green
 
 Each stream is drawn relative to its pose when the window opened, with a 10 s
 trail and an XYZ triad for the rotation since then. Without a calibration each
-tracker uses its own axes; `--monitor-calibration calibration.json` maps the
-Quest (`linear_matrix`) and, if present, Vicon (`vicon_reference`) motion to
-Piper base axes. Drag to rotate, right-drag or scroll to zoom, double-click to
+tracker uses its own axes. With `--monitor-calibration calibration.json`, only
+calibrated, enabled trackers are shown in Piper base axes:
+
+- `tracker: quest` (or older files without `tracker`): `linear_matrix` maps Quest.
+- `tracker: mocap`: `linear_matrix` maps Vicon, so Quest is hidden.
+- A `vicon_reference` additionally maps Vicon; a Quest calibration containing it shows both.
+
+For a mocap-only fit, pass the file saved under the run's
+`calibration_mocap/quest_calibration.json`, despite its Quest filename.
+Calibration is loaded at startup; restart collection to change it. Worker flags
+such as `--no-quest` and `--no-mocap` still control recording independently.
+Drag to rotate, right-drag or scroll to zoom, double-click to
 re-center; `q`/Escape stops collection as in the camera view. Disable it with
 `--no-monitor`. The window only displays; it does not change what is recorded.
 
@@ -73,6 +82,17 @@ For a live IK warning window, add these options to your collection command:
 --mocap-ik-calibration output/quest_calibration/20261101_183239_quest_calib/calibration_quest_vicon_ref/quest_calibration.json \
 --mocap-ik-topic /vicon/Yori/Yori
 ```
+
+To share one file between visualizers, use `--calibration CAL.json` instead of
+both calibration flags. It maps the tracking monitor (unless `--no-monitor`)
+and enables IK when mocap is enabled and the file declares `tracker: mocap` or
+contains `vicon_reference`. Quest-only files enable only the tracking view.
+The individual calibration flags override the shared file for their window.
+
+For a mocap-only fit, use the same `calibration_mocap/quest_calibration.json`
+file for `--monitor-calibration` and `--mocap-ik-calibration`. The IK window
+requires the saved absolute orientation (`orientation.controller_rotation`)
+and position offset (directly or in `recordings`).
 
 `trimorph_mocap_ik` maps the selected marker plate to the absolute Piper flange
 pose using the same Vicon world and plate-to-flange transforms as postprocessing.

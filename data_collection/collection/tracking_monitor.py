@@ -3,7 +3,8 @@
 Each stream is drawn relative to its pose when the view started (or was last
 re-centered), so both start at the origin. Displacements are shown in the
 Piper base axes when a calibration provides the mapping (linear_matrix for the
-Quest, vicon_reference for Vicon) and in the tracker's own axes otherwise.
+declared tracker, vicon_reference for Vicon). With a calibration, only calibrated
+trackers are shown; without one, enabled trackers use their own axes.
 Drag to rotate, right-drag or scroll to zoom, double-click to re-center.
 """
 
@@ -95,11 +96,17 @@ def display_frames(calibration: dict | None) -> tuple[DisplayFrame, DisplayFrame
     quest = vicon = native
     if calibration:
         if "linear_matrix" in calibration:
-            quest = DisplayFrame(
+            frame = DisplayFrame(
                 np.asarray(calibration["linear_matrix"], dtype=float),
                 np.asarray(calibration["orientation"]["rotation_matrix"], dtype=float),
                 "Piper axes",
             )
+            # Older Quest calibrations predate the explicit tracker field.
+            tracker = calibration.get("tracker", "quest")
+            if tracker == "quest":
+                quest = frame
+            elif tracker == "mocap":
+                vicon = frame
         reference = calibration.get("vicon_reference") or {}
         if reference:
             world = np.asarray(next(iter(reference.values()))["vicon_to_piper_rotation"], dtype=float)
@@ -185,8 +192,9 @@ class TrackingMonitor:
         self.cv2 = cv2 or import_cv2()
         self.shared, self.recorder, self.window_name = shared, recorder, window_name
         self.width, self.height = size
-        self.show_quest, self.show_vicon = show_quest, show_vicon
         self.quest_frame, self.vicon_frame = display_frames(calibration)
+        self.show_quest = show_quest and (calibration is None or self.quest_frame.label == "Piper axes")
+        self.show_vicon = show_vicon and (calibration is None or self.vicon_frame.label == "Piper axes")
         self.streams: dict[str, _Stream] = {}
         self.yaw, self.pitch, self.scale = math.radians(-35), math.radians(25), 900.0
         self._drag: tuple[int, int, int, float, float, float] | None = None
@@ -264,6 +272,8 @@ class TrackingMonitor:
 
         self._draw_status_bar(image, statuses, now_ns)
         legend = [f"{stream.label}: {stream.frame.label}" for stream, _ in statuses if stream is not None]
+        if not self.show_quest and not self.show_vicon:
+            legend = ["No calibrated trackers enabled"]
         cv2.putText(image, "   ".join(legend), (12, self.height - 34), cv2.FONT_HERSHEY_SIMPLEX,
                     0.45, (200, 200, 200), 1, cv2.LINE_AA)
         cv2.putText(image, "drag: rotate   right-drag/scroll: zoom   double-click: re-center   grid 10 cm",

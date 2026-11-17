@@ -1,4 +1,7 @@
 import unittest
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
@@ -68,7 +71,59 @@ class TrackingMonitorTests(unittest.TestCase):
         import cv2
 
         with patch.object(cv2, "namedWindow"), patch.object(cv2, "setMouseCallback"):
-            return TrackingMonitor(shared, show_quest=True, show_vicon=True, **kwargs)
+            return TrackingMonitor(shared, **(dict(show_quest=True, show_vicon=True) | kwargs))
+
+    def test_calibration_selects_only_calibrated_enabled_trackers(self):
+        mapping = dict(linear_matrix=np.eye(3).tolist(),
+                       orientation=dict(rotation_matrix=np.eye(3).tolist()))
+        reference = {"run": dict(vicon_to_piper_rotation=np.eye(3).tolist())}
+        cases = [
+            (None, True, True),
+            (mapping, True, False),  # Legacy Quest calibration.
+            (dict(mapping, tracker="quest"), True, False),
+            (dict(mapping, tracker="mocap"), False, True),
+            (dict(mapping, tracker="quest", vicon_reference=reference), True, True),
+            (dict(vicon_reference=reference), False, True),
+            ({}, False, False),
+            (dict(mapping, tracker="unknown"), False, False),
+        ]
+        now = 100 * SECOND
+        for calibration, quest, vicon in cases:
+            with self.subTest(calibration=calibration):
+                shared = SharedState()
+                shared.set_tracker_pose(QUEST_TRACKER_NAME, now, (0, 0, 0), (0, 0, 0, 1))
+                shared.set_tracker_pose("/vicon/Yori/Yori", now, (0, 0, 0), (0, 0, 0, 1))
+                monitor = self.make_monitor(shared, calibration=calibration)
+                self.assertEqual((monitor.show_quest, monitor.show_vicon), (quest, vicon))
+                monitor.render(now)
+                expected = ({QUEST_TRACKER_NAME} if quest else set()) | (
+                    {"/vicon/Yori/Yori"} if vicon else set())
+                self.assertEqual(set(monitor.streams), expected)
+
+        monitor = self.make_monitor(SharedState(), calibration=dict(
+            mapping, vicon_reference=reference), show_quest=False, show_vicon=False)
+        self.assertFalse(monitor.show_quest or monitor.show_vicon)
+
+    def test_mocap_only_calibration_maps_vicon_trail_and_rotation(self):
+        shared = SharedState()
+        linear = np.diag([2., 3., 4.])
+        rotation = Rotation.from_euler("z", 90, degrees=True).as_matrix()
+        monitor = self.make_monitor(shared, calibration=dict(
+            tracker="mocap", linear_matrix=linear.tolist(),
+            orientation=dict(rotation_matrix=rotation.tolist())))
+        now = 100 * SECOND
+        topic = "/vicon/Yori/Yori"
+        shared.set_tracker_pose(topic, now, (1, 2, 3), (0, 0, 0, 1))
+        monitor.render(now)
+        turn = Rotation.from_euler("x", 30, degrees=True)
+        shared.set_tracker_pose(topic, now + 1, (1.1, 2.1, 3.1), tuple(turn.as_quat()))
+        monitor.render(now + 1)
+        stream = monitor.streams[topic]
+        np.testing.assert_allclose(stream.pose[0], (0.2, 0.3, 0.4))
+        np.testing.assert_allclose(stream.pose[1], rotation @ turn.as_matrix() @ rotation.T,
+                                   atol=1e-12)
+        self.assertEqual(stream.frame.label, "Piper axes")
+        self.assertEqual(monitor.quest_frame.label, "own axes")
 
     def box_color(self, image, index, boxes):
         width = (image.shape[1] - 130 - 12 * (boxes + 2)) // boxes
@@ -122,6 +177,30 @@ class TrackingMonitorTests(unittest.TestCase):
 
 
 class MonitorCliTests(unittest.TestCase):
+    def test_shared_calibration_selects_windows_and_respects_overrides(self):
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'cal.json'
+            for calibration, ik in [({'tracker': 'mocap'}, True),
+                                    ({'tracker': 'quest'}, False),
+                                    ({'vicon_reference': {'run': {}}}, True)]:
+                path.write_text(json.dumps(calibration))
+                with self.subTest(calibration=calibration), patch(
+                        'sys.argv', ['collect_hand_only.py', '--calibration', str(path)]):
+                    args = parse_args()
+                    self.assertEqual(args.monitor_calibration, path)
+                    self.assertEqual(args.mocap_ik_calibration, path if ik else None)
+            with patch('sys.argv', ['collect_hand_only.py', '--calibration', str(path),
+                                    '--monitor-calibration', 'view.json',
+                                    '--mocap-ik-calibration', 'ik.json']):
+                args = parse_args()
+                self.assertEqual(args.monitor_calibration, Path('view.json'))
+                self.assertEqual(args.mocap_ik_calibration, Path('ik.json'))
+            with patch('sys.argv', ['collect_hand_only.py', '--calibration', str(path),
+                                    '--no-monitor', '--no-mocap']):
+                args = parse_args()
+                self.assertIsNone(args.monitor_calibration)
+                self.assertIsNone(args.mocap_ik_calibration)
+
     def test_monitor_follows_quest_and_mocap_and_can_be_disabled(self):
         with patch("sys.argv", ["collect_hand_only.py"]):
             self.assertTrue(parse_args().show_tracking_monitor)

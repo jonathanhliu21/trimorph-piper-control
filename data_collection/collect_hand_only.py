@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import queue
 import shutil
@@ -163,16 +164,20 @@ def parse_args() -> argparse.Namespace:
             "status boxes (default: on when Quest or mocap is recorded)"
         ),
     )
+    parser.add_argument('--calibration', type=Path,
+                        help='Shared visualizer calibration: map the tracking monitor and enable mocap IK when calibrated. '
+                             'Individual --monitor-calibration and --mocap-ik-calibration options override this file.')
     parser.add_argument(
         "--monitor-calibration",
         type=Path,
         help=(
-            "calibration JSON whose linear_matrix / vicon_reference map the monitor's "
-            "Quest / Vicon motion to Piper axes (default: each tracker's own axes)"
+            "calibration JSON mapping motion to Piper axes; show only enabled trackers "
+            "calibrated by its tracker / linear_matrix or vicon_reference "
+            "(default without calibration: show enabled trackers in their own axes)"
         ),
     )
     parser.add_argument('--mocap-ik-calibration', type=Path,
-                        help='Open a live Piper IK warning window using this Vicon-reference calibration; requires mocap')
+                        help='Open the live Piper IK and episode validation window using a mocap or Vicon-reference calibration; requires mocap')
     parser.add_argument('--mocap-ik-topic', default='/vicon/Yori/Yori',
                         help='Marker plate topic to check for IK (default: /vicon/Yori/Yori)')
     parser.add_argument('--mocap-ik-seed-deg', type=float, nargs=6,
@@ -304,6 +309,7 @@ def parse_args() -> argparse.Namespace:
         "--warmup-time",
         type=float,
         default=DEFAULT_WARMUP_TIME_S,
+        help="Optional startup delay in seconds (default: no warmup).",
     )
     parser.add_argument(
         "--active-motors",
@@ -337,6 +343,18 @@ def parse_args() -> argparse.Namespace:
         args.use_mocap = recording
     if args.mocap_topics and not args.use_mocap:
         parser.error("--mocap-topic requires mocap (remove --no-mocap)")
+    if args.show_tracking_monitor is None:
+        args.show_tracking_monitor = args.use_quest or args.use_mocap
+    if args.calibration is not None:
+        if args.show_tracking_monitor and args.monitor_calibration is None:
+            args.monitor_calibration = args.calibration
+        if args.use_mocap and args.mocap_ik_calibration is None:
+            try:
+                calibration = json.loads(args.calibration.expanduser().read_text())
+            except (OSError, ValueError) as exc:
+                parser.error(f'Cannot load --calibration: {exc}')
+            if calibration.get('tracker') == 'mocap' or calibration.get('vicon_reference'):
+                args.mocap_ik_calibration = args.calibration
     if args.mocap_ik_calibration is not None:
         if not args.use_mocap:
             parser.error('--mocap-ik-calibration requires mocap (remove --no-mocap)')
@@ -346,9 +364,7 @@ def parse_args() -> argparse.Namespace:
             parser.error('--mocap-ik-seed-deg requires six finite values')
         if not math.isfinite(args.mocap_ik_start_tolerance_deg) or args.mocap_ik_start_tolerance_deg <= 0:
             parser.error('--mocap-ik-start-tolerance-deg must be finite and positive')
-    if args.show_tracking_monitor is None:
-        args.show_tracking_monitor = args.use_quest or args.use_mocap
-    elif args.show_tracking_monitor and not (args.use_quest or args.use_mocap):
+    if args.show_tracking_monitor and not (args.use_quest or args.use_mocap):
         parser.error("--monitor requires Quest or mocap")
     if args.monitor_calibration is not None and not args.show_tracking_monitor:
         parser.error("--monitor-calibration requires the tracking monitor")
@@ -709,9 +725,10 @@ def run_hand_only(config: HandOnlyCollectionConfig) -> int:
 
     if config.mode == DATA_COLLECTION_MODE:
         print(f"Saving episodes to {config.dataset_root}")
-        print(f"Warming up for {config.warmup_time}s")
-        time.sleep(config.warmup_time)
-        print("Warmup done, starting data collection...")
+        if config.warmup_time > 0:
+            print(f"Warming up for {config.warmup_time}s")
+            time.sleep(config.warmup_time)
+        print("Starting data collection...")
     elif config.mode != RETARGET_ONLY_MODE:
         raise ValueError(f"Unknown hand-only mode: {config.mode!r}")
 
